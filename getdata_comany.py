@@ -19,6 +19,8 @@ def get_set_stocks():
     driver.get(url)
 
     try:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        
         # คลิก Dropdown เพื่อเปิดตัวเลือก
         print("Attempting to click dropdown...")
         dropdown = WebDriverWait(driver, 10).until(
@@ -27,7 +29,7 @@ def get_set_stocks():
         dropdown.click()
         print("Dropdown clicked successfully!")
 
-        # เลือกตัวเลือก "100"
+        # เลือกตัวเลือก "ทั้งหมด"
         print("Selecting 'ทั้งหมด' option...")
         option_all = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, '//li[contains(., "ทั้งหมด")]'))
@@ -69,40 +71,42 @@ def get_financials_yfinance(ticker):
         print(f"Error fetching financials for {ticker}: {e}")
         return None
 
-def save_financials_to_csv(financials_df, ticker, folder="Financials"):
-    """
-    บันทึกข้อมูลการเงินของหุ้นลงในไฟล์ CSV ในโฟลเดอร์ที่กำหนด
-    
-    Parameters:
-        financials_df (DataFrame): ข้อมูลการเงินของหุ้น
-        ticker (str): ชื่อย่อหุ้น
-        folder (str): ชื่อโฟลเดอร์ที่ต้องการบันทึกไฟล์
-    """
-    try:
-        # ตรวจสอบว่าโฟลเดอร์มีอยู่หรือไม่ หากไม่มีก็สร้างใหม่
-        if not os.path.exists(folder):
-            os.makedirs(folder)
-
-        # กำหนดเส้นทางไฟล์
-        filename = os.path.join(folder, f"{ticker}_Financials.csv")
-        
-        # บันทึกไฟล์ CSV
-        financials_df.to_csv(filename, index=True)
-        print(f"ข้อมูลการเงินของ {ticker} ถูกบันทึกในไฟล์ {filename}")
-    except Exception as e:
-        print(f"เกิดข้อผิดพลาดในการบันทึกไฟล์ของ {ticker}: {e}")
-
-# ฟังก์ชันดึงข้อมูลงบการเงินของหุ้นใน SET
-def fetch_financials_for_set_yfinance():
-    stocks = get_set_stocks()  # ฟังก์ชันที่ดึงรายชื่อหุ้นใน SET (คุณต้องกำหนดเอง)
+# ฟังก์ชันรวมข้อมูลการเงินของหุ้นทั้งหมด
+def fetch_and_save_all_financials():
+    stocks = get_set_stocks()  # ดึงรายชื่อหุ้น
+    all_financials = []  # เก็บข้อมูลทั้งหมด
 
     for ticker in stocks:
         print(f"Fetching financial data for: {ticker}")
         financials_df = get_financials_yfinance(ticker)
         if financials_df is not None:
-            financials_df = financials_df.T  # ทรานสโพสข้อมูลเพื่อให้อ่านง่ายขึ้น
-            save_financials_to_csv(financials_df, ticker)  # บันทึกเป็นไฟล์แยก
+        # ทรานสโพสข้อมูลและเพิ่มคอลัมน์ชื่อหุ้น
+            financials_df = financials_df.T
+            financials_df['Stock'] = ticker
+
+        # รีเซ็ตและจัดเรียงคอลัมน์
+            financials_df = financials_df.reset_index().rename(columns={'index': 'Date'})
+            financials_df = financials_df[['Stock', 'Date'] + [col for col in financials_df.columns if col not in ['Stock', 'Date']]]
+
+        # เพิ่ม DataFrame เข้ารายการ
+            all_financials.append(financials_df)
+
+
+    # รวมข้อมูลทั้งหมดใน DataFrame เดียว
+    if all_financials:
+        combined_financials = pd.concat(all_financials, ignore_index=True)
+
+        # สร้างโฟลเดอร์สำหรับบันทึก
+        folder = "Financials"
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+
+        # บันทึกข้อมูลลงไฟล์ CSV
+        filename = os.path.join(folder, "Combined_Financials.csv")
+        combined_financials.to_csv(filename, index=False)
+        print(f"ข้อมูลการเงินทั้งหมดถูกบันทึกในไฟล์ {filename}")
+    else:
+        print("ไม่พบข้อมูลสำหรับบันทึก")
 
 if __name__ == "__main__":
-    fetch_financials_for_set_yfinance()
-
+    fetch_and_save_all_financials()
