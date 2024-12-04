@@ -193,7 +193,7 @@ if __name__ == "__main__":
     stock_list = get_set_stocks()
 
     # ไฟล์ CSV ที่เก็บข้อมูลหุ้นทั้งหมด
-    output_file_csv = os.path.join(folder_name, "SET_Stock_History_All.csv")
+    output_file_csv = os.path.join(folder_name, "SET_Stock_History_10Y.csv")
 
     # ตรวจสอบว่าไฟล์ข้อมูลเก่ามีอยู่หรือไม่
     if os.path.exists(output_file_csv):
