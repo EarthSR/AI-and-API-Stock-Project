@@ -7,6 +7,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium import webdriver
 import yfinance as yf
+from datetime import datetime, timedelta
 
 
 
@@ -67,6 +68,9 @@ def get_set_stocks():
 # ฟังก์ชันดึงข้อมูลหุ้นตามรายชื่อ พร้อมช่วงเวลา
 def fetch_stock_data(stock_list, start_date=None, end_date=None):
     stock_data = []
+    
+    end_date = pd.to_datetime('today')
+    start_date = end_date - pd.DateOffset(years=10)
 
     for symbol in stock_list:
         try:
