@@ -27,12 +27,12 @@ driver.refresh()
 # รอให้หน้าเว็บโหลด
 time.sleep(3)
 
-folder_path = "imf_news_data"
+folder_path = "../News_all/imf_news_data"
 if not os.path.exists(folder_path):
     os.makedirs(folder_path)
 
 # ดำเนินการสำหรับปีที่กำหนด
-start_year = 2023
+start_year = 2024
 end_year = 2024
 
 # Get today's date to compare later
@@ -129,10 +129,10 @@ for year in range(start_year, end_year + 1):
 
 # บันทึกข้อมูลลงใน CSV หลังจบลูปทั้งหมด
 df = pd.DataFrame(news_list)
-df.to_csv(os.path.join(folder_path, 'imf_news_links_2023-2024.csv'), index=False, encoding='utf-8')
+df.to_csv(os.path.join(folder_path, 'imf_news_links_2024.csv'), index=False, encoding='utf-8')
 print("Data saved to imf_news.csv")
 
-df = pd.read_csv(os.path.join(folder_path, 'imf_news_links_2023-2024.csv'))
+df = pd.read_csv(os.path.join(folder_path, 'imf_news_links_2024.csv'))
 # List to store full article data
 full_news_list = []
 
@@ -168,7 +168,7 @@ for index, row in df.iterrows():
 
 # Save full article data to CSV
 full_df = pd.DataFrame(full_news_list)
-full_df.to_csv(os.path.join(folder_path, 'imf_news_full_2022-2024.csv'), index=False, encoding='utf-8')
-print("Full article data saved to imf_news_full.csv")
+full_df.to_csv(os.path.join(folder_path, 'imf_news_full_2024.csv'), index=False, encoding='utf-8')
+print("Full article data saved to imf_news_full_2024.csv")
 # ปิด WebDriver
 driver.quit()
