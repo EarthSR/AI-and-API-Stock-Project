@@ -71,7 +71,7 @@ try:
         if len(results) % 100 == 0:
             temp_df = pd.DataFrame(results, columns=['title', 'description', 'Sentiment', 'Confidence'])
             if not os.path.exists(partial_results_path):
-                temp_df.to_csv(partial_results_path, index=False)
+                temp_df.to_csv(partial_results_path, index=False, header=True)
             else:
                 temp_df.to_csv(partial_results_path, mode='a', index=False, header=False)
             results = []
@@ -80,7 +80,7 @@ except Exception as e:
 finally:
     if results:
         temp_df = pd.DataFrame(results, columns=['title', 'description', 'Sentiment', 'Confidence'])
-        temp_df.to_csv(partial_results_path, mode='a', index=False, header=False)
+        temp_df.to_csv(partial_results_path, mode='a', index=False, header=True)
     print(f"Saved partial results to {partial_results_path}.")
 
 # รวมผลลัพธ์สุดท้าย
