@@ -69,7 +69,7 @@ try:
                         input_data.iloc[start_idx + idx]['description'],
                         sentiment, confidence))
         if len(results) % 100 == 0:
-            temp_df = pd.DataFrame(results, columns=['title', 'description', 'Sentiment', 'Confidence'])
+            temp_df = pd.DataFrame(results, columns=['title', 'description', 'date','Sentiment', 'Confidence'])
             if not os.path.exists(partial_results_path):
                 temp_df.to_csv(partial_results_path, index=False, header=True)
             else:
@@ -79,7 +79,7 @@ except Exception as e:
     print(f"Error occurred: {e}")
 finally:
     if results:
-        temp_df = pd.DataFrame(results, columns=['title', 'description', 'Sentiment', 'Confidence'])
+        temp_df = pd.DataFrame(results, columns=['title', 'description', 'date','Sentiment', 'Confidence'])
         temp_df.to_csv(partial_results_path, mode='a', index=False, header=True)
     print(f"Saved partial results to {partial_results_path}.")
 
