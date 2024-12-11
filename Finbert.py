@@ -4,10 +4,10 @@ from tqdm import tqdm
 import os
 import torch
 
+# ตรวจสอบ GPU
 print("CUDA Available:", torch.cuda.is_available())
 print("CUDA Version:", torch.version.cuda)
 print("Device Name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU")
-# ตรวจสอบ GPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
@@ -51,7 +51,7 @@ financial_news = input_data.apply(
 partial_results_path = "partial_results_gpu.csv"
 if not os.path.exists(partial_results_path):
     print("No partial results found. Starting fresh.")
-    processed_data = pd.DataFrame(columns=['title', 'description', 'Sentiment', 'Confidence'])
+    processed_data = pd.DataFrame(columns=['title', 'description', 'date', 'Sentiment', 'Confidence'])
     start_idx = 0
 else:
     processed_data = pd.read_csv(partial_results_path)
@@ -67,9 +67,10 @@ try:
         sentiment, confidence = aggregate_results(chunk_results)
         results.append((input_data.iloc[start_idx + idx]['title'],
                         input_data.iloc[start_idx + idx]['description'],
+                        input_data.iloc[start_idx + idx]['date'],  # เพิ่ม date
                         sentiment, confidence))
         if len(results) % 100 == 0:
-            temp_df = pd.DataFrame(results, columns=['title', 'description', 'date','Sentiment', 'Confidence'])
+            temp_df = pd.DataFrame(results, columns=['title', 'description', 'date', 'Sentiment', 'Confidence'])
             if not os.path.exists(partial_results_path):
                 temp_df.to_csv(partial_results_path, index=False, header=True)
             else:
@@ -79,8 +80,8 @@ except Exception as e:
     print(f"Error occurred: {e}")
 finally:
     if results:
-        temp_df = pd.DataFrame(results, columns=['title', 'description', 'date','Sentiment', 'Confidence'])
-        temp_df.to_csv(partial_results_path, mode='a', index=False, header=True)
+        temp_df = pd.DataFrame(results, columns=['title', 'description', 'date', 'Sentiment', 'Confidence'])
+        temp_df.to_csv(partial_results_path, mode='a', index=False, header=False)
     print(f"Saved partial results to {partial_results_path}.")
 
 # รวมผลลัพธ์สุดท้าย
