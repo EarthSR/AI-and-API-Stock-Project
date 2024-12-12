@@ -131,26 +131,38 @@ df.fillna(0, inplace=True)
 feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence',
                    'RSI', 'SMA_10', 'SMA_200', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
 
-# แบ่งข้อมูล train/test ตามเวลา (80% train, 20% test)
-split_index = int(len(df) * 0.8)
-train_df = df.iloc[:split_index].copy()
-test_df = df.iloc[split_index:].copy()
+# แบ่งข้อมูลเป็น Train, Validation, Test
+# ตัวอย่าง: 70% Train, 15% Validation, 15% Test
+train_ratio = 0.7
+val_ratio = 0.15
+test_ratio = 0.15
 
-# สร้าง target โดยเลื่อน 1 วัน
+train_end = int(len(df)*train_ratio)
+val_end = int(len(df)*(train_ratio+val_ratio))
+
+train_df = df.iloc[:train_end].copy()
+val_df = df.iloc[train_end:val_end].copy()
+test_df = df.iloc[val_end:].copy()
+
+# สร้าง target โดยเลื่อน 1 วันสำหรับแต่ละชุด
 train_targets_price = train_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
-test_targets_price = test_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
-
-# ตัดท้าย data frame ให้สอดคล้องกับ shift(-1)
 train_df = train_df.iloc[:-1]
+
+val_targets_price = val_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
+val_df = val_df.iloc[:-1]
+
+test_targets_price = test_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
 test_df = test_df.iloc[:-1]
 
-# สร้าง scaler จากข้อมูลเทรน
+# สร้าง scaler จากข้อมูลเทรนเท่านั้น
 scaler_features = MinMaxScaler()
 train_features = scaler_features.fit_transform(train_df[feature_columns])
+val_features = scaler_features.transform(val_df[feature_columns])
 test_features = scaler_features.transform(test_df[feature_columns])
 
 scaler_target = MinMaxScaler()
 train_targets_scaled = scaler_target.fit_transform(train_targets_price)
+val_targets_scaled = scaler_target.transform(val_targets_price)
 test_targets_scaled = scaler_target.transform(test_targets_price)
 
 joblib.dump(scaler_features, 'scaler_features.pkl')  # บันทึก scaler ฟีเจอร์
@@ -158,6 +170,7 @@ joblib.dump(scaler_target, 'scaler_target.pkl')     # บันทึก scaler 
 
 seq_length = 10
 X_price_train, y_price_train = create_sequences(train_features, train_targets_scaled, seq_length)
+X_price_val, y_price_val = create_sequences(val_features, val_targets_scaled, seq_length)
 X_price_test, y_price_test = create_sequences(test_features, test_targets_scaled, seq_length)
 
 # สร้างและฝึกโมเดล
@@ -171,9 +184,9 @@ logging.info("เริ่มฝึกโมเดลสำหรับราค
 
 history = price_model.fit(
     X_price_train, y_price_train,
-    epochs=50,              
+    epochs=50,
     batch_size=32,
-    validation_data=(X_price_test, y_price_test),
+    validation_data=(X_price_val, y_price_val),
     verbose=1,
     shuffle=False,          # เนื่องจากเป็น Time Series
     callbacks=[early_stopping, checkpoint, reduce_lr]
@@ -186,7 +199,7 @@ logging.info("บันทึกโมเดลราคาหุ้นรวม
 # พล็อตผลการฝึก
 plot_training_history(history)
 
-# ประเมินโมเดลด้วยชุดทดสอบ
+# ประเมินโมเดลด้วยชุดทดสอบ (Test Set)
 y_pred_scaled = price_model.predict(X_price_test)
 y_pred = scaler_target.inverse_transform(y_pred_scaled)
 y_true = scaler_target.inverse_transform(y_price_test)
