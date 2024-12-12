@@ -50,9 +50,12 @@ features_scaled = scaler.fit_transform(features)
 def create_sequences(features, targets, seq_length=10):
     X, y = [], []
     for i in range(len(features) - seq_length):
-        X.append(features[i:i + seq_length])
-        y.append(targets[i + seq_length])
+        # แก้ไขเงื่อนไขเพื่อตรวจสอบให้แน่ใจว่า i + seq_length ไม่เกินขนาดของ targets
+        if i + seq_length < len(targets):  
+            X.append(features[i:i + seq_length])
+            y.append(targets[i + seq_length])
     return np.array(X), np.array(y)
+
 
 # ข้อมูลสำหรับโมเดลรวม
 targets_price = df['Close'].shift(-1).dropna().values
