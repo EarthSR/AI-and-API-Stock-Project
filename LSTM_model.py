@@ -116,17 +116,19 @@ ticker_encoder = LabelEncoder()
 df['Ticker_ID'] = ticker_encoder.fit_transform(df['Ticker'])
 num_tickers = len(ticker_encoder.classes_)
 
-# แบ่งข้อมูลเป็น Train, Validation, Test
+# แบ่งข้อมูล Train/Val/Test ตามเวลา
+# สมมติเราแบ่งตาม quantile ของวันที่ หรือกำหนดโดยตรง
 train_ratio = 0.7
 val_ratio = 0.15
 test_ratio = 0.15
 
-train_end = int(len(df)*train_ratio)
-val_end = int(len(df)*(train_ratio+val_ratio))
+sorted_dates = df['Date'].sort_values().unique()
+train_cutoff = sorted_dates[int(len(sorted_dates)*train_ratio)]
+val_cutoff = sorted_dates[int(len(sorted_dates)*(train_ratio+val_ratio))]
 
-train_df = df.iloc[:train_end].copy()
-val_df = df.iloc[train_end:val_end].copy()
-test_df = df.iloc[val_end:].copy()
+train_df = df[df['Date'] <= train_cutoff].copy()
+val_df = df[(df['Date'] > train_cutoff) & (df['Date'] <= val_cutoff)].copy()
+test_df = df[df['Date'] > val_cutoff].copy()
 
 # สร้าง target โดย shift(-1)
 train_targets_price = train_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
@@ -172,7 +174,6 @@ for t_id in range(num_tickers):
     df_train_ticker = train_df[train_df['Ticker_ID'] == t_id]
     if len(df_train_ticker) > seq_length:
         indices = df_train_ticker.index
-        # map indices ใน train_df มาใน array ของ train_features_scaled
         mask_train = np.isin(train_df.index, indices)
         f_t = train_features_scaled[mask_train]
         t_t = train_ticker_id[mask_train]
@@ -229,18 +230,15 @@ if len(X_test_list) > 0:
 else:
     X_price_test, X_ticker_test, y_price_test = np.array([]), np.array([]), np.array([])
 
-# สร้างโมเดล LSTM + Embedding สำหรับ Ticker
 num_feature = train_features_scaled.shape[1]  # จำนวน features ทางเทคนิค
 
-# Input สำหรับ features
+# สร้างโมเดล LSTM + Embedding
 features_input = Input(shape=(seq_length, num_feature), name='features_input')
-# Input สำหรับ ticker_id
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
 embedding_dim = 32
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
-# รวม features และ ticker embedding เข้าด้วยกัน
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
 x = LSTM(64, return_sequences=True)(merged)
@@ -273,7 +271,6 @@ logging.info("บันทึกโมเดลราคาหุ้นรวม
 
 plot_training_history(history)
 
-# ประเมินโมเดลด้วยชุดทดสอบ
 y_pred_scaled = model.predict([X_price_test, X_ticker_test])
 y_pred = scaler_target.inverse_transform(y_pred_scaled)
 y_true = scaler_target.inverse_transform(y_price_test)
@@ -291,6 +288,5 @@ print(f"RMSE: {rmse}")
 print(f"R² Score: {r2}")
 print(f"MAPE: {mape}")
 
-# พล็อตการทำนายเทียบกับค่าจริง (ตัวอย่างพล็อตบางส่วน)
 plot_predictions(y_true[:200], y_pred[:200], "Test Set")
 plot_residuals(y_true, y_pred, "Test Set")
