@@ -1,183 +1,42 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import GRU, Dense, Dropout
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score, mean_absolute_percentage_error
 import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping  # เพิ่ม EarlyStopping เพื่อหยุดการฝึกหากไม่มีการปรับปรุง
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 import matplotlib.pyplot as plt
+import joblib
+import ta
+import logging
 
-# ตรวจสอบ GPU
-physical_devices = tf.config.list_physical_devices('GPU')
-if len(physical_devices) > 0:
-    tf.config.set_visible_devices(physical_devices[0], 'GPU')
-    tf.config.set_memory_growth(physical_devices[0], True)  # ใช้ set_memory_growth
-    print("Using GPU:", physical_devices[0])
-else:
-    print("GPU not found, using CPU")
+# ตั้งค่า logging
+logging.basicConfig(level=logging.INFO, filename='training.log', filemode='a',
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-# โหลดข้อมูลหุ้น
-df_stock = pd.read_csv("NDQ_Stock_History_10Y.csv", parse_dates=["Date"]).sort_values(by="Date")
-
-# โหลดข้อมูลข่าว
-df_news = pd.read_csv("news_with_sentiment_gpu.csv")
-df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
-df_news['Confidence'] = df_news['Confidence'] / 100
-
-# รวมข้อมูล
-df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
-
-# เพิ่มฟีเจอร์ใหม่
-df['Change'] = df['Close'] - df['Open']
-df['Change (%)'] = (df['Change'] / df['Open']) * 100
-df['RSI'] = df['Close'].diff().apply(lambda x: max(x, 0)).rolling(window=14).mean() / \
-            df['Close'].diff().apply(lambda x: -min(x, 0)).rolling(window=14).mean()
-df['SMA_50'] = df['Close'].rolling(window=50).mean()
-df['SMA_200'] = df['Close'].rolling(window=200).mean()
-df['MACD'] = df['Close'].ewm(span=12, adjust=False).mean() - df['Close'].ewm(span=26, adjust=False).mean()
-df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-
-# Normalize features
-scaler = MinMaxScaler()
-
-# ใช้ scaler.fit_transform กับข้อมูลทั้งหมด
-features = df[['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence',
-               'RSI', 'SMA_50', 'SMA_200', 'MACD', 'MACD_Signal']].fillna(0).values
-features_scaled = scaler.fit_transform(features)  # ใช้ fit_transform กับข้อมูลทั้งหมดเพื่อลดเวลาในการคำนวณ
-
-# สร้างลำดับข้อมูล
+# ฟังก์ชันสร้างลำดับข้อมูล
 def create_sequences(features, targets, seq_length=10):
     X, y = [], []
     for i in range(len(features) - seq_length):
-        if i + seq_length < len(targets):  
+        if i + seq_length < len(targets):
             X.append(features[i:i + seq_length])
             y.append(targets[i + seq_length])
     return np.array(X), np.array(y)
 
-# ข้อมูลสำหรับโมเดลราคาหุ้น
-targets_price = df['Close'].shift(-1).dropna().values
-X_price, y_price = create_sequences(features_scaled, targets_price)
-
-# Train-test split สำหรับโมเดลราคาหุ้น
-X_price_train, X_price_test, y_price_train, y_price_test = train_test_split(X_price, y_price, test_size=0.2, random_state=42)
-
-# โมเดลราคาหุ้นรวม
-price_model = Sequential([
-    GRU(64, activation='relu', return_sequences=True, input_shape=(X_price.shape[1], X_price.shape[2])),
-    Dropout(0.2),
-    GRU(32, activation='relu'),
-    Dropout(0.2),
-    Dense(1)
-])
-price_model.compile(optimizer='adam', loss='mse', metrics=['mae'])
-
-# ใช้ EarlyStopping เพื่อหยุดการฝึกหากไม่มีการปรับปรุง
-early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-
-# ฝึกโมเดล
-price_model.fit(X_price_train, y_price_train, epochs=50, batch_size=32, validation_data=(X_price_test, y_price_test), verbose=1, callbacks=[early_stopping])
-
-# บันทึกโมเดล
-price_model.save('price_prediction_gru_model.h5')
-
-
-# โมเดลแยกสำหรับหุ้น Top 5
-top_5_tickers = ['AAPL', 'MSFT', 'AMZN', 'GOOGL', 'FB']
-for ticker in top_5_tickers:
-    ticker_data = df[df['Ticker'] == ticker]
-
-    # ตรวจสอบว่าไม่มีข้อมูลหรือไม่
-    if ticker_data.empty:
-        print(f"Warning: No data found for ticker {ticker}. Skipping this ticker.")
-        continue
-
-    # เตรียมฟีเจอร์สำหรับการ normalization
-    ticker_features = ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)',
-                                   'Sentiment', 'Confidence', 'RSI', 'SMA_50', 'SMA_200',
-                                   'MACD', 'MACD_Signal']].fillna(0).values
-    
-    # ตรวจสอบว่ามีข้อมูลหลังจากการกรองหรือไม่
-    if len(ticker_features) == 0:
-        print(f"Warning: No features available for ticker {ticker}. Skipping this ticker.")
-        continue
-    
-    # ใช้ scaler.transform เพื่อแปลงข้อมูลของแต่ละหุ้นโดยใช้ scaler เดิม
-    features_scaled = scaler.transform(ticker_features)  # ใช้ transform แทน fit_transform เพื่อใช้ scaler เดิม
-
-    # สร้างข้อมูลเป้าหมาย (targets)
-    ticker_targets_price = ticker_data['Close'].shift(-1).dropna().values
-    
-    # ตรวจสอบว่ามีเป้าหมายหรือไม่
-    if len(ticker_targets_price) == 0:
-        print(f"Warning: No target price available for ticker {ticker}. Skipping this ticker.")
-        continue
-    
-    # สร้างลำดับข้อมูล
-    X_ticker_price, y_ticker_price = create_sequences(features_scaled, ticker_targets_price)
-    
-    # ตรวจสอบขนาดข้อมูลที่เตรียมไว้
-    if X_ticker_price.shape[0] == 0:
-        print(f"Warning: No sequences available for ticker {ticker}. Skipping this ticker.")
-        continue
-    
-    X_price_train, X_price_test, y_price_train, y_price_test = train_test_split(X_ticker_price, y_ticker_price, test_size=0.2, random_state=42)
-    
-    # ฝึกฝนโมเดลราคาหุ้น
-    price_model = Sequential([
-        GRU(64, activation='relu', return_sequences=True, input_shape=(X_ticker_price.shape[1], X_ticker_price.shape[2])),
+# ฟังก์ชันสร้างโมเดล GRU
+def build_gru_model(input_shape):
+    model = Sequential([
+        GRU(64, return_sequences=True, input_shape=input_shape),
         Dropout(0.2),
-        GRU(32, activation='relu'),
+        GRU(32),
         Dropout(0.2),
         Dense(1)
     ])
-    price_model.compile(optimizer='adam', loss='mse', metrics=['mae'])
-    
-    # ใช้ EarlyStopping เพื่อหยุดการฝึกหากไม่มีการปรับปรุง
-    early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-    
-    history = price_model.fit(X_price_train, y_price_train, epochs=50, batch_size=32, validation_data=(X_price_test, y_price_test), verbose=1, callbacks=[early_stopping])
-    
-    # ตรวจสอบ training history
-    print(f"History for {ticker} training:")
-    print(history.history)
-    
-    # บันทึกโมเดล
-    price_model.save(f'price_model_{ticker}.h5')
-    
-    # ทำนายราคาหุ้น
-    ticker_price_predictions = price_model.predict(X_price_test)
-    
-    # คำนวณความแตกต่างระหว่างราคาทำนายและราคาปิดเมื่อวาน
-    price_diff = ticker_price_predictions.flatten() - y_price_test
+    model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+    return model
 
-    # หากราคาทำนายสูงกว่าราคาปิดเมื่อวาน ถือว่าเป็น "ขึ้น" (1) มิฉะนั้น "ลง" (0)
-    trend_prediction = (price_diff > 0).astype(int)
-
-    # ประเมินผลราคาหุ้น
-    price_mae = mean_absolute_error(y_price_test, ticker_price_predictions)
-    price_mse = mean_squared_error(y_price_test, ticker_price_predictions)
-    price_rmse = np.sqrt(price_mse)
-    price_r2 = r2_score(y_price_test, ticker_price_predictions)
-    
-    # คำนวณ Accuracy แบบช่วง ±5% ของค่าจริง
-    price_tolerance = 0.05  # กำหนดช่วงที่ยอมรับได้ ±5%
-    price_within_tolerance = np.abs((ticker_price_predictions.flatten() - y_price_test) / y_price_test) <= price_tolerance
-    price_accuracy = np.mean(price_within_tolerance) * 100  # เปลี่ยนเป็นเปอร์เซ็นต์
-    
-    # ประเมินแนวโน้ม (Trend) Accuracy
-    trend_accuracy = accuracy_score(y_price_test, trend_prediction)
-
-    print(f"Stock: {ticker}")
-    print(f"Price Accuracy: {price_accuracy:.2f}%")
-    print(f"Price MAE: {price_mae:.2f}, MSE: {price_mse:.2f}, RMSE: {price_rmse:.2f}, R2: {price_r2:.2f}")
-    print(f"Trend Accuracy: {trend_accuracy:.2f}")
-    print("="*50)
-
-import matplotlib.pyplot as plt
-
-# หลังจากการฝึกโมเดลแล้ว ให้สร้างกราฟการฝึกฝน
+# ฟังก์ชันการพล็อตการฝึกฝน
 def plot_training_history(history):
     # กราฟ Loss
     plt.figure(figsize=(12, 6))
@@ -201,22 +60,273 @@ def plot_training_history(history):
     plt.tight_layout()
     plt.show()
 
-# เรียกใช้ฟังก์ชันนี้หลังจากการฝึกฝนโมเดล
-plot_training_history(history)
-
-# เพิ่มกราฟทำนายกับค่าจริง
-def plot_predictions(y_true, y_pred):
+# ฟังก์ชันการพล็อตการทำนาย
+def plot_predictions(y_true, y_pred, ticker):
     plt.figure(figsize=(10, 6))
     plt.plot(y_true, label='True Values', color='blue')
     plt.plot(y_pred, label='Predicted Values', color='red', alpha=0.7)
-    plt.title('True vs Predicted Prices')
+    plt.title(f'True vs Predicted Prices for {ticker}')
     plt.xlabel('Time')
     plt.ylabel('Price')
     plt.legend()
     plt.show()
 
-# ทำนายราคาหุ้นจากข้อมูลทดสอบ
-ticker_price_predictions = price_model.predict(X_price_test)
+# ตรวจสอบ GPU
+physical_devices = tf.config.list_physical_devices('GPU')
+if len(physical_devices) > 0:
+    tf.config.set_visible_devices(physical_devices[0], 'GPU')
+    tf.config.set_memory_growth(physical_devices[0], True)
+    logging.info(f"Using GPU: {physical_devices[0]}")
+    print("Using GPU:", physical_devices[0])
+else:
+    logging.info("GPU not found, using CPU")
+    print("GPU not found, using CPU")
 
-# แสดงกราฟการทำนายกับค่าจริง
-plot_predictions(y_price_test, ticker_price_predictions.flatten())
+# โหลดข้อมูลหุ้น
+try:
+    df_stock = pd.read_csv("NDQ_Stock_History_10Y.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
+    logging.info("โหลดข้อมูลหุ้นสำเร็จ")
+except FileNotFoundError:
+    logging.error("File 'NDQ_Stock_History_10Y.csv' not found.")
+    print("Error: File 'NDQ_Stock_History_10Y.csv' not found.")
+    exit()
+
+# โหลดข้อมูลข่าว
+try:
+    df_news = pd.read_csv("news_with_sentiment_gpu.csv")
+    # ตรวจสอบว่ามีคอลัมน์ 'Ticker' ด้วย
+    if 'Ticker' not in df_news.columns:
+        logging.error("Column 'Ticker' not found in news data.")
+        print("Error: Column 'Ticker' not found in news data.")
+        exit()
+    df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
+    df_news['Confidence'] = df_news['Confidence'] / 100
+    logging.info("โหลดข้อมูลข่าวสำเร็จ")
+except FileNotFoundError:
+    logging.error("File 'news_with_sentiment_gpu.csv' not found.")
+    print("Error: File 'news_with_sentiment_gpu.csv' not found.")
+    exit()
+
+# รวมข้อมูล
+df = pd.merge(df_stock, df_news[['Ticker', 'Date', 'Sentiment', 'Confidence']], on=['Ticker', 'Date'], how='left')
+
+# เติมค่าที่ขาดหายไป
+df.fillna(method='ffill', inplace=True)
+df.fillna(0, inplace=True)  # ในกรณีที่ยังมีค่า missing อยู่
+
+# เพิ่มฟีเจอร์ใหม่
+df['Change'] = df['Close'] - df['Open']
+df['Change (%)'] = (df['Change'] / df['Open']) * 100
+
+# ใช้ ta เพื่อคำนวณ RSI
+df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
+# เติมค่าที่ขาดหายไปหลังการคำนวณ RSI
+df['RSI'].fillna(method='ffill', inplace=True)
+df['RSI'].fillna(0, inplace=True)
+
+# เพิ่มฟีเจอร์เพิ่มเติม
+df['SMA_50'] = df['Close'].rolling(window=50).mean()
+df['SMA_200'] = df['Close'].rolling(window=200).mean()
+df['MACD'] = df['Close'].ewm(span=12, adjust=False).mean() - df['Close'].ewm(span=26, adjust=False).mean()
+df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
+# เพิ่ม Bollinger Bands
+bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
+df['Bollinger_High'] = bollinger.bollinger_hband()
+df['Bollinger_Low'] = bollinger.bollinger_lband()
+
+# เติมค่า missing ที่เกิดจากการคำนวณฟีเจอร์เพิ่มเติม
+df.fillna(method='ffill', inplace=True)
+df.fillna(0, inplace=True)
+
+# Normalize features
+feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence',
+                   'RSI', 'SMA_50', 'SMA_200', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+scaler_features = MinMaxScaler()
+features = df[feature_columns].values
+features_scaled = scaler_features.fit_transform(features)
+joblib.dump(scaler_features, 'scaler_features.pkl')  # บันทึก scaler คุณลักษณะ
+
+# สเกลข้อมูลเป้าหมาย
+scaler_target = MinMaxScaler()
+targets_price = df['Close'].shift(-1).dropna().values.reshape(-1, 1)
+targets_scaled = scaler_target.fit_transform(targets_price)
+joblib.dump(scaler_target, 'scaler_target.pkl')  # บันทึก scaler เป้าหมาย
+
+# สร้างลำดับข้อมูล
+X_price, y_price = create_sequences(features_scaled, targets_scaled, seq_length=10)
+
+# แบ่งข้อมูลแบบ Time-Based Split
+split_index = int(len(X_price) * 0.8)
+X_price_train, X_price_test = X_price[:split_index], X_price[split_index:]
+y_price_train, y_price_test = y_price[:split_index], y_price[split_index:]
+
+# สร้างและฝึกโมเดลสำหรับราคาหุ้นรวม
+price_model = build_gru_model((X_price_train.shape[1], X_price_train.shape[2]))
+
+# ตั้งค่า Callbacks
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+checkpoint = ModelCheckpoint('best_price_model.h5', monitor='val_loss', save_best_only=True, mode='min')
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
+
+# ฝึกโมเดล
+logging.info("เริ่มฝึกโมเดลสำหรับราคาหุ้นรวม")
+history = price_model.fit(
+    X_price_train, y_price_train,
+    epochs=50,
+    batch_size=32,
+    validation_data=(X_price_test, y_price_test),
+    verbose=1,
+    callbacks=[early_stopping, checkpoint, reduce_lr]
+)
+
+# บันทึกโมเดลสุดท้าย
+price_model.save('price_prediction_gru_model.h5')
+logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
+
+# พล็อตการฝึกฝน
+plot_training_history(history)
+
+# ฟังก์ชันการพล็อต Residuals
+def plot_residuals(y_true, y_pred, ticker):
+    residuals = y_true - y_pred
+    plt.figure(figsize=(10, 6))
+    plt.scatter(range(len(residuals)), residuals, alpha=0.5)
+    plt.hlines(y=0, xmin=0, xmax=len(residuals), colors='red')
+    plt.title(f'Residuals for {ticker}')
+    plt.xlabel('Sample')
+    plt.ylabel('Residual')
+    plt.show()
+
+# โมเดลแยกสำหรับหุ้น Top 5
+top_5_tickers = ['AAPL', 'MSFT', 'AMZN', 'GOOGL', 'FB']
+for ticker in top_5_tickers:
+    logging.info(f"เริ่มประมวลผลสำหรับหุ้น: {ticker}")
+    ticker_data = df[df['Ticker'] == ticker].sort_values(by='Date')
+
+    # ตรวจสอบว่าไม่มีข้อมูลหรือไม่
+    if ticker_data.empty:
+        logging.warning(f"No data found for ticker {ticker}. Skipping this ticker.")
+        print(f"Warning: No data found for ticker {ticker}. Skipping this ticker.")
+        continue
+
+    # เตรียมฟีเจอร์สำหรับการ normalization
+    ticker_features = ticker_data[feature_columns].fillna(method='ffill').fillna(0).values
+
+    # ตรวจสอบว่ามีข้อมูลหลังจากการกรองหรือไม่
+    if len(ticker_features) == 0:
+        logging.warning(f"No features available for ticker {ticker}. Skipping this ticker.")
+        print(f"Warning: No features available for ticker {ticker}. Skipping this ticker.")
+        continue
+
+    # สร้าง scaler สำหรับแต่ละหุ้น
+    scaler_ticker = MinMaxScaler()
+    features_scaled_ticker = scaler_ticker.fit_transform(ticker_features)
+    joblib.dump(scaler_ticker, f'scaler_features_{ticker}.pkl')  # บันทึก scaler คุณลักษณะของแต่ละหุ้น
+
+    # สร้างข้อมูลเป้าหมาย (targets)
+    ticker_targets_price = ticker_data['Close'].shift(-1).dropna().values.reshape(-1, 1)
+    scaler_target_ticker = MinMaxScaler()
+    ticker_targets_price_scaled = scaler_target_ticker.fit_transform(ticker_targets_price)
+    joblib.dump(scaler_target_ticker, f'scaler_target_{ticker}.pkl')  # บันทึก scaler เป้าหมายของแต่ละหุ้น
+
+    # สร้างลำดับข้อมูล
+    X_ticker_price, y_ticker_price = create_sequences(features_scaled_ticker, ticker_targets_price_scaled, seq_length=10)
+
+    # ตรวจสอบขนาดข้อมูลที่เตรียมไว้
+    if X_ticker_price.shape[0] == 0:
+        logging.warning(f"No sequences available for ticker {ticker}. Skipping this ticker.")
+        print(f"Warning: No sequences available for ticker {ticker}. Skipping this ticker.")
+        continue
+
+    # แบ่งข้อมูลแบบ Time-Based Split
+    split_index_ticker = int(len(X_ticker_price) * 0.8)
+    X_price_train_ticker, X_price_test_ticker = X_ticker_price[:split_index_ticker], X_ticker_price[split_index_ticker:]
+    y_price_train_ticker, y_price_test_ticker = y_ticker_price[:split_index_ticker], y_ticker_price[split_index_ticker:]
+
+    # สร้างและฝึกโมเดลสำหรับแต่ละหุ้น
+    price_model_ticker = build_gru_model((X_price_train_ticker.shape[1], X_price_train_ticker.shape[2]))
+
+    # ตั้งค่า Callbacks สำหรับแต่ละหุ้น
+    early_stopping_ticker = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    checkpoint_ticker = ModelCheckpoint(f'best_price_model_{ticker}.h5', monitor='val_loss', save_best_only=True, mode='min')
+    reduce_lr_ticker = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
+
+    # ฝึกโมเดล
+    logging.info(f"เริ่มฝึกโมเดลสำหรับหุ้น: {ticker}")
+    history_ticker = price_model_ticker.fit(
+        X_price_train_ticker, y_price_train_ticker,
+        epochs=50,
+        batch_size=32,
+        validation_data=(X_price_test_ticker, y_price_test_ticker),
+        verbose=1,
+        callbacks=[early_stopping_ticker, checkpoint_ticker, reduce_lr_ticker]
+    )
+
+    # บันทึกโมเดลสุดท้าย
+    price_model_ticker.save(f'price_model_{ticker}.h5')
+    logging.info(f"บันทึกโมเดลสำหรับหุ้น: {ticker}")
+
+    # ทำนายราคาหุ้น
+    ticker_price_predictions_scaled = price_model_ticker.predict(X_price_test_ticker)
+    ticker_price_predictions = scaler_target_ticker.inverse_transform(ticker_price_predictions_scaled)
+    y_price_test_original = scaler_target_ticker.inverse_transform(y_price_test_ticker)
+
+    # คำนวณความแตกต่างระหว่างราคาทำนายและราคาปิดเมื่อวาน
+    price_diff = ticker_price_predictions.flatten() - y_price_test_original.flatten()
+
+    # หากราคาทำนายสูงกว่าราคาปิดเมื่อวาน ถือว่าเป็น "ขึ้น" (1) มิฉะนั้น "ลง" (0)
+    trend_prediction = (price_diff > 0).astype(int)
+
+    # คำนวณ trend_actual จากการเปลี่ยนแปลงจริง
+    close_index = feature_columns.index('Close')
+    closes_t = X_price_test_ticker[:, -1, close_index]
+    closes_t_plus_1 = y_price_test_original.flatten()
+    trend_actual = (closes_t_plus_1 > closes_t).astype(int)
+
+    # ตรวจสอบว่า trend_actual และ trend_prediction มีขนาดเท่ากัน
+    min_length = min(len(trend_actual), len(trend_prediction))
+    trend_actual = trend_actual[:min_length]
+    trend_prediction = trend_prediction[:min_length]
+
+    # ประเมินผลราคาหุ้น
+    price_mae = mean_absolute_error(y_price_test_original[:min_length], ticker_price_predictions.flatten()[:min_length])
+    price_mse = mean_squared_error(y_price_test_original[:min_length], ticker_price_predictions.flatten()[:min_length])
+    price_rmse = np.sqrt(price_mse)
+    price_r2 = r2_score(y_price_test_original[:min_length], ticker_price_predictions.flatten()[:min_length])
+
+    # คำนวณ Accuracy แบบช่วง ±5% ของค่าจริง
+    price_tolerance = 0.05  # กำหนดช่วงที่ยอมรับได้ ±5%
+    price_within_tolerance = np.abs((ticker_price_predictions.flatten()[:min_length] - y_price_test_original.flatten()[:min_length]) / y_price_test_original.flatten()[:min_length]) <= price_tolerance
+    price_accuracy = np.mean(price_within_tolerance) * 100  # เปลี่ยนเป็นเปอร์เซ็นต์
+
+    # ประเมินแนวโน้ม (Trend) Accuracy
+    trend_accuracy = accuracy_score(trend_actual, trend_prediction)
+
+    # ประเมิน MAPE
+    mape = mean_absolute_percentage_error(y_price_test_original[:min_length], ticker_price_predictions.flatten()[:min_length])
+
+    # แสดงผลการประเมิน
+    print(f"Stock: {ticker}")
+    print(f"Price Accuracy (±5%): {price_accuracy:.2f}%")
+    print(f"Price MAE: {price_mae:.2f}, MSE: {price_mse:.2f}, RMSE: {price_rmse:.2f}, R2: {price_r2:.2f}")
+    print(f"MAPE: {mape:.2f}%")
+    print(f"Trend Accuracy: {trend_accuracy:.2f}")
+    print("="*50)
+
+    # บันทึกผลการประเมินลงใน log
+    logging.info(f"Stock: {ticker}")
+    logging.info(f"Price Accuracy (±5%): {price_accuracy:.2f}%")
+    logging.info(f"Price MAE: {price_mae:.2f}, MSE: {price_mse:.2f}, RMSE: {price_rmse:.2f}, R2: {price_r2:.2f}")
+    logging.info(f"MAPE: {mape:.2f}%")
+    logging.info(f"Trend Accuracy: {trend_accuracy:.2f}")
+    logging.info("="*50)
+
+    # พล็อตการฝึกฝน
+    plot_training_history(history_ticker)
+
+    # พล็อตการทำนายกับค่าจริง
+    plot_predictions(y_price_test_original.flatten()[:min_length], ticker_price_predictions.flatten()[:min_length], ticker)
+
+    # พล็อต Residuals
+    plot_residuals(y_price_test_original.flatten()[:min_length], ticker_price_predictions.flatten()[:min_length], ticker)
