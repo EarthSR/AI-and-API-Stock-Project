@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, LabelEncoder
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, Embedding, concatenate
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
@@ -117,7 +117,6 @@ df['Ticker_ID'] = ticker_encoder.fit_transform(df['Ticker'])
 num_tickers = len(ticker_encoder.classes_)
 
 # แบ่งข้อมูล Train/Val/Test ตามเวลา
-# สมมติเราแบ่งตาม quantile ของวันที่ หรือกำหนดโดยตรง
 train_ratio = 0.7
 val_ratio = 0.15
 test_ratio = 0.15
@@ -149,7 +148,7 @@ val_ticker_id = val_df['Ticker_ID'].values
 test_ticker_id = test_df['Ticker_ID'].values
 
 # สเกลข้อมูลจากเทรนเท่านั้น
-scaler_features = MinMaxScaler()
+scaler_features = StandardScaler()  # ใช้ StandardScaler แทน MinMaxScaler
 train_features_scaled = scaler_features.fit_transform(train_features)
 val_features_scaled = scaler_features.transform(val_features)
 test_features_scaled = scaler_features.transform(test_features)
@@ -162,131 +161,60 @@ test_targets_scaled = scaler_target.transform(test_targets_price)
 joblib.dump(scaler_features, 'scaler_features.pkl')  # บันทึก scaler ฟีเจอร์
 joblib.dump(scaler_target, 'scaler_target.pkl')     # บันทึก scaler เป้าหมาย
 
-seq_length = 10
-
 # สร้าง sequences แยกตาม Ticker
 X_train_list, X_train_ticker_list, y_train_list = [], [], []
 X_val_list, X_val_ticker_list, y_val_list = [], [], []
 X_test_list, X_test_ticker_list, y_test_list = [], [], []
 
-for t_id in range(num_tickers):
-    # Train
-    df_train_ticker = train_df[train_df['Ticker_ID'] == t_id]
-    if len(df_train_ticker) > seq_length:
-        indices = df_train_ticker.index
-        mask_train = np.isin(train_df.index, indices)
-        f_t = train_features_scaled[mask_train]
-        t_t = train_ticker_id[mask_train]
-        target_t = train_targets_scaled[mask_train]
-        X_t, X_ti, y_t = create_sequences_for_ticker(f_t, t_t, target_t, seq_length)
-        X_train_list.append(X_t)
-        X_train_ticker_list.append(X_ti)
-        y_train_list.append(y_t)
+X_train, X_train_ticker, y_train = create_sequences_for_ticker(train_features_scaled, train_ticker_id, train_targets_scaled)
+X_val, X_val_ticker, y_val = create_sequences_for_ticker(val_features_scaled, val_ticker_id, val_targets_scaled)
+X_test, X_test_ticker, y_test = create_sequences_for_ticker(test_features_scaled, test_ticker_id, test_targets_scaled)
 
-    # Val
-    df_val_ticker = val_df[val_df['Ticker_ID'] == t_id]
-    if len(df_val_ticker) > seq_length:
-        indices = df_val_ticker.index
-        mask_val = np.isin(val_df.index, indices)
-        f_v = val_features_scaled[mask_val]
-        t_v = val_ticker_id[mask_val]
-        target_v = val_targets_scaled[mask_val]
-        X_v, X_vi, y_v = create_sequences_for_ticker(f_v, t_v, target_v, seq_length)
-        X_val_list.append(X_v)
-        X_val_ticker_list.append(X_vi)
-        y_val_list.append(y_v)
+# โมเดล LSTM
+def build_model(input_shape):
+    inputs = Input(shape=input_shape)
+    x = LSTM(64, return_sequences=True)(inputs)
+    x = Dropout(0.2)(x)
+    x = LSTM(32)(x)
+    x = Dropout(0.2)(x)
+    x = Dense(1, activation='linear')(x)
+    model = Model(inputs=inputs, outputs=x)
+    model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
+    return model
 
-    # Test
-    df_test_ticker = test_df[test_df['Ticker_ID'] == t_id]
-    if len(df_test_ticker) > seq_length:
-        indices = df_test_ticker.index
-        mask_test = np.isin(test_df.index, indices)
-        f_s = test_features_scaled[mask_test]
-        t_s = test_ticker_id[mask_test]
-        target_s = test_targets_scaled[mask_test]
-        X_s, X_si, y_s = create_sequences_for_ticker(f_s, t_s, target_s, seq_length)
-        X_test_list.append(X_s)
-        X_test_ticker_list.append(X_si)
-        y_test_list.append(y_s)
+# สร้างโมเดล
+model = build_model((X_train.shape[1], X_train.shape[2]))
 
-if len(X_train_list) > 0:
-    X_price_train = np.concatenate(X_train_list, axis=0)
-    X_ticker_train = np.concatenate(X_train_ticker_list, axis=0)
-    y_price_train = np.concatenate(y_train_list, axis=0)
-else:
-    X_price_train, X_ticker_train, y_price_train = np.array([]), np.array([]), np.array([])
-
-if len(X_val_list) > 0:
-    X_price_val = np.concatenate(X_val_list, axis=0)
-    X_ticker_val = np.concatenate(X_val_ticker_list, axis=0)
-    y_price_val = np.concatenate(y_val_list, axis=0)
-else:
-    X_price_val, X_ticker_val, y_price_val = np.array([]), np.array([]), np.array([])
-
-if len(X_test_list) > 0:
-    X_price_test = np.concatenate(X_test_list, axis=0)
-    X_ticker_test = np.concatenate(X_test_ticker_list, axis=0)
-    y_price_test = np.concatenate(y_test_list, axis=0)
-else:
-    X_price_test, X_ticker_test, y_price_test = np.array([]), np.array([]), np.array([])
-
-num_feature = train_features_scaled.shape[1]  # จำนวน features ทางเทคนิค
-
-# สร้างโมเดล LSTM + Embedding
-features_input = Input(shape=(seq_length, num_feature), name='features_input')
-ticker_input = Input(shape=(seq_length,), name='ticker_input')
-
-embedding_dim = 32
-ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
-
-merged = concatenate([features_input, ticker_embedding], axis=-1)
-
-x = LSTM(64, return_sequences=True)(merged)
-x = Dropout(0.2)(x)
-x = LSTM(32)(x)
-x = Dropout(0.2)(x)
-output = Dense(1)(x)
-
-model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer='adam', loss='mse', metrics=['mae'])
-
+# สร้าง EarlyStopping
 early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_price_model.keras', monitor='val_loss', save_best_only=True, mode='min')
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
 
-logging.info("เริ่มฝึกโมเดลสำหรับราคาหุ้นรวม (ใช้ Embedding สำหรับ Ticker)")
-
+# Train โมเดล
 history = model.fit(
-    [X_price_train, X_ticker_train], y_price_train,
-    epochs=50,
-    batch_size=32,
-    validation_data=([X_price_val, X_ticker_val], y_price_val),
-    verbose=1,
-    shuffle=False,
-    callbacks=[early_stopping, checkpoint, reduce_lr]
+    X_train, y_train,
+    validation_data=(X_val, y_val),
+    epochs=100,
+    batch_size=64,
+    callbacks=[early_stopping]
 )
 
-model.save('price_prediction_LSTM_model_embedding.h5')
-logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
+# บันทึกโมเดล
+model.save('stock_price_prediction_model.h5')
 
-plot_training_history(history)
-
-y_pred_scaled = model.predict([X_price_test, X_ticker_test])
+# ทดสอบโมเดล
+y_pred_scaled = model.predict(X_test)
 y_pred = scaler_target.inverse_transform(y_pred_scaled)
-y_true = scaler_target.inverse_transform(y_price_test)
 
-mae = mean_absolute_error(y_true, y_pred)
-mse = mean_squared_error(y_true, y_pred)
+# คำนวณประสิทธิภาพ
+mae = mean_absolute_error(test_targets_price, y_pred)
+mse = mean_squared_error(test_targets_price, y_pred)
 rmse = np.sqrt(mse)
-r2 = r2_score(y_true, y_pred)
-mape = mean_absolute_percentage_error(y_true, y_pred)
+r2 = r2_score(test_targets_price, y_pred)
+mape = mean_absolute_percentage_error(test_targets_price, y_pred)
 
-print("Evaluation on Test Set:")
-print(f"MAE: {mae}")
-print(f"MSE: {mse}")
-print(f"RMSE: {rmse}")
-print(f"R² Score: {r2}")
-print(f"MAPE: {mape}")
+logging.info(f'MAE: {mae}, MSE: {mse}, RMSE: {rmse}, R2: {r2}, MAPE: {mape}')
+print(f'MAE: {mae}, MSE: {mse}, RMSE: {rmse}, R2: {r2}, MAPE: {mape}')
 
-plot_predictions(y_true[:200], y_pred[:200], "Test Set")
-plot_residuals(y_true, y_pred, "Test Set")
+# แสดงกราฟ
+plot_training_history(history)
+plot_predictions(test_targets_price, y_pred, 'Stock')
+plot_residuals(test_targets_price, y_pred, 'Stock')
