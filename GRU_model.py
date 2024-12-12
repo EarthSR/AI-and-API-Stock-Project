@@ -109,7 +109,7 @@ except Exception as e:
 # โหลดข้อมูลข่าว
 try:
     df_news = pd.read_csv("news_with_sentiment_gpu.csv")
-    # สมมติว่าข้อมูลข่าวมีคอลัมน์ 'News_Text' ซึ่งเป็นข้อความข่าว
+    # สมมติว่าข้อมูลข่าวมีคอลัมน์ 'description' ซึ่งเป็นข้อความข่าว
     if 'Sentiment' not in df_news.columns or 'Confidence' not in df_news.columns:
         raise ValueError("ข้อมูลข่าวต้องมีคอลัมน์ 'Sentiment' และ 'Confidence'")
     
@@ -132,21 +132,37 @@ if 'Date' not in df_news.columns:
     print("Error: ข้อมูลข่าวต้องมีคอลัมน์ 'Date'")
     exit()
 
-# แปลงคอลัมน์ 'Date' ให้เป็น datetime ถ้ายังไม่ได้
-if not np.issubdtype(df_news['Date'].dtype, np.datetime64):
-    df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
+# แปลงคอลัมน์ Date ใน df_stock ให้เป็น datetime
+df_stock['Date'] = pd.to_datetime(df_stock['Date'], errors='coerce')
+# ตรวจสอบว่าแปลงสำเร็จหรือไม่ หากมี NaT แสดงว่ามีข้อมูลที่แปลงไม่ได้
+if df_stock['Date'].isnull().any():
+    df_stock = df_stock.dropna(subset=['Date'])
 
-# ตรวจสอบการแปลงวันที่
+# แปลงคอลัมน์ Date ใน df_news ให้เป็น datetime
+df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
 if df_news['Date'].isnull().any():
-    logging.warning("มีบางแถวในข้อมูลข่าวที่ไม่สามารถแปลงวันที่ได้")
     df_news = df_news.dropna(subset=['Date'])
 
-# รวมข้อมูลโดยใช้เฉพาะ 'Date'
-df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
+# รวบรวมข้อมูลข่าวต่อวัน โดยคำนวณค่าเฉลี่ยของ Sentiment และ Confidence
+df_news_aggregated = df_news.groupby('Date').agg({
+    'Sentiment': 'mean',
+    'Confidence': 'mean'
+}).reset_index()
 
+df_news_aggregated['Date'] = pd.to_datetime(df_news_aggregated['Date'])
+
+# ตรวจสอบว่าทั้งสอง DataFrame มี Date ที่ตรงกันก่อน
+print("Stock Data Dates:\n", df_stock['Date'])
+print("News Data Dates:\n", df_news_aggregated['Date'])
+
+# ลบ timezone จาก df_stock ถ้ามี
+df_stock['Date'] = df_stock['Date'].dt.tz_localize(None)
+
+# การรวมข้อมูลตาม Date
+df = pd.merge(df_stock, df_news_aggregated, on='Date', how='left')
 # เติมค่าที่ขาดหายไป
 df.fillna(method='ffill', inplace=True)
-df.fillna(0, inplace=True)  # ในกรณีที่ยังมีค่า missing อยู่
+df.fillna(0, inplace=True)
 
 # เพิ่มฟีเจอร์ใหม่
 df['Change'] = df['Close'] - df['Open']
@@ -200,7 +216,7 @@ price_model = build_gru_model((X_price_train.shape[1], X_price_train.shape[2]))
 
 # ตั้งค่า Callbacks
 early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_price_model.h5', monitor='val_loss', save_best_only=True, mode='min')
+checkpoint = ModelCheckpoint('best_price_model.keras', monitor='val_loss', save_best_only=True, mode='min')
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
 
 # ฝึกโมเดล
@@ -222,7 +238,8 @@ logging.info("บันทึกโมเดลราคาหุ้นรวม
 plot_training_history(history)
 
 # โหลดโมเดลที่ดีที่สุด
-best_price_model = load_model('best_price_model.h5')
+best_price_model = load_model('best_price_model.keras')
+
 
 # ทำการพยากรณ์
 y_pred_scaled = best_price_model.predict(X_price_test)
