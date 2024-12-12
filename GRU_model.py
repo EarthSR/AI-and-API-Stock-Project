@@ -1,9 +1,9 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import GRU, Dense, Dropout
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score, mean_absolute_percentage_error
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 import matplotlib.pyplot as plt
@@ -71,17 +71,6 @@ def plot_predictions(y_true, y_pred, ticker):
     plt.legend()
     plt.show()
 
-# ฟังก์ชันการพล็อต Residuals
-def plot_residuals(y_true, y_pred, ticker):
-    residuals = y_true - y_pred
-    plt.figure(figsize=(10, 6))
-    plt.scatter(range(len(residuals)), residuals, alpha=0.5)
-    plt.hlines(y=0, xmin=0, xmax=len(residuals), colors='red')
-    plt.title(f'Residuals for {ticker}')
-    plt.xlabel('Sample')
-    plt.ylabel('Residual')
-    plt.show()
-
 # ตรวจสอบ GPU
 physical_devices = tf.config.list_physical_devices('GPU')
 if len(physical_devices) > 0:
@@ -92,85 +81,18 @@ if len(physical_devices) > 0:
 else:
     logging.info("GPU not found, using CPU")
     print("GPU not found, using CPU")
-
-# โหลดข้อมูลหุ้น
-try:
-    df_stock = pd.read_csv("NDQ_Stock_History_10Y.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
-    logging.info("โหลดข้อมูลหุ้นสำเร็จ")
-except FileNotFoundError:
-    logging.error("File 'NDQ_Stock_History_10Y.csv' not found.")
-    print("Error: File 'NDQ_Stock_History_10Y.csv' not found.")
-    exit()
-except Exception as e:
-    logging.error(f"เกิดข้อผิดพลาดในการโหลดข้อมูลหุ้น: {e}")
-    print(f"Error: {e}")
-    exit()
-
-# โหลดข้อมูลข่าว
-try:
-    df_news = pd.read_csv("news_with_sentiment_gpu.csv")
-    # สมมติว่าข้อมูลข่าวมีคอลัมน์ 'description' ซึ่งเป็นข้อความข่าว
-    if 'Sentiment' not in df_news.columns or 'Confidence' not in df_news.columns:
-        raise ValueError("ข้อมูลข่าวต้องมีคอลัมน์ 'Sentiment' และ 'Confidence'")
     
-    # แปลง Sentiment เป็นค่าตัวเลข
-    df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
-    df_news['Confidence'] = df_news['Confidence'] / 100
-    logging.info("โหลดข้อมูลข่าวสำเร็จ")
-except FileNotFoundError:
-    logging.error("File 'news_with_sentiment_gpu.csv' not found.")
-    print("Error: File 'news_with_sentiment_gpu.csv' not found.")
-    exit()
-except Exception as e:
-    logging.error(f"เกิดข้อผิดพลาดในการโหลดข้อมูลข่าว: {e}")
-    print(f"Error: {e}")
-    exit()
 
-# ตรวจสอบว่า df_news มีคอลัมน์ 'Date' หรือไม่
-if 'Date' not in df_news.columns:
-    logging.error("ข้อมูลข่าวต้องมีคอลัมน์ 'Date'")
-    print("Error: ข้อมูลข่าวต้องมีคอลัมน์ 'Date'")
-    exit()
+df_stock = pd.read_csv("NDQ_Stock_History_10Y.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
+df_news = pd.read_csv("news_with_sentiment_gpu.csv")
+df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
+df_news['Confidence'] = df_news['Confidence'] / 100
+df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
 
-# แปลงคอลัมน์ Date ใน df_stock ให้เป็น datetime
-df_stock['Date'] = pd.to_datetime(df_stock['Date'], errors='coerce')
-# ตรวจสอบว่าแปลงสำเร็จหรือไม่ หากมี NaT แสดงว่ามีข้อมูลที่แปลงไม่ได้
-if df_stock['Date'].isnull().any():
-    df_stock = df_stock.dropna(subset=['Date'])
 
-# แปลงคอลัมน์ Date ใน df_news ให้เป็น datetime
-df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
-# แปลงคอลัมน์ Date ใน df_stock ให้เป็น datetime
-df_stock['Date'] = pd.to_datetime(df_stock['Date'], errors='coerce')
-# ตรวจสอบว่าแปลงสำเร็จหรือไม่ หากมี NaT แสดงว่ามีข้อมูลที่แปลงไม่ได้
-if df_stock['Date'].isnull().any():
-    df_stock = df_stock.dropna(subset=['Date'])
-
-# แปลงคอลัมน์ Date ใน df_news ให้เป็น datetime
-df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
-if df_news['Date'].isnull().any():
-    df_news = df_news.dropna(subset=['Date'])
-
-# รวบรวมข้อมูลข่าวต่อวัน โดยคำนวณค่าเฉลี่ยของ Sentiment และ Confidence
-df_news_aggregated = df_news.groupby('Date').agg({
-    'Sentiment': 'mean',
-    'Confidence': 'mean'
-}).reset_index()
-
-df_news_aggregated['Date'] = pd.to_datetime(df_news_aggregated['Date'])
-
-# ตรวจสอบว่าทั้งสอง DataFrame มี Date ที่ตรงกันก่อน
-print("Stock Data Dates:\n", df_stock['Date'])
-print("News Data Dates:\n", df_news_aggregated['Date'])
-
-# ลบ timezone จาก df_stock ถ้ามี
-df_stock['Date'] = df_stock['Date'].dt.tz_localize(None)
-
-# การรวมข้อมูลตาม Date
-df = pd.merge(df_stock, df_news_aggregated, on='Date', how='left')
 # เติมค่าที่ขาดหายไป
 df.fillna(method='ffill', inplace=True)
-df.fillna(0, inplace=True)
+df.fillna(0, inplace=True)  # ในกรณีที่ยังมีค่า missing อยู่
 
 # เพิ่มฟีเจอร์ใหม่
 df['Change'] = df['Close'] - df['Open']
@@ -245,37 +167,13 @@ logging.info("บันทึกโมเดลราคาหุ้นรวม
 # พล็อตการฝึกฝน
 plot_training_history(history)
 
-# โหลดโมเดลที่ดีที่สุด
-best_price_model = load_model('best_price_model.keras')
-
-
-# ทำการพยากรณ์
-y_pred_scaled = best_price_model.predict(X_price_test)
-y_pred = scaler_target.inverse_transform(y_pred_scaled)
-y_true = scaler_target.inverse_transform(y_price_test)
-
-# คำนวณเมตริก
-mae = mean_absolute_error(y_true, y_pred)
-mse = mean_squared_error(y_true, y_pred)
-rmse = np.sqrt(mse)
-r2 = r2_score(y_true, y_pred)
-mape = mean_absolute_percentage_error(y_true, y_pred)
-
-# Log และแสดงผลเมตริก
-logging.info(f"Test MAE: {mae}")
-logging.info(f"Test MSE: {mse}")
-logging.info(f"Test RMSE: {rmse}")
-logging.info(f"Test R²: {r2}")
-logging.info(f"Test MAPE: {mape}")
-
-print(f"Test MAE: {mae}")
-print(f"Test MSE: {mse}")
-print(f"Test RMSE: {rmse}")
-print(f"Test R²: {r2}")
-print(f"Test MAPE: {mape}")
-
-# พล็อตการพยากรณ์เทียบกับค่าจริง
-plot_predictions(y_true, y_pred, 'NDQ')
-
-# พล็อต Residuals
-plot_residuals(y_true, y_pred, 'NDQ')
+# ฟังก์ชันการพล็อต Residuals
+def plot_residuals(y_true, y_pred, ticker):
+    residuals = y_true - y_pred
+    plt.figure(figsize=(10, 6))
+    plt.scatter(range(len(residuals)), residuals, alpha=0.5)
+    plt.hlines(y=0, xmin=0, xmax=len(residuals), colors='red')
+    plt.title(f'Residuals for {ticker}')
+    plt.xlabel('Sample')
+    plt.ylabel('Residual')
+    plt.show()
