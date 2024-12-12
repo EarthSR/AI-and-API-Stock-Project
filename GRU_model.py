@@ -132,14 +132,19 @@ if 'Date' not in df_news.columns:
     print("Error: ข้อมูลข่าวต้องมีคอลัมน์ 'Date'")
     exit()
 
-# แปลงคอลัมน์ 'Date' ให้เป็น datetime ถ้ายังไม่ได้
-if not np.issubdtype(df_news['Date'].dtype, np.datetime64):
-    df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
+# แปลงคอลัมน์ Date ใน df_stock ให้เป็น datetime
+df_stock['Date'] = pd.to_datetime(df_stock['Date'], errors='coerce')
+# ตรวจสอบว่าแปลงสำเร็จหรือไม่ หากมี NaT แสดงว่ามีข้อมูลที่แปลงไม่ได้
+if df_stock['Date'].isnull().any():
+    df_stock = df_stock.dropna(subset=['Date'])
 
-# ตรวจสอบการแปลงวันที่
+# แปลงคอลัมน์ Date ใน df_news ให้เป็น datetime
+df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
 if df_news['Date'].isnull().any():
-    logging.warning("มีบางแถวในข้อมูลข่าวที่ไม่สามารถแปลงวันที่ได้")
     df_news = df_news.dropna(subset=['Date'])
+
+# หลังจากทั้งสอง DataFrame มี Date เป็น datetime64[ns] แล้วจึงทำการ merge
+df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
 
 # รวมข้อมูลโดยใช้เฉพาะ 'Date'
 df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
