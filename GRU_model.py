@@ -140,6 +140,14 @@ if df_stock['Date'].isnull().any():
 
 # แปลงคอลัมน์ Date ใน df_news ให้เป็น datetime
 df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
+# แปลงคอลัมน์ Date ใน df_stock ให้เป็น datetime
+df_stock['Date'] = pd.to_datetime(df_stock['Date'], errors='coerce')
+# ตรวจสอบว่าแปลงสำเร็จหรือไม่ หากมี NaT แสดงว่ามีข้อมูลที่แปลงไม่ได้
+if df_stock['Date'].isnull().any():
+    df_stock = df_stock.dropna(subset=['Date'])
+
+# แปลงคอลัมน์ Date ใน df_news ให้เป็น datetime
+df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
 if df_news['Date'].isnull().any():
     df_news = df_news.dropna(subset=['Date'])
 
