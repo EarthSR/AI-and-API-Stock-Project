@@ -78,7 +78,7 @@ else:
     print("GPU not found, using CPU")
 
 # โหลดข้อมูล
-df_stock = pd.read_csv("NDQ_Stock_History_10Y.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
+df_stock = pd.read_csv("cleaned_data.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
 df_news = pd.read_csv("news_with_sentiment_gpu.csv")
 df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
 df_news['Confidence'] = df_news['Confidence'] / 100
