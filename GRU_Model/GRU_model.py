@@ -108,9 +108,9 @@ df['Bollinger_Low'] = bollinger.bollinger_lband()
 df.fillna(method='ffill', inplace=True)
 df.fillna(0, inplace=True)
 
-# feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence',
-#                    'RSI', 'SMA_10', 'SMA_200', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
-feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence']
+feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence',
+                   'RSI', 'SMA_10', 'SMA_200', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+# feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence']
 
 # Label Encode Ticker
 ticker_encoder = LabelEncoder()
@@ -160,8 +160,8 @@ train_targets_scaled = scaler_target.fit_transform(train_targets_price)
 val_targets_scaled = scaler_target.transform(val_targets_price)
 test_targets_scaled = scaler_target.transform(test_targets_price)
 
-joblib.dump(scaler_features, 'scaler_features.pkl')  # บันทึก scaler ฟีเจอร์
-joblib.dump(scaler_target, 'scaler_target.pkl')     # บันทึก scaler เป้าหมาย
+joblib.dump(scaler_features, 'scaler_features_full.pkl')  # บันทึก scaler ฟีเจอร์
+joblib.dump(scaler_target, 'scaler_target_full.pkl')     # บันทึก scaler เป้าหมาย
 
 seq_length = 10
 
@@ -252,7 +252,7 @@ model = Model(inputs=[features_input, ticker_input], outputs=output)
 model.compile(optimizer='adam', loss='mse', metrics=['mae'])
 
 early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_price_model.keras', monitor='val_loss', save_best_only=True, mode='min')
+checkpoint = ModelCheckpoint('best_price_model_full.keras', monitor='val_loss', save_best_only=True, mode='min')
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
 
 logging.info("เริ่มฝึกโมเดลสำหรับราคาหุ้นรวม (ใช้ Embedding สำหรับ Ticker)")
@@ -267,7 +267,7 @@ history = model.fit(
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
 
-model.save('price_prediction_GRU_model_embedding.h5')
+model.save('price_prediction_GRU_model_embedding_full.h5')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
 
 plot_training_history(history)
