@@ -6,10 +6,10 @@ from tensorflow.keras.layers import Input, GRU, Dense, Dropout, Embedding, conca
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from tensorflow.keras.regularizers import l2
 import matplotlib.pyplot as plt
 import joblib
 import ta
-from tensorflow.keras.regularizers import l2
 import logging
 
 # ตั้งค่า logging
@@ -244,25 +244,25 @@ ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, na
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
 x = GRU(64, return_sequences=True, kernel_regularizer=l2(0.001))(merged)  # เพิ่ม L2 Regularization
-x = Dropout(0.4)(x)  # เพิ่ม Dropout Regularization
+x = Dropout(0.3)(x)  # เพิ่ม Dropout Regularization
 x = GRU(32, kernel_regularizer=l2(0.001))(x)  # เพิ่ม L2 Regularization
-x = Dropout(0.4)(x)  # เพิ่ม Dropout Regularization
+x = Dropout(0.3)(x)  # เพิ่ม Dropout Regularization
 output = Dense(1)(x)
+
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
 model.compile(optimizer='adam', loss='mse', metrics=['mae'])
 
-# เพิ่ม EarlyStopping และ ReduceLROnPlateau
 early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
 checkpoint = ModelCheckpoint('best_price_model_full.keras', monitor='val_loss', save_best_only=True, mode='min')
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
 
 logging.info("เริ่มฝึกโมเดลสำหรับราคาหุ้นรวม (ใช้ Embedding สำหรับ Ticker)")
 
 history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
-    epochs=100,
-    batch_size=16,
+    epochs=50,
+    batch_size=32,
     validation_data=([X_price_val, X_ticker_val], y_price_val),
     verbose=1,
     shuffle=False,
