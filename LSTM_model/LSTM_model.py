@@ -262,7 +262,7 @@ logging.info("เริ่มฝึกโมเดลสำหรับราค
 history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
     epochs=100,
-    batch_size=16,
+    batch_size=32,
     validation_data=([X_price_val, X_ticker_val], y_price_val),
     verbose=1,
     shuffle=False,

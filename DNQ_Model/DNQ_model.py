@@ -33,7 +33,7 @@ class DQNAgent:
         model.add(Dense(64, input_dim=self.state_size, activation='relu'))
         model.add(Dense(64, activation='relu'))
         model.add(Dense(self.action_size, activation='linear'))  # Output layer: Q-values for each action
-        model.compile(loss='mse', optimizer=tf.keras.optimizers.Adam(lr=self.learning_rate))
+        model.compile(loss='mse', optimizer=tf.keras.optimizers.Adam(learning_rate=self.learning_rate))
         return model
 
     def act(self, state):
