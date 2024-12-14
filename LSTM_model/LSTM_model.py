@@ -68,12 +68,19 @@ def plot_residuals(y_true, y_pred, ticker):
     plt.show()
 
 # ตรวจสอบ GPU
+# ตรวจสอบ GPU
 physical_devices = tf.config.list_physical_devices('GPU')
 if len(physical_devices) > 0:
+    # Set visible devices to the first GPU (or any other specific one)
     tf.config.set_visible_devices(physical_devices[0], 'GPU')
-    tf.config.set_memory_growth(physical_devices[0], True)
-    logging.info(f"Using GPU: {physical_devices[0]}")
-    print("Using GPU:", physical_devices[0])
+    # Enable memory growth for the first GPU
+    try:
+        tf.config.experimental.set_memory_growth(physical_devices[0], True)
+        logging.info(f"Memory growth enabled for GPU: {physical_devices[0]}")
+        print("Memory growth enabled for GPU:", physical_devices[0])
+    except Exception as e:
+        logging.error(f"Failed to set memory growth: {e}")
+        print(f"Error setting memory growth: {e}")
 else:
     logging.info("GPU not found, using CPU")
     print("GPU not found, using CPU")
