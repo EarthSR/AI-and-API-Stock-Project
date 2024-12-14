@@ -243,9 +243,9 @@ ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, na
 
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-x = LSTM(64, return_sequences=True, kernel_regularizer=l2(0.001))(merged)  # เพิ่ม L2 Regularization
+x = LSTM(64, return_sequences=True)(merged)
 x = Dropout(0.3)(x)  # เพิ่ม Dropout Regularization
-x = LSTM(32, kernel_regularizer=l2(0.001))(x)  # เพิ่ม L2 Regularization
+x = LSTM(32)(x)  
 x = Dropout(0.3)(x)  # เพิ่ม Dropout Regularization
 output = Dense(1)(x)
 
