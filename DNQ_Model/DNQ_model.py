@@ -30,18 +30,19 @@ class DQNAgent:
 
     def _build_model(self):
         model = Sequential()
-        model.add(Dense(64, input_dim=self.state_size, activation='relu'))
+        model.add(Dense(64, input_shape=(self.state_size,), activation='relu'))  # แก้ไขตรงนี้
         model.add(Dense(64, activation='relu'))
         model.add(Dense(self.action_size, activation='linear'))  # Output layer: Q-values for each action
         model.compile(loss='mse', optimizer=tf.keras.optimizers.Adam(learning_rate=self.learning_rate))
         return model
 
-    def act(self, state):
+    def act(self, state):  
+        state = np.reshape(state, (1, self.state_size))  # แปลงให้เป็น (1, state_size)
         if np.random.rand() <= self.epsilon:
             return random.randrange(self.action_size)  # Random action (exploration)
         act_values = self.model.predict(state)
-        return np.argmax(act_values[0])  # Action with the highest Q-value (exploitation)
-
+        return np.argmax(act_values[0])
+    
     def remember(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
 
@@ -112,8 +113,8 @@ df['Change'] = df['Close'] - df['Open']
 df['Change (%)'] = (df['Change'] / df['Open']) * 100
 
 df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
-df['RSI'].fillna(method='ffill', inplace=True)
-df['RSI'].fillna(0, inplace=True)
+df['RSI'].fillna(method='ffill', inplace=True)  # เติมค่า NaN โดยใช้การเติมแบบ forward fill
+df['RSI'].fillna(0, inplace=True)  # เติมค่า NaN ที่เหลือด้วย 0
 
 df['SMA_10'] = df['Close'].rolling(window=10).mean()
 df['SMA_200'] = df['Close'].rolling(window=200).mean()
@@ -191,7 +192,7 @@ action_size = 3  # สามารถใช้ "Buy", "Hold", "Sell"
 agent = DQNAgent(state_size, action_size)
 
 # ฝึก agent
-for e in range(1000):  # จำนวนรอบในการฝึก
+for e in range(30):  # จำนวนรอบในการฝึก
     state = X_train[0]  # เริ่มต้นที่ข้อมูลตัวแรก
     state = np.reshape(state, [1, state_size])
     
