@@ -17,7 +17,6 @@ logging.basicConfig(level=logging.INFO, filename='training.log', filemode='a',
 
 
 # DQN Agent
-# DQN Agent
 class DQNAgent:
     def __init__(self, state_size, action_size, learning_rate=0.001, gamma=0.95, epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.01):
         self.state_size = state_size
@@ -214,7 +213,7 @@ print(f"State size: {state_size}, Action size: {action_size}")
 print(f"X_train shape: {X_train.shape}, X_test shape: {X_test.shape}")
 
 # ฝึก agent
-for e in range(1):  # จำนวนรอบในการฝึก
+for e in range(1000):  # จำนวนรอบในการฝึก
     state = X_train[0]  # เริ่มต้นที่ข้อมูลตัวแรก
     state = np.reshape(state, [1, state_size])
     

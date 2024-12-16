@@ -2,7 +2,8 @@ import joblib
 import pandas as pd
 import numpy as np
 from tensorflow.keras.models import load_model
-from sklearn.preprocessing import LabelEncoder
+from tensorflow.keras.metrics import MeanSquaredError
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 import matplotlib.pyplot as plt
 import ta
 import logging
@@ -11,6 +12,9 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, m
 # ตั้งค่า logging
 logging.basicConfig(level=logging.INFO, filename='testing.log', filemode='a',
                     format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Load the model, ensuring custom metric MeanSquaredError is passed
+model = load_model('./best_price_model_full.keras', custom_objects={'MeanSquaredError': MeanSquaredError()})
 
 # ฟังก์ชันที่ใช้สำหรับการแสดงผลลัพธ์
 def plot_predictions(y_true, y_pred, ticker):
@@ -34,15 +38,24 @@ def plot_residuals(y_true, y_pred, ticker):
     plt.show()
 
 # ฟังก์ชันที่ใช้แปลงข้อมูลให้เป็นลำดับ (sequence)
-def create_sequences(data, time_steps=10):
+def create_sequences(data, sentiment, time_steps=10):
     sequences = []
+    sentiment_sequences = []
     labels = []
-    
+
+    # Ensure data and sentiment have the same length
+    min_len = min(len(data), len(sentiment))  # Ensure the lengths are the same
+    data = data[:min_len]  # Trim data if necessary
+    sentiment = sentiment[:min_len]  # Trim sentiment if necessary
+
     for i in range(len(data) - time_steps):
-        sequences.append(data[i:i + time_steps])  # Add time_steps number of samples
-        labels.append(data[i + time_steps])  # The label is the next value after time_steps
+        sequences.append(data[i:i + time_steps])  # Sequence of features
+        sentiment_sequences.append(sentiment[i:i + time_steps])  # Sequence of sentiment data
+        labels.append(data[i + time_steps, 0])  # The label is the next value after time_steps (ensure it is scalar)
         
-    return np.array(sequences), np.array(labels)
+    return np.array(sequences), np.array(sentiment_sequences), np.array(labels)
+
+
 
 # โหลดข้อมูล
 df_stock = pd.read_csv("cleaned_data.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
@@ -50,6 +63,10 @@ df_news = pd.read_csv("news_with_sentiment_gpu.csv")
 df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
 df_news['Confidence'] = df_news['Confidence'] / 100
 df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
+
+if df.shape[0] == 0:
+    print("No data after merge. Check your Date columns in both dataframes.")
+    exit()
 
 # เติมค่าที่ขาดหายไป
 df.fillna(method='ffill', inplace=True)
@@ -76,68 +93,82 @@ df['Bollinger_Low'] = bollinger.bollinger_lband()
 df.fillna(method='ffill', inplace=True)
 df.fillna(0, inplace=True)
 
-feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence',
-                   'RSI', 'SMA_10', 'SMA_200', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+# โหลด scaler ที่บันทึกไว้
+scaler_features = joblib.load('scaler_features_full.pkl')
+scaler_target = joblib.load('scaler_target_full.pkl')
+
+# Select features for scaling (15 features as per your case)
+features_to_scale = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence',
+                     'RSI', 'SMA_10', 'SMA_200', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+
+print(f"Shape of df[features_to_scale]: {df[features_to_scale].shape}")
+print(f"Columns in df: {df.columns}")
+
+# ตรวจสอบว่า dataframe ไม่เป็น 0 แถว
+if df[features_to_scale].shape[0] > 0:
+    # Normalize features
+    scaled_features = scaler_features.transform(df[features_to_scale])
+
+    # Normalize target
+    scaled_target = scaler_target.transform(df[['Close']].values.reshape(-1, 1))
+else:
+    print("No valid data to scale.")
+    # ทำการเตรียมข้อมูลเพิ่มเติมหากไม่มีข้อมูลที่ถูกต้อง
+    # หรืออาจทำการตรวจสอบข้อมูลที่ขาดหายไป
+    exit()
+# Normalize features
+scaled_features = scaler_features.transform(df[features_to_scale])
+
+# Normalize target
+scaled_target = scaler_target.transform(df[['Close']].values.reshape(-1, 1))
 
 # Label Encode Ticker
 ticker_encoder = LabelEncoder()
 df['Ticker_ID'] = ticker_encoder.fit_transform(df['Ticker'])
 num_tickers = len(ticker_encoder.classes_)
 
-# แปลง Date ให้เป็น tz-naive ก่อน
 df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-
-# ลบ TimeZone ถ้าเป็น tz-aware
 df['Date'] = df['Date'].dt.tz_localize(None)
 
-# สร้าง Timestamp แบบ tz-naive สำหรับการเปรียบเทียบ
-test_date = pd.Timestamp('2023-01-01')
+# Split data into train/test sets
+test_date = pd.Timestamp('2024-01-01')
 
-# การเปรียบเทียบกับ `Date` ที่เป็น tz-naive
-test_df = df[df['Date'] > test_date].copy()
 
-# โหลด scaler ที่บันทึกไว้
-scaler_features = joblib.load('scaler_features_full.pkl')
-scaler_target = joblib.load('scaler_target_full.pkl')
+test_data = df[df['Date'] >= test_date]
 
-# แปลงข้อมูลการทดสอบ
-X_test = test_df[feature_columns].values
-X_scaled = scaler_features.transform(X_test)
+X_test = scaled_features[test_data.index]
+y_test = scaled_target[test_data.index]
 
-y_true = test_df['Close'].values
-y_scaled = scaler_target.transform(y_true.reshape(-1, 1))  # แปลงเป้าหมาย
+# สร้างข้อมูลลำดับ (sequence) สำหรับการเทรน
+# สร้าง sequences สำหรับ features และ sentiment
+sequences, sentiment_sequences, labels = create_sequences(scaled_features, df['Sentiment'].values)
+print(f"Sequences shape: {sequences.shape}")
+print(f"Sentiment Sequences shape: {sentiment_sequences.shape}")
+# Predict using the trained model
+model_input = [sequences, sentiment_sequences]
+y_pred = model.predict(model_input)
 
-# สร้าง sequences สำหรับ X_scaled
-X_sequences, y_sequences = create_sequences(X_scaled, time_steps=10)
+# ใช้ inverse_transform หลังจาก reshaped ข้อมูลแล้ว
+# Rescale the predictions and true values
+y_true_rescaled = scaler_target.inverse_transform(y_test.reshape(-1, 1))  # reshape ให้เป็น 2D
+y_pred_rescaled = scaler_target.inverse_transform(y_pred.reshape(-1, 1))  # reshape ให้เป็น 2D
 
-# แปลงข้อมูล target (y) ด้วย scaler
-y_scaled = scaler_target.transform(y_sequences.reshape(-1, 1))
-
-# ตรวจสอบขนาดของ X_sequences
-print(X_sequences.shape)  # ควรเป็น (จำนวนลำดับ, time_steps, features)
-
-# ตรวจสอบขนาดของ y_sequences
-print(y_sequences.shape)  # ควรเป็น (จำนวนลำดับ, 1)
-
-# โหลดโมเดล
-model = load_model('best_price_model_full.keras')
-
-# ทำการทำนาย
-y_pred_scaled = model.predict(X_sequences)
-
-# แปลงผลลัพธ์กลับเป็นค่าเดิม
-y_pred = scaler_target.inverse_transform(y_pred_scaled)
-
-# ประเมินผล
-mae = mean_absolute_error(y_sequences, y_pred)
-mse = mean_squared_error(y_sequences, y_pred)
+# Calculate the evaluation metrics
+mae = mean_absolute_error(y_true_rescaled, y_pred_rescaled)
+mse = mean_squared_error(y_true_rescaled, y_pred_rescaled)
 rmse = np.sqrt(mse)
-r2 = r2_score(y_sequences, y_pred)
-mape = mean_absolute_percentage_error(y_sequences, y_pred)
+r2 = r2_score(y_true_rescaled, y_pred_rescaled)
+mape = mean_absolute_percentage_error(y_true_rescaled, y_pred_rescaled)
 
-# แสดงผลลัพธ์
-logging.info(f'MAE: {mae}')
-logging.info(f'MSE: {mse}')
-logging.info(f'RMSE: {rmse}')
-logging.info(f'R2: {r2}')
-logging.info(f'MAPE: {mape}')
+# Log the results
+logging.info(f"MAE: {mae}")
+logging.info(f"MSE: {mse}")
+logging.info(f"RMSE: {rmse}")
+logging.info(f"R2: {r2}")
+logging.info(f"MAPE: {mape}")
+
+# Plot the predictions
+plot_predictions(y_true_rescaled, y_pred_rescaled, ticker="AAPL")
+
+# Plot the residuals
+plot_residuals(y_true_rescaled, y_pred_rescaled, ticker="AAPL")
