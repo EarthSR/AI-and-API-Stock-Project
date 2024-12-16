@@ -213,7 +213,7 @@ print(f"State size: {state_size}, Action size: {action_size}")
 print(f"X_train shape: {X_train.shape}, X_test shape: {X_test.shape}")
 
 # ฝึก agent
-for e in range(1000):  # จำนวนรอบในการฝึก
+for e in range(50):  # จำนวนรอบในการฝึก
     state = X_train[0]  # เริ่มต้นที่ข้อมูลตัวแรก
     state = np.reshape(state, [1, state_size])
     
