@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import RobustScaler
 
 # 1. โหลดข้อมูล
 file_path = "./stock_America/NDQ_Stock_History_10Y.csv"
@@ -14,6 +15,9 @@ print(data['Ticker'].unique())
 numeric_columns = data.select_dtypes(include=[np.number]).columns
 imputer = SimpleImputer(strategy='mean')
 data[numeric_columns] = imputer.fit_transform(data[numeric_columns])
+
+# แปลงวันที่และจัดการกับ Time Zones
+data['Date'] = pd.to_datetime(data['Date'], errors='coerce', utc=False)
 
 # คำนวณ Daily Returns
 data = data.sort_values(by=['Ticker', 'Date'])
@@ -30,29 +34,16 @@ high_volatility_stocks_list = volatility[volatility['Volatility'] > volatility_t
 high_volatility_data = data[data['Ticker'].isin(high_volatility_stocks_list)]
 normal_stocks_data = data[~data['Ticker'].isin(high_volatility_stocks_list)]
 
-# ลบ Outliers
-def remove_outliers_with_custom_multiplier(df, stock_column, numeric_columns, multiplier_dict):
-    filtered_data = pd.DataFrame()
-    for stock in df[stock_column].unique():
-        stock_data = df[df[stock_column] == stock]
-        for column in numeric_columns:
-            if stock_data[column].nunique() > 1:
-                Q1, Q3 = stock_data[column].quantile(0.25), stock_data[column].quantile(0.75)
-                IQR = Q3 - Q1
-                lower_bound, upper_bound = Q1 - multiplier_dict.get(stock, 3.0) * IQR, Q3 + multiplier_dict.get(stock, 3.0) * IQR
-                stock_data = stock_data[(stock_data[column] >= lower_bound) & (stock_data[column] <= upper_bound)]
-        filtered_data = pd.concat([filtered_data, stock_data], ignore_index=True)
-    return filtered_data
+# รวมข้อมูลของหุ้นผันผวนสูงและต่ำ
+combined_data = pd.concat([high_volatility_data, normal_stocks_data], axis=0)
 
-high_volatility_cleaned_data = remove_outliers_with_custom_multiplier(high_volatility_data, 'Ticker', numeric_columns, {ticker: 5.0 for ticker in high_volatility_stocks_list})
-normal_cleaned_data = remove_outliers_with_custom_multiplier(normal_stocks_data, 'Ticker', numeric_columns, {ticker: 3.0 for ticker in normal_stocks_data['Ticker'].unique()})
+# ใช้ Robust Scaling สำหรับจัดการ outliers
+scaler = RobustScaler()
+numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
+combined_data[numeric_columns_to_scale] = scaler.fit_transform(combined_data[numeric_columns_to_scale])
 
-# รวมข้อมูลทั้งหมด
-final_cleaned_data = pd.concat([high_volatility_cleaned_data, normal_cleaned_data], ignore_index=True)
+# ตรวจสอบและจัดการกับ NaN ก่อนบันทึกข้อมูล
+combined_data = combined_data.dropna()  # ลบแถวที่มี NaN
 
-# แปลง Date เป็น datetime
-final_cleaned_data['Date'] = pd.to_datetime(final_cleaned_data['Date'], errors='coerce')
-
-# บันทึกข้อมูล
-final_cleaned_data.to_csv("cleaned_data.csv", index=False)
-print("\nข้อมูลที่จัดการแล้วทั้งหมดถูกบันทึกที่: cleaned_data.csv")
+# บันทึกข้อมูลเป็น CSV
+combined_data.to_csv("cleaned_data.csv", index=False)
