@@ -35,10 +35,8 @@ def fetch_stock_data(symbol, start_date=None, end_date=None):
 
         # ตรวจสอบว่า start_date และ end_date ถูกกำหนดหรือไม่
         if start_date is None or end_date is None:
-            # กำหนดช่วงเวลาล่าสุด (ย้อนหลัง 10 ปี)
-            end_date = pd.to_datetime('today')
-            start_date = end_date - pd.DateOffset(years=10)
-
+            start_date = pd.Timestamp("2014-01-01")
+            end_date = pd.Timestamp("2024-11-01")
         # ดึงข้อมูลจาก yfinance
         stock = yf.Ticker(ticker)
         history = stock.history(start=start_date, end=end_date)
@@ -47,6 +45,7 @@ def fetch_stock_data(symbol, start_date=None, end_date=None):
             logging.warning(f"No data found for {symbol}.")
             print(f"No data found for {symbol}.")
             return pd.DataFrame()
+
 
         # เพิ่มข้อมูลการเปลี่ยนแปลงและการเปลี่ยนแปลงเป็น %
         history['Change'] = history['Close'] - history['Open']
@@ -61,9 +60,7 @@ def fetch_stock_data(symbol, start_date=None, end_date=None):
                 "Close": row['Close'],
                 "High": row['High'],
                 "Low": row['Low'],
-                "Volume": row['Volume'],
-                "Change": row['Change'],
-                "Change (%)": row['Change (%)']
+                "Volume": row['Volume']
             })
 
         logging.info(f"Data for {symbol} fetched successfully.")

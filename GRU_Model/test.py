@@ -1,61 +1,12 @@
-import joblib
 import pandas as pd
 import numpy as np
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 from tensorflow.keras.models import load_model
-from tensorflow.keras.metrics import MeanSquaredError
-from sklearn.preprocessing import LabelEncoder, MinMaxScaler
-import matplotlib.pyplot as plt
-import ta
-import logging
+from tensorflow.keras.losses import MeanSquaredError
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
-
-# ตั้งค่า logging
-logging.basicConfig(level=logging.INFO, filename='testing.log', filemode='a',
-                    format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Load the model, ensuring custom metric MeanSquaredError is passed
-model = load_model('./best_price_model_full.keras', custom_objects={'MeanSquaredError': MeanSquaredError()})
-
-# ฟังก์ชันที่ใช้สำหรับการแสดงผลลัพธ์
-def plot_predictions(y_true, y_pred, ticker):
-    plt.figure(figsize=(10, 6))
-    plt.plot(y_true, label='True Values', color='blue')
-    plt.plot(y_pred, label='Predicted Values', color='red', alpha=0.7)
-    plt.title(f'True vs Predicted Prices for {ticker}')
-    plt.xlabel('Time')
-    plt.ylabel('Price')
-    plt.legend()
-    plt.show()
-
-def plot_residuals(y_true, y_pred, ticker):
-    residuals = y_true - y_pred
-    plt.figure(figsize=(10, 6))
-    plt.scatter(range(len(residuals)), residuals, alpha=0.5)
-    plt.hlines(y=0, xmin=0, xmax=len(residuals), colors='red')
-    plt.title(f'Residuals for {ticker}')
-    plt.xlabel('Sample')
-    plt.ylabel('Residual')
-    plt.show()
-
-# ฟังก์ชันที่ใช้แปลงข้อมูลให้เป็นลำดับ (sequence)
-def create_sequences(data, sentiment, time_steps=10):
-    sequences = []
-    sentiment_sequences = []
-    labels = []
-
-    # Ensure data and sentiment have the same length
-    min_len = min(len(data), len(sentiment))  # Ensure the lengths are the same
-    data = data[:min_len]  # Trim data if necessary
-    sentiment = sentiment[:min_len]  # Trim sentiment if necessary
-
-    for i in range(len(data) - time_steps):
-        sequences.append(data[i:i + time_steps])  # Sequence of features
-        sentiment_sequences.append(sentiment[i:i + time_steps])  # Sequence of sentiment data
-        labels.append(data[i + time_steps, 0])  # The label is the next value after time_steps (ensure it is scalar)
-        
-    return np.array(sequences), np.array(sentiment_sequences), np.array(labels)
-
-
+import matplotlib.pyplot as plt
+import joblib
+import ta
 
 # โหลดข้อมูล
 df_stock = pd.read_csv("cleaned_data.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
@@ -63,10 +14,6 @@ df_news = pd.read_csv("news_with_sentiment_gpu.csv")
 df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
 df_news['Confidence'] = df_news['Confidence'] / 100
 df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
-
-if df.shape[0] == 0:
-    print("No data after merge. Check your Date columns in both dataframes.")
-    exit()
 
 # เติมค่าที่ขาดหายไป
 df.fillna(method='ffill', inplace=True)
@@ -89,86 +36,123 @@ bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
 df['Bollinger_High'] = bollinger.bollinger_hband()
 df['Bollinger_Low'] = bollinger.bollinger_lband()
 
-# เติมค่า NaN
 df.fillna(method='ffill', inplace=True)
 df.fillna(0, inplace=True)
 
-# โหลด scaler ที่บันทึกไว้
-scaler_features = joblib.load('scaler_features_full.pkl')
-scaler_target = joblib.load('scaler_target_full.pkl')
-
-# Select features for scaling (15 features as per your case)
-features_to_scale = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence',
-                     'RSI', 'SMA_10', 'SMA_200', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
-
-print(f"Shape of df[features_to_scale]: {df[features_to_scale].shape}")
-print(f"Columns in df: {df.columns}")
-
-# ตรวจสอบว่า dataframe ไม่เป็น 0 แถว
-if df[features_to_scale].shape[0] > 0:
-    # Normalize features
-    scaled_features = scaler_features.transform(df[features_to_scale])
-
-    # Normalize target
-    scaled_target = scaler_target.transform(df[['Close']].values.reshape(-1, 1))
-else:
-    print("No valid data to scale.")
-    # ทำการเตรียมข้อมูลเพิ่มเติมหากไม่มีข้อมูลที่ถูกต้อง
-    # หรืออาจทำการตรวจสอบข้อมูลที่ขาดหายไป
-    exit()
-# Normalize features
-scaled_features = scaler_features.transform(df[features_to_scale])
-
-# Normalize target
-scaled_target = scaler_target.transform(df[['Close']].values.reshape(-1, 1))
+feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence',
+                   'RSI', 'SMA_10', 'SMA_200', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
 
 # Label Encode Ticker
 ticker_encoder = LabelEncoder()
 df['Ticker_ID'] = ticker_encoder.fit_transform(df['Ticker'])
 num_tickers = len(ticker_encoder.classes_)
 
-df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-df['Date'] = df['Date'].dt.tz_localize(None)
+# แบ่งข้อมูล Train/Val/Test ตามเวลา
+train_ratio = 0.7
+val_ratio = 0.15
+test_ratio = 0.15
 
-# Split data into train/test sets
-test_date = pd.Timestamp('2024-01-01')
+sorted_dates = df['Date'].sort_values().unique()
+train_cutoff = sorted_dates[int(len(sorted_dates) * train_ratio)]
+val_cutoff = sorted_dates[int(len(sorted_dates) * (train_ratio + val_ratio))]
+
+train_df = df[df['Date'] <= train_cutoff].copy()
+val_df = df[(df['Date'] > train_cutoff) & (df['Date'] <= val_cutoff)].copy()
+test_df = df[df['Date'] > val_cutoff].copy()
+
+# สร้าง target โดย shift(-1)
+test_targets_price = test_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
+test_df = test_df.iloc[:-1]
+
+test_features = test_df[feature_columns].values
+test_ticker_id = test_df['Ticker_ID'].values
+
+# โหลด Scaler ที่บันทึกไว้
+scaler_features = joblib.load('scaler_features_full.pkl')
+scaler_target = joblib.load('scaler_target_full.pkl')
+
+test_features_scaled = scaler_features.transform(test_features)
+test_targets_scaled = scaler_target.transform(test_targets_price)
+
+# สร้าง sequences สำหรับ AAPB
+def create_sequences_for_ticker(features, ticker_ids, targets, seq_length=10):
+    X_features, X_tickers, Y = [], [], []
+    for i in range(len(features) - seq_length):
+        X_features.append(features[i:i+seq_length])
+        X_tickers.append(ticker_ids[i:i+seq_length])  # sequence ของ ticker_id
+        Y.append(targets[i+seq_length])
+    return np.array(X_features), np.array(X_tickers), np.array(Y)
+
+seq_length = 10
+
+X_test_list, X_test_ticker_list, y_test_list = [], [], []
+for t_id in range(num_tickers):
+    df_test_ticker = test_df[test_df['Ticker_ID'] == t_id]
+    if len(df_test_ticker) > seq_length:
+        indices = df_test_ticker.index
+        mask_test = np.isin(test_df.index, indices)
+        f_s = test_features_scaled[mask_test]
+        t_s = test_ticker_id[mask_test]
+        target_s = test_targets_scaled[mask_test]
+        X_s, X_si, y_s = create_sequences_for_ticker(f_s, t_s, target_s, seq_length)
+        X_test_list.append(X_s)
+        X_test_ticker_list.append(X_si)
+        y_test_list.append(y_s)
+
+if len(X_test_list) > 0:
+    X_price_test = np.concatenate(X_test_list, axis=0)
+    X_ticker_test = np.concatenate(X_test_ticker_list, axis=0)
+    y_price_test = np.concatenate(y_test_list, axis=0)
+else:
+    X_price_test, X_ticker_test, y_price_test = np.array([]), np.array([]), np.array([])
+
+# โหลดโมเดลที่บันทึกไว้
+model = load_model('price_prediction_GRU_model_embedding_full.h5', 
+                   custom_objects={'mse': MeanSquaredError()})
 
 
-test_data = df[df['Date'] >= test_date]
+# ทดสอบโมเดล
+y_pred_scaled = model.predict([X_price_test, X_ticker_test])
+y_pred = scaler_target.inverse_transform(y_pred_scaled)
+y_true = scaler_target.inverse_transform(y_price_test)
 
-X_test = scaled_features[test_data.index]
-y_test = scaled_target[test_data.index]
-
-# สร้างข้อมูลลำดับ (sequence) สำหรับการเทรน
-# สร้าง sequences สำหรับ features และ sentiment
-sequences, sentiment_sequences, labels = create_sequences(scaled_features, df['Sentiment'].values)
-print(f"Sequences shape: {sequences.shape}")
-print(f"Sentiment Sequences shape: {sentiment_sequences.shape}")
-# Predict using the trained model
-model_input = [sequences, sentiment_sequences]
-y_pred = model.predict(model_input)
-
-# ใช้ inverse_transform หลังจาก reshaped ข้อมูลแล้ว
-# Rescale the predictions and true values
-y_true_rescaled = scaler_target.inverse_transform(y_test.reshape(-1, 1))  # reshape ให้เป็น 2D
-y_pred_rescaled = scaler_target.inverse_transform(y_pred.reshape(-1, 1))  # reshape ให้เป็น 2D
-
-# Calculate the evaluation metrics
-mae = mean_absolute_error(y_true_rescaled, y_pred_rescaled)
-mse = mean_squared_error(y_true_rescaled, y_pred_rescaled)
+# ประเมินผลการทำนาย
+mae = mean_absolute_error(y_true, y_pred)
+mse = mean_squared_error(y_true, y_pred)
 rmse = np.sqrt(mse)
-r2 = r2_score(y_true_rescaled, y_pred_rescaled)
-mape = mean_absolute_percentage_error(y_true_rescaled, y_pred_rescaled)
+r2 = r2_score(y_true, y_pred)
+mape = mean_absolute_percentage_error(y_true, y_pred)
 
-# Log the results
-logging.info(f"MAE: {mae}")
-logging.info(f"MSE: {mse}")
-logging.info(f"RMSE: {rmse}")
-logging.info(f"R2: {r2}")
-logging.info(f"MAPE: {mape}")
+print("Evaluation on AAPB:")
+print(f"MAE: {mae}")
+print(f"MSE: {mse}")
+print(f"RMSE: {rmse}")
+print(f"R² Score: {r2}")
+print(f"MAPE: {mape}")
 
-# Plot the predictions
-plot_predictions(y_true_rescaled, y_pred_rescaled, ticker="AAPL")
+# การแสดงผลกราฟ True vs Predicted
+def plot_predictions(y_true, y_pred, ticker="AAPB"):
+    plt.figure(figsize=(10, 6))
+    plt.plot(y_true, label='True Values', color='blue')
+    plt.plot(y_pred, label='Predicted Values', color='red', alpha=0.7)
+    plt.title(f'True vs Predicted Prices for {ticker}')
+    plt.xlabel('Time')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.show()
 
-# Plot the residuals
-plot_residuals(y_true_rescaled, y_pred_rescaled, ticker="AAPL")
+# การแสดงผล Residuals
+def plot_residuals(y_true, y_pred, ticker="AAPB"):
+    residuals = y_true - y_pred
+    plt.figure(figsize=(10, 6))
+    plt.scatter(range(len(residuals)), residuals, alpha=0.5)
+    plt.hlines(y=0, xmin=0, xmax=len(residuals), colors='red')
+    plt.title(f'Residuals for {ticker}')
+    plt.xlabel('Sample')
+    plt.ylabel('Residual')
+    plt.show()
+    
+
+
+plot_predictions(y_true[:200], y_pred[:200], "AAPB")
+plot_residuals(y_true, y_pred, "AAPB")
