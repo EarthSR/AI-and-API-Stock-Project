@@ -35,7 +35,7 @@ class DQNAgent:
 
     def _build_model(self):
         model = Sequential([
-            tf.keras.Input(shape=(self.state_size,)),  # ระบุ input shape ด้วย Input Layer
+            tf.keras.Input(shape=(10, 15)), # ระบุ input shape ด้วย Input Layer
             Dense(64, activation='relu'),
             Dense(64, activation='relu'),
             Dense(self.action_size, activation='linear')  # Output layer
@@ -44,12 +44,11 @@ class DQNAgent:
         return model
 
     def act(self, state):
-        state = np.reshape(state, (1, self.state_size))  # Ensure proper shape
+        state = np.reshape(state, (1, 10, 15))  # เปลี่ยนรูปแบบ state ให้เป็น (1, 10, 15)
         if np.random.rand() <= self.epsilon:
-            return random.randrange(self.action_size)  # Exploration
-        act_values = self.model.predict(state)  # Predict Q-values
-        return np.argmax(act_values[0])  # Return action with the highest Q-value
-
+            return random.randrange(self.action_size)  # การสำรวจ (Exploration)
+        act_values = self.model.predict(state)  # ทำนาย Q-values
+        return np.argmax(act_values[0])  # คืนค่าการกระทำที่มี Q-value สูงสุด
 
     def remember(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
@@ -59,8 +58,9 @@ class DQNAgent:
             return
         minibatch = random.sample(self.memory, batch_size)
         for state, action, reward, next_state, done in minibatch:
-            state = np.reshape(state, (1, self.state_size))  # Ensure state has the correct shape
-            next_state = np.reshape(next_state, (1, self.state_size))  # Ensure next_state has the correct shape
+            # Ensure state has the correct shape (1, 10, 15)
+            state = np.reshape(state, (1, 10, 15))  # แก้ไขให้ตรงกับที่โมเดลต้องการ
+            next_state = np.reshape(next_state, (1, 10, 15))  # แก้ไขให้ตรงกับที่โมเดลต้องการ
 
             target = reward
             if not done:
@@ -71,6 +71,7 @@ class DQNAgent:
 
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay  # Decay epsilon to reduce exploration over time
+
 
 
 # สร้าง sequences สำหรับ DQN
