@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import joblib
 import ta
 import logging
+from tensorflow.keras.losses import MeanSquaredError
 
 # ตั้งค่า logging
 logging.basicConfig(level=logging.INFO, filename='training.log', filemode='a',
@@ -261,7 +262,7 @@ history = model.fit(
 )
 
 
-model.save('price_prediction_GRU_model_embedding.h5')
+model.save('price_prediction_GRU_model_embedding.h5', custom_objects={'mse': MeanSquaredError()})
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
 
 # Load pre-existing model and scalers
