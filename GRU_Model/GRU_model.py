@@ -260,7 +260,7 @@ logging.info("เริ่มฝึกโมเดลสำหรับราค
 
 history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
-    epochs=1,
+    epochs=100,
     batch_size=32,
     verbose=1,
     shuffle=False,

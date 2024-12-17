@@ -182,7 +182,7 @@ action_size = 3  # Actions: Buy, Hold, Sell
 agent = DQNAgent(state_size=state_size, action_size=action_size)
 
 # Train model with early stopping and dynamic epsilon
-epochs = 50
+epochs = 100
 batch_size = 64
 for epoch in range(epochs):
     state = X_train[0]  # Initial state
