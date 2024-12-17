@@ -138,9 +138,15 @@ num_tickers = len(ticker_encoder.classes_)
 sorted_dates = df['Date'].unique()
 train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเขตที่ 6 ปี
 
+
 # ข้อมูล train, test
 train_df = df[df['Date'] <= train_cutoff].copy()
 test_df = df[df['Date'] > train_cutoff].copy()
+
+print("Train cutoff:", train_cutoff)
+print("First date in train set:", train_df['Date'].min())
+print("Last date in train set:", train_df['Date'].max())
+
 
 # สร้าง target โดย shift(-1)
 train_targets_price = train_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
@@ -254,7 +260,7 @@ logging.info("เริ่มฝึกโมเดลสำหรับราค
 
 history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
-    epochs=50,
+    epochs=1,
     batch_size=32,
     verbose=1,
     shuffle=False,
@@ -262,83 +268,120 @@ history = model.fit(
 )
 
 
-model.save('price_prediction_GRU_model_embedding.keras', custom_objects={'mse': MeanSquaredError()})
+model.save('price_prediction_GRU_model_embedding.keras')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
+
+def predict_next_day_with_retraining(model, test_df, train_df, feature_columns, seq_length=10):
+    """
+    Predict next day's price and retrain with actual data
+    """
+    predictions = []
+    actual_values = []
+    
+    # Sort data by date to ensure sequential prediction
+    test_df = test_df.sort_values('Date')
+    
+    for i in range(len(test_df) - 1):  # -1 because we need next day's actual value
+        current_date = test_df.iloc[i]['Date']
+        next_date = test_df.iloc[i + 1]['Date']
+        current_ticker = test_df.iloc[i]['Ticker']
+        
+        # Get historical data for this prediction
+        historical_data = pd.concat([train_df, test_df.iloc[:i+1]])
+        historical_data = historical_data[historical_data['Ticker'] == current_ticker].tail(seq_length)
+        
+        if len(historical_data) < seq_length:
+            continue
+            
+        # Prepare features for prediction
+        features = historical_data[feature_columns].values
+        ticker_ids = historical_data['Ticker_ID'].values
+        
+        # Scale features
+        features_scaled = scaler_features.transform(features)
+        
+        # Reshape for model input
+        X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
+        X_ticker = ticker_ids.reshape(1, seq_length)
+        
+        # Make prediction
+        pred = model.predict([X_features, X_ticker], verbose=0)
+        pred_unscaled = scaler_target.inverse_transform(pred)[0][0]
+        
+        # Get actual value
+        actual = test_df.iloc[i + 1]['Close']
+        
+        predictions.append(pred_unscaled)
+        actual_values.append(actual)
+        
+        # Retrain model with new data point if it's from the same ticker
+        if test_df.iloc[i + 1]['Ticker'] == current_ticker:
+            # Prepare new training data
+            new_features = test_df.iloc[i][feature_columns].values.reshape(1, -1)
+            new_features_scaled = scaler_features.transform(new_features)
+            new_target = test_df.iloc[i + 1]['Close'].reshape(1, -1)
+            new_target_scaled = scaler_target.transform(new_target)
+            
+            # Create sequence for training
+            train_seq_features = features_scaled
+            train_seq_ticker = ticker_ids
+            
+            # Fit model for one epoch
+            model.fit(
+                [train_seq_features.reshape(1, seq_length, len(feature_columns)),
+                 train_seq_ticker.reshape(1, seq_length)],
+                new_target_scaled,
+                epochs=1,
+                verbose=0
+            )
+    
+    return predictions, actual_values
+
+# Execute the prediction with retraining
+predictions, actual_values = predict_next_day_with_retraining(
+    model, 
+    test_df, 
+    train_df, 
+    feature_columns
+)
+
+# Calculate metrics
+mae = mean_absolute_error(actual_values, predictions)
+mse = mean_squared_error(actual_values, predictions)
+rmse = np.sqrt(mse)
+mape = mean_absolute_percentage_error(actual_values, predictions)
+r2 = r2_score(actual_values, predictions)
+
+print("\nTest Metrics with Retraining:")
+print(f"MAE: {mae:.4f}")
+print(f"MSE: {mse:.4f}")
+print(f"RMSE: {rmse:.4f}")
+print(f"MAPE: {mape:.4f}")
+print(f"R2 Score: {r2:.4f}")
+
+# Plot results
+plt.figure(figsize=(15, 6))
+plt.plot(actual_values, label='Actual', color='blue')
+plt.plot(predictions, label='Predicted', color='red', alpha=0.7)
+plt.title('Next Day Predictions with Retraining')
+plt.xlabel('Time')
+plt.ylabel('Price')
+plt.legend()
+plt.show()
+
+# Plot residuals
+residuals = np.array(actual_values) - np.array(predictions)
+plt.figure(figsize=(15, 6))
+plt.scatter(range(len(residuals)), residuals, alpha=0.5)
+plt.axhline(y=0, color='r', linestyle='-')
+plt.title('Prediction Residuals with Retraining')
+plt.xlabel('Time')
+plt.ylabel('Residual')
+plt.show()
+
 
 # Load pre-existing model and scalers
 model = load_model('price_prediction_GRU_model_embedding.keras')
 scaler_features = joblib.load('scaler_features.pkl')
 scaler_target = joblib.load('scaler_target.pkl')
-
-# Initializations
-predictions = []
-true_prices = []
-dates = []
-
-# Define sequence length
-seq_length = 10
-
-# Train the model incrementally (daily updates)
-for i in range(seq_length, len(test_df)):
-    # Get data for this day
-    current_data = test_df.iloc[i-seq_length:i]  # Data for the last `seq_length` days
-    
-    # Prepare features and target
-    features = current_data[feature_columns].values
-    ticker_id = current_data['Ticker_ID'].values
-    target = current_data['Close'].shift(-1).dropna().values.reshape(-1, 1)
-    
-    # Scale the features and target
-    features_scaled = scaler_features.transform(features)
-    target_scaled = scaler_target.transform(target)
-    
-    # Create sequences for this new data point
-    X_features, X_tickers, y_target = create_sequences_for_ticker(features_scaled, ticker_id, target_scaled, seq_length)
-    
-    # Predict the next day's price
-    y_pred_scaled = model.predict([X_features, X_tickers])
-    y_pred = scaler_target.inverse_transform(y_pred_scaled)
-    y_true = scaler_target.inverse_transform(y_target)
-    
-    predictions.append(y_pred[-1, 0])  # Predict the last point in the sequence
-    true_prices.append(y_true[-1, 0])  # True price for that day
-    dates.append(test_df['Date'].iloc[i])
-
-    # Retrain the model with the new data point
-    # Since we are only predicting one data point per day, we will add it back to the training set and retrain the model
-    X_train = np.concatenate([X_train, X_features], axis=0)
-    X_ticker_train = np.concatenate([X_ticker_train, X_tickers], axis=0)
-    y_train = np.concatenate([y_train, y_target], axis=0)
-
-    # Retrain the model incrementally
-    model.fit(
-        [X_train, X_ticker_train], y_train,
-        epochs=1,
-        batch_size=32,
-        verbose=0,
-        shuffle=False
-    )
-
-# Plot predictions vs true values
-plt.figure(figsize=(12, 6))
-plt.plot(dates, true_prices, label='True Prices', color='blue')
-plt.plot(dates, predictions, label='Predicted Prices', color='red', alpha=0.7)
-plt.title('True vs Predicted Stock Prices Over Time')
-plt.xlabel('Date')
-plt.ylabel('Price')
-plt.legend()
-plt.show()
-
-# Evaluate the model performance at the end
-mae = mean_absolute_error(true_prices, predictions)
-mse = mean_squared_error(true_prices, predictions)
-rmse = np.sqrt(mse)
-r2 = r2_score(true_prices, predictions)
-mape = mean_absolute_percentage_error(true_prices, predictions)
-
-print("Evaluation on Test Set:")
-print(f"MAE: {mae}")
-print(f"MSE: {mse}")
-print(f"RMSE: {rmse}")
-print(f"R² Score: {r2}")
-print(f"MAPE: {mape}")
+predict_next_day_with_retraining(model, test_df, train_df, feature_columns)
