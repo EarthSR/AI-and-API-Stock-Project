@@ -271,9 +271,9 @@ history = model.fit(
 model.save('price_prediction_GRU_model_embedding.keras')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
 
-def predict_next_day_with_retraining(model, test_df, train_df, feature_columns, seq_length=10):
+def predict_next_day_with_retraining(model, test_df, feature_columns, seq_length=10):
     """
-    Predict next day's price and retrain with actual data
+    Predict next day's price and retrain with actual data using only test_df
     """
     predictions = []
     actual_values = []
@@ -286,13 +286,13 @@ def predict_next_day_with_retraining(model, test_df, train_df, feature_columns, 
         next_date = test_df.iloc[i + 1]['Date']
         current_ticker = test_df.iloc[i]['Ticker']
         
-        # Get historical data for this prediction
-        historical_data = pd.concat([train_df, test_df.iloc[:i+1]])
+        # Get historical data for this prediction using only test_df
+        historical_data = test_df.iloc[:i+1]
         historical_data = historical_data[historical_data['Ticker'] == current_ticker].tail(seq_length)
         
         if len(historical_data) < seq_length:
             continue
-            
+        
         # Prepare features for prediction
         features = historical_data[feature_columns].values
         ticker_ids = historical_data['Ticker_ID'].values
@@ -308,15 +308,15 @@ def predict_next_day_with_retraining(model, test_df, train_df, feature_columns, 
         pred = model.predict([X_features, X_ticker], verbose=0)
         pred_unscaled = scaler_target.inverse_transform(pred)[0][0]
         
-        # Get actual value
+        # Get actual value (next day's price)
         actual = test_df.iloc[i + 1]['Close']
         
         predictions.append(pred_unscaled)
         actual_values.append(actual)
         
-        # Retrain model with new data point if it's from the same ticker
+        # Retrain model with new data point using test_df only
         if test_df.iloc[i + 1]['Ticker'] == current_ticker:
-            # Prepare new training data
+            # Prepare new training data from test_df
             new_features = test_df.iloc[i][feature_columns].values.reshape(1, -1)
             new_features_scaled = scaler_features.transform(new_features)
             new_target = test_df.iloc[i + 1]['Close'].reshape(1, -1)
@@ -337,13 +337,13 @@ def predict_next_day_with_retraining(model, test_df, train_df, feature_columns, 
     
     return predictions, actual_values
 
-# Execute the prediction with retraining
+# Execute the prediction with retraining using test_df only
 predictions, actual_values = predict_next_day_with_retraining(
     model, 
     test_df, 
-    train_df, 
     feature_columns
 )
+
 
 # Calculate metrics
 mae = mean_absolute_error(actual_values, predictions)
@@ -379,9 +379,4 @@ plt.xlabel('Time')
 plt.ylabel('Residual')
 plt.show()
 
-
-# Load pre-existing model and scalers
-model = load_model('price_prediction_GRU_model_embedding.keras')
-scaler_features = joblib.load('scaler_features.pkl')
-scaler_target = joblib.load('scaler_target.pkl')
-predict_next_day_with_retraining(model, test_df, train_df, feature_columns)
+model.save('price_prediction_GRU_model_embedding_aftertest.keras')
