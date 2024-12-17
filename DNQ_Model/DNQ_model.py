@@ -110,6 +110,9 @@ else:
 df_stock = pd.read_csv("cleaned_data.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
 df_news = pd.read_csv("news_with_sentiment_gpu.csv")
 df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
+df_stock['Date'] = pd.to_datetime(df_stock['Date'], errors='coerce')
+print(df_news['Date'].dtype)
+print(df_stock['Date'].dtype)
 df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
 df_news['Confidence'] = df_news['Confidence']
 df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
