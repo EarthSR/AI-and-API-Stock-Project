@@ -9,6 +9,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense
 import tensorflow as tf
 import matplotlib.pyplot as plt
+from sklearn.preprocessing import RobustScaler
 import joblib
 import ta
 import logging
@@ -164,8 +165,12 @@ train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเข�
 train_df = df[df['Date'] <= train_cutoff].copy()
 test_df = df[df['Date'] > train_cutoff].copy()
 
+scaler = RobustScaler()
+numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
+df_stock[numeric_columns_to_scale] = scaler.fit_transform(df_stock[numeric_columns_to_scale])
+
 # Feature Scaling
-scaler = MinMaxScaler()
+scaler = RobustScaler()
 train_features = scaler.fit_transform(train_df[feature_columns])
 test_features = scaler.transform(test_df[feature_columns])
 

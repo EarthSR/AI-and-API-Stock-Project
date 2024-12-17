@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import joblib
 import ta
 import logging
+from sklearn.preprocessing import RobustScaler
 from tensorflow.keras.losses import MeanSquaredError
 
 # ตั้งค่า logging
@@ -161,12 +162,17 @@ test_features = test_df[feature_columns].values
 train_ticker_id = train_df['Ticker_ID'].values
 test_ticker_id = test_df['Ticker_ID'].values
 
-# สเกลข้อมูลจากเทรนเท่านั้น
-scaler_features = MinMaxScaler()
-train_features_scaled = scaler_features.fit_transform(train_features)
-test_features_scaled = scaler_features.transform(test_features)
+# ใช้ Robust Scaling สำหรับจัดการ outliers
+scaler = RobustScaler()
+numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
+df_stock[numeric_columns_to_scale] = scaler.fit_transform(df_stock[numeric_columns_to_scale])
 
-scaler_target = MinMaxScaler()
+# สเกลข้อมูลจากชุดฝึก (train) เท่านั้น
+scaler_features = RobustScaler()
+train_features_scaled = scaler_features.fit_transform(train_features)  # ใช้ fit_transform กับชุดฝึก
+test_features_scaled = scaler_features.transform(test_features)  # ใช้ transform กับชุดทดสอบ
+
+scaler_target = RobustScaler()
 train_targets_scaled = scaler_target.fit_transform(train_targets_price)
 test_targets_scaled = scaler_target.transform(test_targets_price)
 

@@ -29,11 +29,6 @@ if 'Date' in data.columns:
     print("\nตรวจสอบข้อมูล Date หลังแปลงเป็น datetime:")
     print(data['Date'].head())
 
-# ใช้ Robust Scaling สำหรับจัดการ outliers
-scaler = RobustScaler()
-numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
-data[numeric_columns_to_scale] = scaler.fit_transform(data[numeric_columns_to_scale])
-
 # ตรวจสอบและจัดการกับ NaN ก่อนบันทึกข้อมูล
 data = data.dropna()  # ลบแถวที่มี NaN
 
