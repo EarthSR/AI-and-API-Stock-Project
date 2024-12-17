@@ -364,7 +364,7 @@ print(f"RMSE: {rmse:.4f}")
 print(f"MAPE: {mape:.4f}")
 print(f"R2 Score: {r2:.4f}")
 
-# Plot results
+# Plot results (Actual vs Predicted)
 plt.figure(figsize=(15, 6))
 plt.plot(actual_values, label='Actual', color='blue')
 plt.plot(predictions, label='Predicted', color='red', alpha=0.7)
@@ -374,14 +374,20 @@ plt.ylabel('Price')
 plt.legend()
 plt.show()
 
-# Plot residuals
+# Save the plot to a file
+plt.savefig('next_day_predictions_with_retraining.png')
+
+# Plot residuals (Actual - Predicted)
 residuals = np.array(actual_values) - np.array(predictions)
 plt.figure(figsize=(15, 6))
 plt.scatter(range(len(residuals)), residuals, alpha=0.5)
-plt.axhline(y=0, color='r', linestyle='-')
+plt.axhline(y=0, color='r', linestyle='-')  # Line at y = 0
 plt.title('Prediction Residuals with Retraining')
 plt.xlabel('Time')
 plt.ylabel('Residual')
 plt.show()
+
+# Save residuals plot to a file
+plt.savefig('prediction_residuals_with_retraining.png')
 
 model.save('price_prediction_LSTM_model_embedding_aftertest.keras')
