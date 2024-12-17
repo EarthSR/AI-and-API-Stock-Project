@@ -3,6 +3,8 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 from collections import deque
 import random
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
+from tensorflow.keras.models import load_model
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense
 import tensorflow as tf
@@ -10,6 +12,7 @@ import matplotlib.pyplot as plt
 import joblib
 import ta
 import logging
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 
 # ตั้งค่า logging
 logging.basicConfig(level=logging.INFO, filename='training.log', filemode='a',
@@ -106,6 +109,7 @@ if len(physical_devices) > 0:
 else:
     logging.info("GPU not found, using CPU")
     print("GPU not found, using CPU")
+
 # โหลดข้อมูล
 df_stock = pd.read_csv("cleaned_data.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
 df_news = pd.read_csv("news_with_sentiment_gpu.csv")
@@ -153,114 +157,167 @@ ticker_encoder = LabelEncoder()
 df['Ticker_ID'] = ticker_encoder.fit_transform(df['Ticker'])
 num_tickers = len(ticker_encoder.classes_)
 
-# แบ่งข้อมูล Train/Val/Test ตามเวลา
-train_ratio = 0.7
-val_ratio = 0.15
-test_ratio = 0.15
+sorted_dates = df['Date'].unique()
+train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเขตที่ 6 ปี
 
-sorted_dates = df['Date'].sort_values().unique()
-train_cutoff = sorted_dates[int(len(sorted_dates)*train_ratio)]
-val_cutoff = sorted_dates[int(len(sorted_dates)*(train_ratio+val_ratio))]
-
+# ข้อมูล train, test
 train_df = df[df['Date'] <= train_cutoff].copy()
-val_df = df[(df['Date'] > train_cutoff) & (df['Date'] <= val_cutoff)].copy()
-test_df = df[df['Date'] > val_cutoff].copy()
+test_df = df[df['Date'] > train_cutoff].copy()
 
-train_targets_price = train_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
-train_df = train_df.iloc[:-1]
+# Feature Scaling
+scaler = MinMaxScaler()
+train_features = scaler.fit_transform(train_df[feature_columns])
+test_features = scaler.transform(test_df[feature_columns])
 
-val_targets_price = val_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
-val_df = val_df.iloc[:-1]
+train_labels = train_df['Close'].values
+test_labels = test_df['Close'].values
 
-test_targets_price = test_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
-test_df = test_df.iloc[:-1]
+# Create sequences for DQN
+X_train, y_train = create_sequences_for_dqn(train_features, train_labels)
+X_test, y_test = create_sequences_for_dqn(test_features, test_labels)
 
-train_features = train_df[feature_columns].values
-val_features = val_df[feature_columns].values
-test_features = test_df[feature_columns].values
+# Initialize DQN agent
+state_size = X_train.shape[1]  # Features (number of columns)
+action_size = 3  # Actions: Buy, Hold, Sell
+agent = DQNAgent(state_size=state_size, action_size=action_size)
 
-train_ticker_id = train_df['Ticker_ID'].values
-val_ticker_id = val_df['Ticker_ID'].values
-test_ticker_id = test_df['Ticker_ID'].values
-
-# สเกลข้อมูลจากเทรนเท่านั้น
-scaler_features = MinMaxScaler()
-train_features_scaled = scaler_features.fit_transform(train_features)
-val_features_scaled = scaler_features.transform(val_features)
-test_features_scaled = scaler_features.transform(test_features)
-
-scaler_target = MinMaxScaler()
-train_targets_scaled = scaler_target.fit_transform(train_targets_price)
-val_targets_scaled = scaler_target.transform(val_targets_price)
-test_targets_scaled = scaler_target.transform(test_targets_price)
-
-joblib.dump(scaler_features, 'scaler_features_full.pkl')  # บันทึก scaler ฟีเจอร์
-joblib.dump(scaler_target, 'scaler_target_full.pkl')     # บันทึก scaler เป้าหมาย
-
-# สร้าง sequences สำหรับ DQN
-seq_length = 10
-X_train, y_train = create_sequences_for_dqn(train_features_scaled, train_targets_scaled, seq_length)
-X_val, y_val = create_sequences_for_dqn(val_features_scaled, val_targets_scaled, seq_length)
-X_test, y_test = create_sequences_for_dqn(test_features_scaled, test_targets_scaled, seq_length)
-
-# สร้างและฝึกโมเดล DQN
-state_size = X_train.shape[1] * X_train.shape[2]  # ขนาดของ state
-action_size = 3  # สามารถใช้ "Buy", "Hold", "Sell"
-agent = DQNAgent(state_size, action_size)
-
-# Reshape X_test before prediction
-X_test_reshaped = X_test.reshape(X_test.shape[0], -1)  # Flatten X_test to (num_samples, state_size)
-print(f"X_test shape before reshape: {X_test.shape}")
-print(f"X_test shape after reshape: {X_test_reshaped.shape}")
-
-# Reshape X_test before prediction
-y_pred_scaled = agent.model.predict(X_test_reshaped, verbose=0)  # ทำนายผลจาก X_test ที่ถูก reshape
-y_pred = scaler_target.inverse_transform(y_pred_scaled)
-
-print(f"State size: {state_size}, Action size: {action_size}")
-print(f"X_train shape: {X_train.shape}, X_test shape: {X_test.shape}")
-
-# ฝึก agent
-for e in range(50):  # จำนวนรอบในการฝึก
-    state = X_train[0]  # เริ่มต้นที่ข้อมูลตัวแรก
-    state = np.reshape(state, [1, state_size])
-    
+# Train model with early stopping and dynamic epsilon
+epochs = 50
+batch_size = 64
+for epoch in range(epochs):
+    state = X_train[0]  # Initial state
+    total_reward = 0
     for time in range(len(X_train) - 1):
-        action = agent.act(state)  # เลือก action
-        next_state = X_train[time + 1]  # สถานะถัดไป
-        next_state = np.reshape(next_state, [1, state_size])
-
-        # คำนวณ reward (อาจจะมาจากการเปรียบเทียบราคาหุ้น)
+        action = agent.act(state)  # Select action (Buy/Hold/Sell)
         reward = 0
-        if action == 0:  # ซื้อ
-            reward = next_state[0][3] - state[0][3]
-        elif action == 1:  # ขาย
-            reward = state[0][3] - next_state[0][3]
-        else:  # ถือ
+        if action == 0:  # Buy
+            reward = y_train[time + 1] - y_train[time]  # Reward is price change
+        elif action == 1:  # Hold
             reward = 0
+        elif action == 2:  # Sell
+            reward = y_train[time] - y_train[time + 1]  # Reward is negative of price change
 
-        done = time == len(X_train) - 2  # จบเมื่อถึงข้อมูลสุดท้าย
-        agent.remember(state, action, reward, next_state, done)
-        state = next_state
+        next_state = X_train[time + 1]
+        done = time == len(X_train) - 2  # Done when reaching the last time step
+        agent.remember(state, action, reward, next_state, done)  # Store experience
+        agent.replay(batch_size)  # Update model from experience replay
+        state = next_state  # Update state
+        total_reward += reward  # Add reward for this step
 
-        if done:
-            logging.info(f"Episode {e}/{1000} finished")
-            break
-
-    # Replay สำหรับประสบการณ์
-    agent.replay(batch_size=32)
+    logging.info(f"Epoch {epoch + 1}/{epochs} - Total reward: {total_reward:.2f} - Epsilon: {agent.epsilon:.3f}")
     
 agent.model.save('best_price_model_full.keras')
 agent.model.save('best_price_model_full.h5')
 
-# ทำนายผล
-# พยากรณ์ผลลัพธ์
-y_pred_scaled = agent.model.predict(X_test_reshaped, verbose=1)  # ระบุ verbose=1 เพื่อดูขั้นตอนการทำนาย
-y_pred = scaler_target.inverse_transform(y_pred_scaled)
+def predict_next_day_with_dqn(agent, test_df, feature_columns, seq_length=10):
+    """
+    Predict next day's action (Buy, Hold, Sell) and retrain DQN agent with actual reward using only test_df.
+    """
+    predictions = []
+    actual_values = []
+    total_reward = 0
+    scaler_features = MinMaxScaler()
 
-# แสดงกราฟ
-plot_predictions(y_test, y_pred, "Stock Prediction")
+    # Sort data by date to ensure sequential prediction
+    test_df = test_df.sort_values('Date')
 
-# ผลการทำนาย
-mse = np.mean((y_test - y_pred) ** 2)
-logging.info(f'Mean Squared Error: {mse}')
+    for i in range(len(test_df) - seq_length - 1):
+        current_ticker = test_df.iloc[i]['Ticker']
+        
+        # Extract historical data up to the current point
+        historical_data = test_df.iloc[i:i+seq_length]
+        historical_data = historical_data[historical_data['Ticker'] == current_ticker]
+        
+         # Print progress
+        if i % 100 == 0:  # Print every 100 iterations
+            print(f"Processing: {i}/{len(test_df)-1}")
+
+        if len(historical_data) < seq_length:
+            continue
+
+        # Prepare the state for the DQN agent
+        features = historical_data[feature_columns].values
+        state = scaler_features.fit_transform(features).flatten()  # Flatten for DQN input
+
+        # Select action using the DQN agent
+        action = agent.act(state.reshape(1, -1))  # Action: 0 = Buy, 1 = Hold, 2 = Sell
+        current_price = test_df.iloc[i + seq_length]['Close']
+        next_price = test_df.iloc[i + seq_length + 1]['Close']
+
+        # Calculate reward
+        if action == 0:  # Buy
+            reward = next_price - current_price
+        elif action == 2:  # Sell
+            reward = current_price - next_price
+        else:  # Hold
+            reward = 0
+
+        total_reward += reward
+
+        # Prepare next state
+        next_historical_data = test_df.iloc[i+1:i+1+seq_length]
+        next_features = next_historical_data[feature_columns].values
+        next_state = scaler_features.transform(next_features).flatten()
+
+        done = (i == len(test_df) - seq_length - 2)  # Terminal state at the end of the data
+
+        # Store experience in agent memory
+        agent.remember(state.reshape(1, -1), action, reward, next_state.reshape(1, -1), done)
+
+        # Retrain agent (experience replay)
+        agent.replay(batch_size=32)
+
+        # Save prediction and actual value
+        predictions.append(action)  # Storing the action chosen (Buy/Hold/Sell)
+        actual_values.append(next_price)
+
+    print(f"Total Reward: {total_reward}")
+    return predictions, actual_values
+
+
+# Initialize the DQN agent (assuming feature_columns and seq_length are defined)
+state_size = len(feature_columns) * 10  # Flattened state size
+action_size = 3  # 0 = Buy, 1 = Hold, 2 = Sell
+agent = DQNAgent(state_size, action_size)
+
+# Execute the prediction with retraining using test_df only
+predictions, actual_values = predict_next_day_with_dqn(
+    agent,  # Use DQN agent
+    test_df, 
+    feature_columns
+)
+# Calculate metrics
+mae = mean_absolute_error(actual_values, predictions)
+mse = mean_squared_error(actual_values, predictions)
+rmse = np.sqrt(mse)
+mape = mean_absolute_percentage_error(actual_values, predictions)
+r2 = r2_score(actual_values, predictions)
+
+print("\nTest Metrics with Retraining:")
+print(f"MAE: {mae:.4f}")
+print(f"MSE: {mse:.4f}")
+print(f"RMSE: {rmse:.4f}")
+print(f"MAPE: {mape:.4f}")
+print(f"R2 Score: {r2:.4f}")
+
+# Plot results
+plt.figure(figsize=(15, 6))
+plt.plot(actual_values, label='Actual', color='blue')
+plt.plot(predictions, label='Predicted', color='red', alpha=0.7)
+plt.title('Next Day Predictions with Retraining')
+plt.xlabel('Time')
+plt.ylabel('Price')
+plt.legend()
+plt.show()
+
+# Plot residuals
+residuals = np.array(actual_values) - np.array(predictions)
+plt.figure(figsize=(15, 6))
+plt.scatter(range(len(residuals)), residuals, alpha=0.5)
+plt.axhline(y=0, color='r', linestyle='-')
+plt.title('Prediction Residuals with Retraining')
+plt.xlabel('Time')
+plt.ylabel('Residual')
+plt.show()
+
+agent.model.save('price_prediction_DNQ_model_embedding_aftertest.keras')

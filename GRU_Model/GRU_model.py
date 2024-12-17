@@ -286,6 +286,10 @@ def predict_next_day_with_retraining(model, test_df, feature_columns, seq_length
         next_date = test_df.iloc[i + 1]['Date']
         current_ticker = test_df.iloc[i]['Ticker']
         
+         # Print progress
+        if i % 100 == 0:  # Print every 100 iterations
+            print(f"Processing: {i}/{len(test_df)-1}")
+        
         # Get historical data for this prediction using only test_df
         historical_data = test_df.iloc[:i+1]
         historical_data = historical_data[historical_data['Ticker'] == current_ticker].tail(seq_length)
