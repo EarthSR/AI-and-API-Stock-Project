@@ -227,6 +227,10 @@ num_feature = train_features_scaled.shape[1]  # จำนวน features ทา�
 features_input = Input(shape=(seq_length, num_feature), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
+print(f"Shape of X_price_train: {X_price_train.shape}")
+print(f"Shape of X_ticker_train: {X_ticker_train.shape}")
+
+
 embedding_dim = 32
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
@@ -251,11 +255,11 @@ history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
     epochs=50,
     batch_size=32,
-    validation_data=([X_price_val, X_ticker_val], y_price_val),
     verbose=1,
     shuffle=False,
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
+
 
 model.save('price_prediction_GRU_model_embedding.h5')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
