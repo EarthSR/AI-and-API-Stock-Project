@@ -244,7 +244,7 @@ x = Dropout(0.2)(x)
 output = Dense(1)(x)
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
 
 early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 checkpoint = ModelCheckpoint('best_price_model.keras', monitor='val_loss', save_best_only=True, mode='min')
