@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from tensorflow.keras.models import load_model
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, Embedding, concatenate
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
@@ -133,45 +134,33 @@ num_tickers = len(ticker_encoder.classes_)
 
 # แบ่งข้อมูล Train/Val/Test ตามเวลา
 # สมมติเราแบ่งตาม quantile ของวันที่ หรือกำหนดโดยตรง
-train_ratio = 0.7
-val_ratio = 0.15
-test_ratio = 0.15
+sorted_dates = df['Date'].unique()
+train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเขตที่ 6 ปี
 
-sorted_dates = df['Date'].sort_values().unique()
-train_cutoff = sorted_dates[int(len(sorted_dates)*train_ratio)]
-val_cutoff = sorted_dates[int(len(sorted_dates)*(train_ratio+val_ratio))]
-
+# ข้อมูล train, test
 train_df = df[df['Date'] <= train_cutoff].copy()
-val_df = df[(df['Date'] > train_cutoff) & (df['Date'] <= val_cutoff)].copy()
-test_df = df[df['Date'] > val_cutoff].copy()
+test_df = df[df['Date'] > train_cutoff].copy()
 
 # สร้าง target โดย shift(-1)
 train_targets_price = train_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
 train_df = train_df.iloc[:-1]
 
-val_targets_price = val_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
-val_df = val_df.iloc[:-1]
-
 test_targets_price = test_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
 test_df = test_df.iloc[:-1]
 
 train_features = train_df[feature_columns].values
-val_features = val_df[feature_columns].values
 test_features = test_df[feature_columns].values
 
 train_ticker_id = train_df['Ticker_ID'].values
-val_ticker_id = val_df['Ticker_ID'].values
 test_ticker_id = test_df['Ticker_ID'].values
 
 # สเกลข้อมูลจากเทรนเท่านั้น
 scaler_features = MinMaxScaler()
 train_features_scaled = scaler_features.fit_transform(train_features)
-val_features_scaled = scaler_features.transform(val_features)
 test_features_scaled = scaler_features.transform(test_features)
 
 scaler_target = MinMaxScaler()
 train_targets_scaled = scaler_target.fit_transform(train_targets_price)
-val_targets_scaled = scaler_target.transform(val_targets_price)
 test_targets_scaled = scaler_target.transform(test_targets_price)
 
 joblib.dump(scaler_features, 'scaler_features.pkl')  # บันทึก scaler ฟีเจอร์
@@ -197,20 +186,7 @@ for t_id in range(num_tickers):
         X_train_list.append(X_t)
         X_train_ticker_list.append(X_ti)
         y_train_list.append(y_t)
-
-    # Val
-    df_val_ticker = val_df[val_df['Ticker_ID'] == t_id]
-    if len(df_val_ticker) > seq_length:
-        indices = df_val_ticker.index
-        mask_val = np.isin(val_df.index, indices)
-        f_v = val_features_scaled[mask_val]
-        t_v = val_ticker_id[mask_val]
-        target_v = val_targets_scaled[mask_val]
-        X_v, X_vi, y_v = create_sequences_for_ticker(f_v, t_v, target_v, seq_length)
-        X_val_list.append(X_v)
-        X_val_ticker_list.append(X_vi)
-        y_val_list.append(y_v)
-
+        
     # Test
     df_test_ticker = test_df[test_df['Ticker_ID'] == t_id]
     if len(df_test_ticker) > seq_length:
@@ -284,17 +260,76 @@ history = model.fit(
 model.save('price_prediction_LSTM_model_embedding.h5')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
 
-plot_training_history(history)
+# Load pre-existing model and scalers
+model = load_model('price_prediction_LSTM_model_embedding.h5')
+scaler_features = joblib.load('scaler_features.pkl')
+scaler_target = joblib.load('scaler_target.pkl')
 
-y_pred_scaled = model.predict([X_price_test, X_ticker_test])
-y_pred = scaler_target.inverse_transform(y_pred_scaled)
-y_true = scaler_target.inverse_transform(y_price_test)
+# Initializations
+predictions = []
+true_prices = []
+dates = []
 
-mae = mean_absolute_error(y_true, y_pred)
-mse = mean_squared_error(y_true, y_pred)
+# Define sequence length
+seq_length = 10
+
+# Train the model incrementally (daily updates)
+for i in range(seq_length, len(test_df)):
+    # Get data for this day
+    current_data = test_df.iloc[i-seq_length:i]  # Data for the last `seq_length` days
+    
+    # Prepare features and target
+    features = current_data[feature_columns].values
+    ticker_id = current_data['Ticker_ID'].values
+    target = current_data['Close'].shift(-1).dropna().values.reshape(-1, 1)
+    
+    # Scale the features and target
+    features_scaled = scaler_features.transform(features)
+    target_scaled = scaler_target.transform(target)
+    
+    # Create sequences for this new data point
+    X_features, X_tickers, y_target = create_sequences_for_ticker(features_scaled, ticker_id, target_scaled, seq_length)
+    
+    # Predict the next day's price
+    y_pred_scaled = model.predict([X_features, X_tickers])
+    y_pred = scaler_target.inverse_transform(y_pred_scaled)
+    y_true = scaler_target.inverse_transform(y_target)
+    
+    predictions.append(y_pred[-1, 0])  # Predict the last point in the sequence
+    true_prices.append(y_true[-1, 0])  # True price for that day
+    dates.append(test_df['Date'].iloc[i])
+
+    # Retrain the model with the new data point
+    # Since we are only predicting one data point per day, we will add it back to the training set and retrain the model
+    X_train = np.concatenate([X_train, X_features], axis=0)
+    X_ticker_train = np.concatenate([X_ticker_train, X_tickers], axis=0)
+    y_train = np.concatenate([y_train, y_target], axis=0)
+
+    # Retrain the model incrementally
+    model.fit(
+        [X_train, X_ticker_train], y_train,
+        epochs=1,
+        batch_size=32,
+        verbose=0,
+        shuffle=False
+    )
+
+# Plot predictions vs true values
+plt.figure(figsize=(12, 6))
+plt.plot(dates, true_prices, label='True Prices', color='blue')
+plt.plot(dates, predictions, label='Predicted Prices', color='red', alpha=0.7)
+plt.title('True vs Predicted Stock Prices Over Time')
+plt.xlabel('Date')
+plt.ylabel('Price')
+plt.legend()
+plt.show()
+
+# Evaluate the model performance at the end
+mae = mean_absolute_error(true_prices, predictions)
+mse = mean_squared_error(true_prices, predictions)
 rmse = np.sqrt(mse)
-r2 = r2_score(y_true, y_pred)
-mape = mean_absolute_percentage_error(y_true, y_pred)
+r2 = r2_score(true_prices, predictions)
+mape = mean_absolute_percentage_error(true_prices, predictions)
 
 print("Evaluation on Test Set:")
 print(f"MAE: {mae}")
@@ -302,6 +337,3 @@ print(f"MSE: {mse}")
 print(f"RMSE: {rmse}")
 print(f"R² Score: {r2}")
 print(f"MAPE: {mape}")
-
-plot_predictions(y_true[:200], y_pred[:200], "Test Set")
-plot_residuals(y_true, y_pred, "Test Set")
