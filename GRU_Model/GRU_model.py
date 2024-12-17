@@ -262,11 +262,11 @@ history = model.fit(
 )
 
 
-model.save('price_prediction_GRU_model_embedding.h5', custom_objects={'mse': MeanSquaredError()})
+model.save('price_prediction_GRU_model_embedding.keras', custom_objects={'mse': MeanSquaredError()})
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
 
 # Load pre-existing model and scalers
-model = load_model('price_prediction_GRU_model_embedding.h5')
+model = load_model('price_prediction_GRU_model_embedding.keras')
 scaler_features = joblib.load('scaler_features.pkl')
 scaler_target = joblib.load('scaler_target.pkl')
 

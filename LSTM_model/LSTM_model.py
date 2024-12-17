@@ -245,7 +245,7 @@ x = Dropout(0.2)(x)
 output = Dense(1)(x)
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
+model.compile(optimizer='adam', loss='mse', metrics=['mae'])
 
 early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 checkpoint = ModelCheckpoint('best_price_model.keras', monitor='val_loss', save_best_only=True, mode='min')
@@ -263,11 +263,11 @@ history = model.fit(
 )
 
 
-model.save('price_prediction_LSTM_model_embedding.h5')
+model.save('price_prediction_LSTM_model_embedding.keras')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
 
 # Load pre-existing model and scalers
-model = load_model('price_prediction_LSTM_model_embedding.h5', custom_objects={'mse': MeanSquaredError()})
+model = load_model('price_prediction_LSTM_model_embedding.keras', custom_objects={'mse': MeanSquaredError()})
 scaler_features = joblib.load('scaler_features.pkl')
 scaler_target = joblib.load('scaler_target.pkl')
 
