@@ -102,10 +102,14 @@ df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
 df['RSI'].fillna(method='ffill', inplace=True)
 df['RSI'].fillna(0, inplace=True)
 
-df['SMA_10'] = df['Close'].rolling(window=10).mean()
-df['SMA_200'] = df['Close'].rolling(window=200).mean()
-df['MACD'] = df['Close'].ewm(span=12, adjust=False).mean() - df['Close'].ewm(span=26, adjust=False).mean()
-df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+df['SMA_5'] = df['Close'].rolling(window=5).mean()  # SMA 50 วัน
+df['SMA_10'] = df['Close'].rolling(window=10).mean()  # SMA 200 วัน
+# คำนวณ MACD ด้วย EMA 12 และ EMA 26
+df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
+df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
+# คำนวณ MACD = EMA(12) - EMA(26)
+df['MACD'] = df['EMA_12'] - df['EMA_26']
+df['MACD_Signal'] = df['MACD'].rolling(window=9).mean()  
 
 bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
 df['Bollinger_High'] = bollinger.bollinger_hband()
@@ -114,8 +118,8 @@ df['Bollinger_Low'] = bollinger.bollinger_lband()
 df.fillna(method='ffill', inplace=True)
 df.fillna(0, inplace=True)
 
-feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence',
-                   'RSI', 'SMA_10', 'SMA_200', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment',
+                   'RSI', 'SMA_10', 'SMA_5', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
 # feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence']
 
 # Label Encode Ticker
