@@ -16,9 +16,6 @@ numeric_columns = data.select_dtypes(include=[np.number]).columns
 imputer = SimpleImputer(strategy='mean')
 data[numeric_columns] = imputer.fit_transform(data[numeric_columns])
 
-# แปลงวันที่และจัดการกับ Time Zones
-data['Date'] = pd.to_datetime(data['Date'], errors='coerce', utc=False)
-
 # คำนวณ Daily Returns
 data = data.sort_values(by=['Ticker', 'Date'])
 data['Daily_Return'] = data.groupby('Ticker')['Close'].pct_change()
@@ -37,6 +34,11 @@ normal_stocks_data = data[~data['Ticker'].isin(high_volatility_stocks_list)]
 # รวมข้อมูลของหุ้นผันผวนสูงและต่ำ
 combined_data = pd.concat([high_volatility_data, normal_stocks_data], axis=0)
 
+if 'Date' in data.columns:
+    data['Date'] = pd.to_datetime(data['Date'], errors='coerce')
+    print("\nตรวจสอบข้อมูล Date หลังแปลงเป็น datetime:")
+    print(data['Date'].head())
+
 # ใช้ Robust Scaling สำหรับจัดการ outliers
 scaler = RobustScaler()
 numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
@@ -47,3 +49,4 @@ combined_data = combined_data.dropna()  # ลบแถวที่มี NaN
 
 # บันทึกข้อมูลเป็น CSV
 combined_data.to_csv("cleaned_data.csv", index=False)
+print("บันทึกข้อมูลเรียบร้อยแล้ว")

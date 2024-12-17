@@ -110,7 +110,7 @@ else:
 df_stock = pd.read_csv("cleaned_data.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
 df_news = pd.read_csv("news_with_sentiment_gpu.csv")
 df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
-df_news['Confidence'] = df_news['Confidence'] / 100
+df_news['Confidence'] = df_news['Confidence']
 df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
 
 # เติมค่าที่ขาดหายไป

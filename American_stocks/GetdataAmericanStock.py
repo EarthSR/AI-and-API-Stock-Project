@@ -35,7 +35,7 @@ def fetch_stock_data(symbol, start_date=None, end_date=None):
 
         # ตรวจสอบว่า start_date และ end_date ถูกกำหนดหรือไม่
         if start_date is None or end_date is None:
-            start_date = pd.Timestamp("2014-01-01")
+            start_date = pd.Timestamp("2018-01-01")
             end_date = pd.Timestamp("2024-11-01")
         # ดึงข้อมูลจาก yfinance
         stock = yf.Ticker(ticker)
