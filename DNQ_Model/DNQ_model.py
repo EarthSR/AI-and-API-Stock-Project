@@ -35,20 +35,34 @@ class DQNAgent:
 
     def _build_model(self):
         model = Sequential([
-            tf.keras.Input(shape=(10, 15)), # ระบุ input shape ด้วย Input Layer
+            tf.keras.Input(shape=(10, 15)),  # Input shape
             Dense(64, activation='relu'),
             Dense(64, activation='relu'),
-            Dense(self.action_size, activation='linear')  # Output layer
+            Dense(self.action_size, activation='linear')  # Output layer มีขนาดเท่ากับ action_size
         ])
         model.compile(loss='mse', optimizer=tf.keras.optimizers.Adam(learning_rate=self.learning_rate))
         return model
 
+
     def act(self, state):
-        state = np.reshape(state, (1, 10, 15))  # เปลี่ยนรูปแบบ state ให้เป็น (1, 10, 15)
-        if np.random.rand() <= self.epsilon:
-            return random.randrange(self.action_size)  # การสำรวจ (Exploration)
-        act_values = self.model.predict(state)  # ทำนาย Q-values
-        return np.argmax(act_values[0])  # คืนค่าการกระทำที่มี Q-value สูงสุด
+        state = np.reshape(state, (1, 10, 15))  # Reshape state ให้ตรงกับ input ของโมเดล
+        if np.random.rand() <= self.epsilon:  # Exploration
+            action = random.randrange(self.action_size)
+        else:  # Exploitation
+            act_values = self.model.predict(state, verbose=0)  # ทำนาย Q-values
+            last_timestep_q_values = act_values[0][-1]  # เลือก Q-values ของ timestep ล่าสุด
+            print(f"Q-values for last timestep: {last_timestep_q_values}")  # Debugging Q-values
+            action = np.argmax(last_timestep_q_values)  # เลือก action จาก Q-values
+            
+        # ตรวจสอบ action ให้อยู่ในขอบเขต
+        if action >= self.action_size:
+            print(f"Invalid action: {action}, resetting to valid range.")
+            action = random.randrange(self.action_size)
+        
+        return action
+
+
+
 
     def remember(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
@@ -65,8 +79,8 @@ class DQNAgent:
             target = reward
             if not done:
                 target = reward + self.gamma * np.amax(self.model.predict(next_state)[0])  # Update Q-value for non-terminal state
-            target_f = self.model.predict(state)  # Get current Q-values for the state
-            target_f[0][action] = target  # Update the Q-value for the chosen action
+                target_f = np.clip(self.model.predict(state, verbose=0), a_min=-1e3, a_max=1e3)  # Limit Q-values
+                target_f[0][action] = target  # Update Q-value
             self.model.fit(state, target_f, epochs=1, verbose=0)  # Train the model with the updated target
 
         if self.epsilon > self.epsilon_min:
