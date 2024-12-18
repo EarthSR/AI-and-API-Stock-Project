@@ -51,23 +51,27 @@ def plot_training_history(history):
 
 def plot_predictions(y_true, y_pred, ticker):
     plt.figure(figsize=(10, 6))
-    plt.plot(y_true, label='True Values', color='blue')
-    plt.plot(y_pred, label='Predicted Values', color='red', alpha=0.7)
+    plt.plot(y_true, label='Actual', color='blue')
+    plt.plot(y_pred, label='Predicted', color='red', alpha=0.7)
     plt.title(f'True vs Predicted Prices for {ticker}')
     plt.xlabel('Time')
     plt.ylabel('Price')
     plt.legend()
-    plt.show()
+    plt.tight_layout()
+    plt.savefig(f'predictions_{ticker}.png')  # บันทึกกราฟแยกแต่ละหุ้น
+    plt.close()
 
 def plot_residuals(y_true, y_pred, ticker):
-    residuals = y_true - y_pred
+    residuals = np.array(y_true) - np.array(y_pred)
     plt.figure(figsize=(10, 6))
     plt.scatter(range(len(residuals)), residuals, alpha=0.5)
     plt.hlines(y=0, xmin=0, xmax=len(residuals), colors='red')
     plt.title(f'Residuals for {ticker}')
     plt.xlabel('Sample')
     plt.ylabel('Residual')
-    plt.show()
+    plt.tight_layout()
+    plt.savefig(f'residuals_{ticker}.png')  # บันทึกกราฟแยกแต่ละหุ้น
+    plt.close()
 
 # ตรวจสอบ GPU
 # ตรวจสอบ GPU
@@ -267,7 +271,7 @@ logging.info("เริ่มฝึกโมเดลสำหรับราค
 
 history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
-    epochs=1000,
+    epochs=1,
     batch_size=32,
     verbose=1,
     shuffle=False,
@@ -278,123 +282,138 @@ history = model.fit(
 model.save('price_prediction_LSTM_model_embedding.keras')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
 
-def predict_next_day_with_retraining_LSTM(model, test_df, feature_columns, seq_length=10):
+def predict_and_retrain_per_ticker(model, test_df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
     """
-    Predict next day's price and retrain with actual data using only test_df with LSTM
+    Predict next day's price and retrain the model for each ticker separately.
+    
+    Parameters:
+    - model: Trained Keras model.
+    - test_df: DataFrame containing test data.
+    - feature_columns: List of feature column names.
+    - scaler_features: Fitted scaler for features.
+    - scaler_target: Fitted scaler for target.
+    - ticker_encoder: Fitted LabelEncoder for ticker IDs.
+    - seq_length: Sequence length for LSTM.
+
+    Returns:
+    - results: Dictionary containing metrics and predictions for each ticker.
     """
-    predictions = []
-    actual_values = []
-    
-    # Sort data by date to ensure sequential prediction
-    test_df = test_df.sort_values('Date')
-    
-    for i in range(len(test_df) - 1):  # -1 because we need next day's actual value
-        current_date = test_df.iloc[i]['Date']
-        next_date = test_df.iloc[i + 1]['Date']
-        current_ticker = test_df.iloc[i]['Ticker']
+    tickers = test_df['Ticker'].unique()
+    results = {}
+
+    for ticker in tickers:
+        print(f"\nProcessing Ticker: {ticker}")
+        ticker_id = ticker_encoder.transform([ticker])[0]
+        df_ticker = test_df[test_df['Ticker'] == ticker].sort_values('Date').reset_index(drop=True)
         
-         # Print progress
-        if i % 100 == 0:  # Print every 100 iterations
-            print(f"Processing: {i}/{len(test_df)-1}")
+        if len(df_ticker) < seq_length + 1:
+            print(f"Not enough data for ticker {ticker}, skipping...")
+            continue  # ข้ามหากข้อมูลน้อยกว่า seq_length + 1
         
-        # Get historical data for this prediction using only test_df
-        historical_data = test_df.iloc[:i+1]
-        historical_data = historical_data[historical_data['Ticker'] == current_ticker].tail(seq_length)
+        predictions = []
+        actual_values = []
         
-        if len(historical_data) < seq_length:
-            continue
-        
-        # Prepare features for prediction
-        features = historical_data[feature_columns].values
-        ticker_ids = historical_data['Ticker_ID'].values
-        
-        # Scale features
-        features_scaled = scaler_features.transform(features)
-        
-        # Reshape for LSTM input (3D input: [samples, timesteps, features])
-        X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
-        X_ticker = ticker_ids.reshape(1, seq_length)
-        
-        # Make prediction
-        pred = model.predict([X_features, X_ticker], verbose=0)
-        pred_unscaled = scaler_target.inverse_transform(pred)[0][0]
-        
-        # Get actual value (next day's price)
-        actual = test_df.iloc[i + 1]['Close']
-        
-        predictions.append(pred_unscaled)
-        actual_values.append(actual)
-        
-        # Retrain model with new data point using test_df only
-        if test_df.iloc[i + 1]['Ticker'] == current_ticker:
-            # Prepare new training data from test_df
-            new_features = test_df.iloc[i][feature_columns].values.reshape(1, -1)
+        for i in range(len(df_ticker) - seq_length):
+            # Print progress
+            if i % 100 == 0:
+                print(f"  Processing: {i}/{len(df_ticker)-seq_length}")
+            
+            # Get historical data for this prediction
+            historical_data = df_ticker.iloc[i:i+seq_length]
+            
+            # Prepare features for prediction
+            features = historical_data[feature_columns].values
+            ticker_ids = historical_data['Ticker_ID'].values
+            
+            # Scale features
+            features_scaled = scaler_features.transform(features)
+            
+            # Reshape for LSTM input (3D input: [samples, timesteps, features])
+            X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
+            X_ticker = ticker_ids.reshape(1, seq_length)
+            
+            # Make prediction
+            pred = model.predict([X_features, X_ticker], verbose=0)
+            pred_unscaled = scaler_target.inverse_transform(pred)[0][0]
+            
+            # Get actual value (next day's price)
+            actual = df_ticker.iloc[i + seq_length]['Close']
+            
+            predictions.append(pred_unscaled)
+            actual_values.append(actual)
+            
+            # Retrain model with new data point
+            new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
             new_features_scaled = scaler_features.transform(new_features)
-            new_target = test_df.iloc[i + 1]['Close'].reshape(1, -1)
-            new_target_scaled = scaler_target.transform(new_target)
+            new_target = df_ticker.iloc[i + seq_length]['Close']
+            new_target_scaled = scaler_target.transform([[new_target]])
             
             # Create sequence for training
-            train_seq_features = features_scaled
-            train_seq_ticker = ticker_ids
+            train_seq_features = features_scaled.reshape(1, seq_length, len(feature_columns))
+            train_seq_ticker = ticker_ids.reshape(1, seq_length)
             
             # Fit LSTM model for one epoch with the new data
             model.fit(
-                [train_seq_features.reshape(1, seq_length, len(feature_columns)),
-                 train_seq_ticker.reshape(1, seq_length)],
+                [train_seq_features, train_seq_ticker],
                 new_target_scaled,
-                epochs=1,
-                batch_size=1,  # Update with batch size of 1 since we are training with a single new sample
+                epochs=10,
+                batch_size=1,
                 verbose=0
             )
+        
+        # คำนวณเมตริกส์สำหรับหุ้นนี้
+        mae = mean_absolute_error(actual_values, predictions)
+        mse = mean_squared_error(actual_values, predictions)
+        rmse = np.sqrt(mse)
+        mape = mean_absolute_percentage_error(actual_values, predictions)
+        r2 = r2_score(actual_values, predictions)
+        
+        results[ticker] = {
+            'MAE': mae,
+            'MSE': mse,
+            'RMSE': rmse,
+            'MAPE': mape,
+            'R2': r2,
+            'Predictions': predictions,
+            'Actuals': actual_values
+        }
+        
+        # พล็อตผลการพยากรณ์และ residuals สำหรับหุ้นนี้
+        plot_predictions(actual_values, predictions, ticker)
+        plot_residuals(actual_values, predictions, ticker)
     
-    return predictions, actual_values
+    return results
 
-# Execute the prediction with retraining using test_df only
-predictions, actual_values = predict_next_day_with_retraining_LSTM(
-    model, 
-    test_df, 
-    feature_columns
+# ประเมินผลและพยากรณ์แยกตามแต่ละหุ้น
+results_per_ticker = predict_and_retrain_per_ticker(
+    model=model,
+    test_df=test_df,
+    feature_columns=feature_columns,
+    scaler_features=scaler_features,
+    scaler_target=scaler_target,
+    ticker_encoder=ticker_encoder,
+    seq_length=seq_length
 )
 
+# แสดงผลสรุปเมตริกส์สำหรับแต่ละหุ้น
+for ticker, metrics in results_per_ticker.items():
+    print(f"\nMetrics for {ticker}:")
+    print(f"MAE: {metrics['MAE']:.4f}")
+    print(f"MSE: {metrics['MSE']:.4f}")
+    print(f"RMSE: {metrics['RMSE']:.4f}")
+    print(f"MAPE: {metrics['MAPE']:.4f}")
+    print(f"R2 Score: {metrics['R2']:.4f}")
 
-# Calculate metrics
-mae = mean_absolute_error(actual_values, predictions)
-mse = mean_squared_error(actual_values, predictions)
-rmse = np.sqrt(mse)
-mape = mean_absolute_percentage_error(actual_values, predictions)
-r2 = r2_score(actual_values, predictions)
+# บันทึกเมตริกส์ลงไฟล์ CSV สำหรับการวิเคราะห์เพิ่มเติม
+metrics_df = pd.DataFrame({
+    ticker: {
+        'MAE': metrics['MAE'],
+        'MSE': metrics['MSE'],
+        'RMSE': metrics['RMSE'],
+        'MAPE': metrics['MAPE'],
+        'R2': metrics['R2']
+    }
+    for ticker, metrics in results_per_ticker.items()
+}).T
 
-print("\nTest Metrics with Retraining:")
-print(f"MAE: {mae:.4f}")
-print(f"MSE: {mse:.4f}")
-print(f"RMSE: {rmse:.4f}")
-print(f"MAPE: {mape:.4f}")
-print(f"R2 Score: {r2:.4f}")
-
-# Plot results (Actual vs Predicted)
-plt.figure(figsize=(15, 6))
-plt.plot(actual_values, label='Actual', color='blue')
-plt.plot(predictions, label='Predicted', color='red', alpha=0.7)
-plt.title('Next Day Predictions with Retraining')
-plt.xlabel('Time')
-plt.ylabel('Price')
-plt.legend()
-plt.show()
-
-# Save the plot to a file
-plt.savefig('next_day_predictions_with_retraining.png')
-
-# Plot residuals (Actual - Predicted)
-residuals = np.array(actual_values) - np.array(predictions)
-plt.figure(figsize=(15, 6))
-plt.scatter(range(len(residuals)), residuals, alpha=0.5)
-plt.axhline(y=0, color='r', linestyle='-')  # Line at y = 0
-plt.title('Prediction Residuals with Retraining')
-plt.xlabel('Time')
-plt.ylabel('Residual')
-plt.show()
-
-# Save residuals plot to a file
-plt.savefig('prediction_residuals_with_retraining.png')
-
-model.save('price_prediction_LSTM_model_embedding_aftertest.keras')
+metrics_df.to_csv('metrics_per_ticker.csv', index=True)

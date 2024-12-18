@@ -505,6 +505,64 @@ def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_featu
     
     return final_metrics, trade_history, performance_metrics
 
+def process_multiple_stocks(agent, test_df, feature_columns, scaler_features, scaler_target, initial_balance=100000, window_size=10):
+    """
+    ทดสอบโมเดลเดียวกันสำหรับแต่ละหุ้นในชุดข้อมูลทดสอบ
+    
+    Parameters:
+    - agent: DQN agent ที่ถูกฝึกฝนแล้ว
+    - test_df: DataFrame ของข้อมูลทดสอบรวมหลายหุ้น
+    - feature_columns: รายชื่อ features ที่ใช้
+    - scaler_features: RobustScaler ที่ใช้สเกลฟีเจอร์
+    - scaler_target: RobustScaler ที่ใช้สเกลเป้าหมาย
+    - initial_balance: เงินทุนเริ่มต้น
+    - window_size: ขนาดของ sequence สำหรับการทำนาย
+    """
+    results = {}
+    trade_histories = {}
+    performance_metrics_all = {}
+    
+    # สมมติว่ามีคอลัมน์ 'Ticker' ใน test_df
+    tickers = test_df['Ticker'].unique()
+    
+    for ticker in tickers:
+        logging.info(f"Testing ticker: {ticker}")
+        
+        # กรองข้อมูลสำหรับหุ้นตัวนี้
+        stock_df = test_df[test_df['Ticker'] == ticker].copy()
+        
+        # ตรวจสอบว่ามีข้อมูลเพียงพอสำหรับ window_size
+        if len(stock_df) < window_size + 1:
+            logging.warning(f"Not enough data for ticker {ticker}. Skipping.")
+            continue
+        
+        # โหลด scaler เฉพาะหุ้นนี้
+        # เนื่องจากเราใช้ scaler เดียวกันสำหรับทุกหุ้นในการฝึกฝน
+        # ดังนั้นไม่ต้องโหลด scaler แยก
+        # scaler_features = joblib.load(f'scaler_features_{ticker}.pkl')
+        # scaler_target = joblib.load(f'scaler_target_{ticker}.pkl')
+        
+        # เรียกใช้ฟังก์ชันทดสอบสำหรับหุ้นนี้
+        metrics, trade_history, performance_metrics = predict_and_retrain_sequential(
+            agent=agent,
+            test_df=stock_df,
+            feature_columns=feature_columns,
+            scaler_features=scaler_features,
+            scaler_target=scaler_target,
+            initial_balance=initial_balance,
+            window_size=window_size
+        )
+        
+        # เก็บผลลัพธ์
+        results[ticker] = metrics
+        trade_histories[ticker] = trade_history
+        performance_metrics_all[ticker] = performance_metrics
+        
+        logging.info(f"Completed testing for ticker: {ticker}")
+    
+    return results, trade_histories, performance_metrics_all
+
+
 
 def calculate_final_metrics(portfolio_values, daily_returns, predictions, actual_prices, trade_history):
     """คำนวณ metrics สุดท้าย"""
@@ -582,14 +640,11 @@ def main():
     train_df, test_df, feature_columns, train_features_scaled, test_features_scaled, \
     train_targets_scaled, test_targets_scaled = prepare_data()
     
-    # Create sequences
-    X_train, y_train = create_sequences(train_features_scaled, train_targets_scaled.flatten())
-    X_test, y_test = create_sequences(test_features_scaled, test_targets_scaled.flatten())
+    # Create sequences for training
+    X_train, y_train = create_sequences(train_features_scaled, train_targets_scaled.flatten(), seq_length=CONFIG['SEQUENCE_LENGTH'])
     
     logging.info(f"X_train shape: {X_train.shape}")
     logging.info(f"y_train shape: {y_train.shape}")
-    logging.info(f"X_test shape: {X_test.shape}")
-    logging.info(f"y_test shape: {y_test.shape}")
     
     # Initialize agent
     state_shape = X_train.shape[1:]
@@ -601,48 +656,42 @@ def main():
         # Train model
         agent = train_model(X_train, y_train, agent)
         
-        # Evaluate model
-        predictions, actual_values, metrics = evaluate_model(agent, X_test, y_test)
-        
-        # Save final model
+        # Save trained model
         agent.model.save('final_model_DQN.h5')
         
-        # Plot final results
-        plt.figure(figsize=(15, 6))
-        plt.plot(actual_values, label='Actual', alpha=0.7)
-        plt.plot(predictions, label='Predicted Actions', alpha=0.7)
-        plt.title('Trading Decisions vs Actual Price Movement')
-        plt.xlabel('Time')
-        plt.ylabel('Value')
-        plt.legend()
-        plt.savefig('final_results.png')
-        plt.close()
+        # Plot training progress
+        plot_training_progress([0])  # แทนที่ด้วยข้อมูลจริงถ้ามี
         
-        logging.info("Training completed successfully")
-        
-        
+        # Load scalers
         scaler_features = joblib.load('scaler_features.pkl')
         scaler_target = joblib.load('scaler_target.pkl')
-        # Predict and retrain sequentially
-        metrics_seq, trade_history, performance_metrics = predict_and_retrain_sequential(
-            agent,
-            test_df,
-            feature_columns,
+        
+        # ทดสอบโมเดลสำหรับแต่ละหุ้น
+        results, trade_histories, performance_metrics_all = process_multiple_stocks(
+            agent=agent,
+            test_df=test_df,
+            feature_columns=feature_columns,
             scaler_features=scaler_features,
-            scaler_target=scaler_target
+            scaler_target=scaler_target,
+            initial_balance=100000,
+            window_size=CONFIG['SEQUENCE_LENGTH']
         )
         
         # แสดงผลลัพธ์
         logging.info("\nFinal Results:")
-        for metric, value in metrics_seq.items():
-            logging.info(f"{metric}: {value:.2f}")
+        for ticker, metrics in results.items():
+            logging.info(f"Metrics for {ticker}:")
+            for key, value in metrics.items():
+                logging.info(f"  {key}: {value}")
+            logging.info("\n")
         
-        # บันทึกผลลัพธ์
-        pd.DataFrame(trade_history).to_csv('trade_history.csv', index=False)
-        pd.DataFrame(performance_metrics).to_csv('performance_metrics.csv', index=False)
-    
+        # บันทึกผลลัพธ์ทั้งหมด
+        pd.DataFrame(results).transpose().to_csv('final_metrics_all_stocks.csv')
+        pd.concat({k: pd.DataFrame(v) for k, v in trade_histories.items()}, axis=0).to_csv('trade_histories_all_stocks.csv')
+        pd.concat({k: pd.DataFrame(v) for k, v in performance_metrics_all.items()}, axis=0).to_csv('performance_metrics_all_stocks.csv')
+        
     except Exception as e:
-        logging.error(f"Error during training: {str(e)}")
+        logging.error(f"Error during training/testing: {str(e)}")
         raise
     
     finally:
