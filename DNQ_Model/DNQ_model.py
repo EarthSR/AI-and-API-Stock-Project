@@ -13,18 +13,20 @@ import joblib
 import ta
 import logging
 import os
+import psutil
+import gc
 
 # Configuration
 CONFIG = {
-    'BATCH_SIZE': 64,
-    'EPOCHS': 100,
+    'BATCH_SIZE': 32,
+    'EPOCHS': 50,
     'SEQUENCE_LENGTH': 10,
-    'LEARNING_RATE': 0.001,
+    'LEARNING_RATE': 0.0001,
     'GAMMA': 0.95,
     'EPSILON': 1.0,
-    'EPSILON_DECAY': 0.995,
+    'EPSILON_DECAY': 0.997,
     'EPSILON_MIN': 0.01,
-    'MEMORY_SIZE': 2000,
+    'MEMORY_SIZE': 1000,
     'VALIDATION_SPLIT': 0.2
 }
 
@@ -38,7 +40,7 @@ logging.basicConfig(
 
 class DQNAgent:
     def __init__(self, state_shape, action_size):
-        self.state_shape = state_shape  # e.g., (10, 15)
+        self.state_shape = state_shape
         self.action_size = action_size
         self.learning_rate = CONFIG['LEARNING_RATE']
         self.gamma = CONFIG['GAMMA']
@@ -47,6 +49,7 @@ class DQNAgent:
         self.epsilon_min = CONFIG['EPSILON_MIN']
         self.memory = deque(maxlen=CONFIG['MEMORY_SIZE'])
         self.model = self._build_model()
+        logging.info(f"Model input shape: {self.model.input_shape}")
         
     def _build_model(self):
         model = Sequential([
@@ -69,70 +72,91 @@ class DQNAgent:
         return model
 
     def act(self, state):
-        state = np.reshape(state, (1,) + self.state_shape)
+        state = np.reshape(state, (1,) + self.state_shape)  # (1, 10, 15)
         if np.random.rand() <= self.epsilon:
-            action = random.randrange(self.action_size)
-        else:
-            act_values = self.model.predict(state, verbose=0)
-            action = np.argmax(act_values[0])
-            
-        if action >= self.action_size:
-            logging.warning(f"Invalid action: {action}, resetting to valid range.")
-            action = random.randrange(self.action_size)
+            return random.randrange(self.action_size)
         
-        return action
+        act_values = self.model.predict(state, verbose=0)  # (1, 3)
+        action = np.argmax(act_values[0])
+        
+        return min(action, self.action_size - 1)
 
     def remember(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
-
+        if state.shape == self.state_shape and next_state.shape == self.state_shape:
+            self.memory.append((state, action, reward, next_state, done))
+        else:
+            logging.warning(f"Skipping storing state with invalid shapes: {state.shape}, {next_state.shape}")
+            
     def replay(self, batch_size):
+        logging.info("Starting replay method")
         if len(self.memory) < batch_size:
+            logging.info("Not enough memories to replay")
             return
             
         minibatch = random.sample(self.memory, batch_size)
-        states = np.array([m[0] for m in minibatch])
+        states = np.array([m[0] for m in minibatch]).astype(np.float32)
         actions = np.array([m[1] for m in minibatch])
         rewards = np.array([m[2] for m in minibatch])
-        next_states = np.array([m[3] for m in minibatch])
+        next_states = np.array([m[3] for m in minibatch]).astype(np.float32)
         dones = np.array([m[4] for m in minibatch])
         
-        # Predict Q-values for current states and next states
-        target = self.model.predict(states, verbose=0)
-        target_next = self.model.predict(next_states, verbose=0)
+        # ล็อกรูปร่างและชนิดข้อมูล
+        logging.info(f"States shape: {states.shape}, dtype: {states.dtype}")
+        logging.info(f"Next_states shape: {next_states.shape}, dtype: {next_states.dtype}")
         
-        for i in range(batch_size):
-            if dones[i]:
-                target[i][actions[i]] = rewards[i]
-            else:
-                target[i][actions[i]] = rewards[i] + self.gamma * np.amax(target_next[i])
+        # ตรวจสอบ NaNs หรือ Infs
+        if np.isnan(states).any() or np.isinf(states).any():
+            logging.error("States contain NaN or Inf values.")
+            return
+        if np.isnan(next_states).any() or np.isinf(next_states).any():
+            logging.error("Next_states contain NaN or Inf values.")
+            return
         
-        # Train the model
-        self.model.fit(states, target, epochs=1, verbose=0, batch_size=batch_size)
+        try:
+            target = self.model.predict(states, verbose=0)
+            target_next = self.model.predict(next_states, verbose=0)
+            logging.info("Prediction successful")
+        except ValueError as e:
+            logging.error(f"Prediction error: {e}", exc_info=True)
+            return
         
-        # Decay epsilon
+        indices = np.arange(batch_size)
+        target[indices, actions] = rewards + (1 - dones) * self.gamma * np.max(target_next, axis=1)
+        
+        try:
+            history = self.model.fit(states, target, epochs=1, verbose=0, batch_size=batch_size)
+            loss = history.history['loss'][0]
+            logging.info(f"Training loss: {loss}")
+        except ValueError as e:
+            logging.error(f"Fit error: {e}", exc_info=True)
+            return
+        
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
+        logging.info("Replay method completed")
 
-    def clear_memory(self):
-        self.memory.clear()
 
-def create_sequences_for_dqn(features, targets, seq_length=CONFIG['SEQUENCE_LENGTH']):
+def create_sequences(features, targets, seq_length=CONFIG['SEQUENCE_LENGTH']):
     X, y = [], []
     for i in range(len(features) - seq_length):
-        X.append(features[i:i+seq_length, :])
+        seq = features[i:i+seq_length]
+        if seq.shape != (seq_length, features.shape[1]):
+            logging.warning(f"Invalid sequence shape at index {i}: {seq.shape}")
+        X.append(seq)
         y.append(targets[i+seq_length])
-    return np.array(X), np.array(y)
+    X = np.array(X)
+    y = np.array(y)
+    logging.info(f"Created sequences: X shape {X.shape}, y shape {y.shape}")
+    return X, y
 
 def prepare_data():
+    logging.info("Starting data preparation")
+    
     # Load data
     df_stock = pd.read_csv("cleaned_data.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
     df_news = pd.read_csv("news_with_sentiment_gpu.csv")
     df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
     df_stock['Date'] = pd.to_datetime(df_stock['Date'], errors='coerce')
-    
-    # ตรวจสอบชนิดข้อมูลวันที่
-    print(df_news['Date'].dtype)
-    print(df_stock['Date'].dtype)
     
     # Process news sentiment
     df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
@@ -140,19 +164,15 @@ def prepare_data():
     # Label Encode Ticker
     ticker_encoder = LabelEncoder()
     df_stock['Ticker_ID'] = ticker_encoder.fit_transform(df_stock['Ticker'])
-    num_tickers = len(ticker_encoder.classes_)
     
     # Merge stock and news data
     df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
     
-    # Fill missing values
-    df.fillna(method='ffill', inplace=True)
-    df.fillna(0, inplace=True)
+    # Handle missing values efficiently
+    df = df.ffill().bfill().fillna(0)
     
-    # แทนที่ค่า Inf ด้วย NaN และเติม NaN
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.fillna(method='ffill', inplace=True)
-    df.fillna(0, inplace=True)
+    # Replace infinities and handle
+    df = df.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0)
     
     # Scale numerical features
     scaler = RobustScaler()
@@ -163,75 +183,61 @@ def prepare_data():
     # Add technical indicators
     df = add_technical_indicators(df)
     
-    # แทนที่ค่า Inf และ NaN อีกครั้งหลังการเพิ่มฟีเจอร์
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.fillna(method='ffill', inplace=True)
-    df.fillna(0, inplace=True)
-    
-    # Prepare features
     feature_columns = [
         'Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 
         'Sentiment', 'Confidence', 'RSI', 'SMA_10', 'SMA_5', 
         'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low'
     ]
     
-    # Fill any remaining missing values
-    df.fillna(method='ffill', inplace=True)
-    df.fillna(0, inplace=True)
-    
     # Split train/test
     sorted_dates = df['Date'].unique()
     train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]
     
-    train_df = df[df['Date'] <= train_cutoff].copy()
-    test_df = df[df['Date'] > train_cutoff].copy()
+    train_mask = df['Date'] <= train_cutoff
+    train_df = df[train_mask].copy()
+    test_df = df[~train_mask].copy()
     
-    print("Train cutoff:", train_cutoff)
-    print("First date in train set:", train_df['Date'].min())
-    print("Last date in train set:", train_df['Date'].max())
+    # Create targets
+    train_targets = train_df['Close'].shift(-1).iloc[:-1]
+    test_targets = test_df['Close'].shift(-1).iloc[:-1]
     
-    # สร้าง target โดย shift(-1)
-    train_targets_price = train_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
-    train_df = train_df.iloc[:-1]
-
-    test_targets_price = test_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
-    test_df = test_df.iloc[:-1]
-
-    train_features = train_df[feature_columns].values
-    test_features = test_df[feature_columns].values
-
-    train_ticker_id = train_df['Ticker_ID'].values
-    test_ticker_id = test_df['Ticker_ID'].values
-
-    # สเกลข้อมูลด้วย RobustScaler
-    # สเกลข้อมูลจากชุดฝึก (train) เท่านั้น
+    # Prepare features
+    train_features = train_df[feature_columns].iloc[:-1].values
+    test_features = test_df[feature_columns].iloc[:-1].values
+    
+    # Scale features and targets
     scaler_features = RobustScaler()
-    train_features_scaled = scaler_features.fit_transform(train_features)  # ใช้ fit_transform กับชุดฝึก
-    test_features_scaled = scaler_features.transform(test_features)  # ใช้ transform กับชุดทดสอบ
-
     scaler_target = RobustScaler()
-    train_targets_scaled = scaler_target.fit_transform(train_targets_price)
-    test_targets_scaled = scaler_target.transform(test_targets_price)
-
-    joblib.dump(scaler_features, 'scaler_features.pkl')  # บันทึก scaler ฟีเจอร์
-    joblib.dump(scaler_target, 'scaler_target.pkl')     # บันทึก scaler เป้าหมาย
     
+    train_features_scaled = scaler_features.fit_transform(train_features)
+    test_features_scaled = scaler_features.transform(test_features)
     
-    return train_df, test_df, feature_columns, train_features_scaled, test_features_scaled, train_targets_scaled, test_targets_scaled
+    train_targets_scaled = scaler_target.fit_transform(train_targets.values.reshape(-1, 1))
+    test_targets_scaled = scaler_target.transform(test_targets.values.reshape(-1, 1))
+    
+    joblib.dump(scaler_features, 'scaler_features.pkl')
+    joblib.dump(scaler_target, 'scaler_target.pkl')
+    
+    logging.info("Data preparation completed")
+    logging.info(f"train_features_scaled shape: {train_features_scaled.shape}")
+    logging.info(f"test_features_scaled shape: {test_features_scaled.shape}")
+    logging.info(f"train_targets_scaled shape: {train_targets_scaled.shape}")
+    logging.info(f"test_targets_scaled shape: {test_targets_scaled.shape}")
+    
+    return (train_df, test_df, feature_columns, train_features_scaled, 
+            test_features_scaled, train_targets_scaled, test_targets_scaled)
 
 def add_technical_indicators(df):
+    # Calculate basic indicators
     df['Change'] = df['Close'] - df['Open']
-    # ป้องกันการหารด้วยศูนย์โดยแทนค่า Open ที่เป็นศูนย์ด้วยค่าเล็กน้อย (เช่น 1e-8)
     df['Open_safe'] = df['Open'].replace(0, 1e-8)
     df['Change (%)'] = (df['Change'] / df['Open_safe']) * 100
     df.drop('Open_safe', axis=1, inplace=True)
     
-    # RSI
+    # Technical indicators
     df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
-    
-    # Moving Averages
-    df['SMA_5'] = df['Close'].rolling(window=5).mean()  # SMA 5 วัน
-    df['SMA_10'] = df['Close'].rolling(window=10).mean()  # SMA 10 วัน
+    df['SMA_5'] = df['Close'].rolling(window=5).mean()
+    df['SMA_10'] = df['Close'].rolling(window=10).mean()
     
     # MACD
     df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
@@ -244,39 +250,31 @@ def add_technical_indicators(df):
     df['Bollinger_High'] = bollinger.bollinger_hband()
     df['Bollinger_Low'] = bollinger.bollinger_lband()
     
-    df.fillna(method='ffill', inplace=True)
-    df.fillna(0, inplace=True)
-    
-    return df
-
+    return df.ffill().bfill().fillna(0)
 
 def calculate_reward(action, current_price, next_price):
     if action == 0:  # Buy
-        return next_price - current_price
+        return (next_price - current_price) / current_price
     elif action == 2:  # Sell
-        return current_price - next_price
+        return (current_price - next_price) / current_price
     return 0  # Hold
-
-def plot_training_progress(rewards):
-    plt.figure(figsize=(10, 5))
-    plt.plot(rewards)
-    plt.title('Training Progress')
-    plt.xlabel('Epoch')
-    plt.ylabel('Total Reward')
-    plt.savefig('training_progress.png')
-    plt.close()
 
 def train_model(X_train, y_train, agent):
     total_rewards = []
+    
     for epoch in range(CONFIG['EPOCHS']):
-        logging.info(f"เริ่มต้น Epoch {epoch + 1}/{CONFIG['EPOCHS']}")
+        if epoch % 5 == 0:
+            process = psutil.Process(os.getpid())
+            logging.info(f"Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+        
+        logging.info(f"Starting Epoch {epoch + 1}/{CONFIG['EPOCHS']}")
         state = X_train[0]
         total_reward = 0
         
         for time in range(len(X_train) - 1):
-            if time % 1000 == 0:
+            if time % 100 == 0:
                 logging.info(f"Epoch {epoch + 1}: Processing time step {time}/{len(X_train) - 1}")
-                
+            
             action = agent.act(state)
             reward = calculate_reward(action, y_train[time], y_train[time + 1])
             next_state = X_train[time + 1]
@@ -288,16 +286,21 @@ def train_model(X_train, y_train, agent):
             state = next_state
             total_reward += reward
             
+            if time % 1000 == 0:
+                logging.info(f"Epoch {epoch + 1}: Step {time}/{len(X_train) - 1}")
+                gc.collect()
+        
         total_rewards.append(total_reward)
-        logging.info(f"Epoch {epoch + 1}/{CONFIG['EPOCHS']} - Total reward: {total_reward:.2f} - Epsilon: {agent.epsilon:.3f}")
+        logging.info(f"Epoch {epoch + 1} - Total reward: {total_reward:.2f} - Epsilon: {agent.epsilon:.3f}")
         
         if (epoch + 1) % 10 == 0:
             plot_training_progress(total_rewards)
+            agent.model.save(f'model_checkpoint_epoch_{epoch+1}.h5')
     
+    logging.info("Training completed successfully")
     return agent
 
-
-def evaluate_model(agent, X_test, y_test, scaler_target):
+def evaluate_model(agent, X_test, y_test):
     predictions = []
     actual_values = []
     
@@ -306,30 +309,31 @@ def evaluate_model(agent, X_test, y_test, scaler_target):
         action = agent.act(state)
         predictions.append(action)
         actual_values.append(y_test[i])
+        
+        if i % 1000 == 0:
+            gc.collect()
     
-    # เนื่องจาก actions เป็น discrete actions (Buy, Hold, Sell) การคำนวณ MAE, MSE อาจไม่เหมาะสม
-    # แนะนำให้ประเมินด้วยการวัดผลการเทรด เช่น ผลตอบแทน, Sharpe Ratio, ฯลฯ
+    metrics = {
+        'mae': mean_absolute_error(actual_values, predictions),
+        'mse': mean_squared_error(actual_values, predictions),
+        'rmse': np.sqrt(mean_squared_error(actual_values, predictions)),
+        'r2': r2_score(actual_values, predictions)
+    }
     
-    # อย่างไรก็ตาม หากต้องการคำนวณ metrics แบบเดิม:
-    mae = mean_absolute_error(actual_values, predictions)
-    mse = mean_squared_error(actual_values, predictions)
-    rmse = np.sqrt(mse)
-    r2 = r2_score(actual_values, predictions)
+    logging.info("\nEvaluation Metrics:")
+    for metric, value in metrics.items():
+        logging.info(f"{metric.upper()}: {value:.4f}")
     
-    logging.info(f"""
-    Evaluation Metrics:
-    MAE: {mae:.4f}
-    MSE: {mse:.4f}
-    RMSE: {rmse:.4f}
-    R2 Score: {r2:.4f}
-    """)
-    
-    return predictions, actual_values
+    return predictions, actual_values, metrics
 
-def calculate_max_drawdown(portfolio_values):
-    cumulative = np.maximum.accumulate(portfolio_values)
-    drawdown = (cumulative - portfolio_values) / cumulative
-    return np.max(drawdown) * 100
+def plot_training_progress(rewards):
+    plt.figure(figsize=(10, 5))
+    plt.plot(rewards)
+    plt.title('Training Progress')
+    plt.xlabel('Epoch')
+    plt.ylabel('Total Reward')
+    plt.savefig('training_progress.png')
+    plt.close()
 
 def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_features, scaler_target, initial_balance=100000, window_size=10):
     """
@@ -365,11 +369,15 @@ def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_featu
             current_sequence = test_df.iloc[i-window_size:i]
             current_features = current_sequence[feature_columns].values
             
+            # Log shape
+            logging.info(f"Current sequence shape: {current_features.shape}")
+            
             # Scale features
             scaled_features = scaler_features.transform(current_features)
             
             # ทำนายการกระทำ
             state = np.reshape(scaled_features, (1, window_size, len(feature_columns)))
+            logging.info(f"State shape for prediction: {state.shape}")
             action = agent.act(state)
             
             # ราคาปัจจุบันและราคาถัดไป
@@ -422,27 +430,39 @@ def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_featu
             # Retrain model with new data
             if i % 1 == 0:  # Retrain ทุก 1 วัน
                 # สร้าง sequence ใหม่สำหรับ training
-                train_sequence = test_df.iloc[max(0, i-10):i]  # ใช้ข้อมูล 10 วันล่าสุด
+                train_sequence = test_df.iloc[max(0, i-window_size):i]  # ใช้ข้อมูล 10 วันล่าสุด
                 train_features_new = train_sequence[feature_columns].values
                 scaled_train_features_new = scaler_features.transform(train_features_new)
                 
+                # Log shape
+                logging.info(f"Scaled train features new shape: {scaled_train_features_new.shape}")
+                
                 # สร้าง sequences สำหรับ training
                 if len(scaled_train_features_new) >= window_size + 1:
-                    X_train_new, y_train_new = create_sequences_for_dqn(
+                    X_train_new, y_train_new = create_sequences(
                         scaled_train_features_new,
                         train_sequence['Close'].values,
                         seq_length=window_size
                     )
                     
+                    logging.info(f"New training sequences shape: {X_train_new.shape}, {y_train_new.shape}")
+                    
                     # เพิ่มข้อมูลใหม่ลงใน memory
                     for j in range(len(X_train_new)):
                         state_new = X_train_new[j]
+                        if j + 1 < len(X_train_new):
+                            next_state_new = X_train_new[j + 1]
+                        else:
+                            next_state_new = X_train_new[j]  # ถ้าเป็น state สุดท้าย ให้ใช้ state ปัจจุบัน
+                        
                         # สมมติการกระทำแบบสุ่มสำหรับการฝึกเพิ่มเติม (สามารถปรับปรุงได้)
                         action_new = random.randrange(agent.action_size)
-                        reward_new = calculate_reward(action_new, y_train_new[j], y_train_new[j])
-                        next_state_new = X_train_new[j]  # Placeholder
-                        done_new = False  # Placeholder
-                        agent.remember(state_new, action_new, reward_new, next_state_new, done_new)
+                        if j + 1 < len(y_train_new):
+                            reward_new = calculate_reward(action_new, y_train_new[j], y_train_new[j + 1])
+                        else:
+                            reward_new = calculate_reward(action_new, y_train_new[j], y_train_new[j])
+                        
+                        agent.remember(state_new, action_new, reward_new, next_state_new, False)
                     
                     # Retrain model
                     agent.replay(min(CONFIG['BATCH_SIZE'], len(agent.memory)))
@@ -455,7 +475,7 @@ def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_featu
                         'Epsilon': agent.epsilon
                     }
                     performance_metrics.append(current_metrics)
-            
+        
             # Log progress
             if i % 10 == 0:
                 logging.info(f"""
@@ -485,6 +505,7 @@ def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_featu
     
     return final_metrics, trade_history, performance_metrics
 
+
 def calculate_final_metrics(portfolio_values, daily_returns, predictions, actual_prices, trade_history):
     """คำนวณ metrics สุดท้าย"""
     total_return = (portfolio_values[-1] - portfolio_values[0]) / portfolio_values[0] * 100
@@ -504,6 +525,11 @@ def calculate_final_metrics(portfolio_values, daily_returns, predictions, actual
         'Win Rate (%)': win_rate,
         'Final Portfolio Value': portfolio_values[-1]
     }
+
+def calculate_max_drawdown(portfolio_values):
+    cumulative = np.maximum.accumulate(portfolio_values)
+    drawdown = (cumulative - portfolio_values) / cumulative
+    return np.max(drawdown) * 100
 
 def plot_results(portfolio_values, predictions, actual_prices, dates):
     """สร้างกราฟแสดงผลลัพธ์"""
@@ -534,8 +560,14 @@ def plot_results(portfolio_values, predictions, actual_prices, dates):
     plt.savefig('sequential_prediction_results.png')
     plt.close()
 
+def calculate_max_drawdown(portfolio_values):
+    cumulative = np.maximum.accumulate(portfolio_values)
+    drawdown = (cumulative - portfolio_values) / cumulative
+    return np.max(drawdown) * 100
+
 def main():
     # Setup GPU
+    logging.info("Starting program")
     physical_devices = tf.config.list_physical_devices('GPU')
     if len(physical_devices) > 0:
         try:
@@ -547,64 +579,75 @@ def main():
         logging.info("Using CPU")
     
     # Prepare data
-    train_df, test_df, feature_columns, train_features_scaled, test_features_scaled, train_targets_scaled, test_targets_scaled = prepare_data()
+    train_df, test_df, feature_columns, train_features_scaled, test_features_scaled, \
+    train_targets_scaled, test_targets_scaled = prepare_data()
     
     # Create sequences
-    X_train, y_train = create_sequences_for_dqn(
-        train_features_scaled,
-        train_targets_scaled.flatten(),
-        seq_length=CONFIG['SEQUENCE_LENGTH']
-    )
-    X_test, y_test = create_sequences_for_dqn(
-        test_features_scaled,
-        test_targets_scaled.flatten(),
-        seq_length=CONFIG['SEQUENCE_LENGTH']
-    )
+    X_train, y_train = create_sequences(train_features_scaled, train_targets_scaled.flatten())
+    X_test, y_test = create_sequences(test_features_scaled, test_targets_scaled.flatten())
     
-    # Define state shape
-    state_shape = X_train.shape[1:]  # (sequence_length, num_features)
+    logging.info(f"X_train shape: {X_train.shape}")
+    logging.info(f"y_train shape: {y_train.shape}")
+    logging.info(f"X_test shape: {X_test.shape}")
+    logging.info(f"y_test shape: {y_test.shape}")
     
     # Initialize agent
+    state_shape = X_train.shape[1:]
     action_size = 3  # Buy, Hold, Sell
+    logging.info(f"State shape for agent: {state_shape}")
     agent = DQNAgent(state_shape, action_size)
     
-    # Train model
-    agent = train_model(X_train, y_train, agent)
+    try:
+        # Train model
+        agent = train_model(X_train, y_train, agent)
+        
+        # Evaluate model
+        predictions, actual_values, metrics = evaluate_model(agent, X_test, y_test)
+        
+        # Save final model
+        agent.model.save('final_model_DQN.h5')
+        
+        # Plot final results
+        plt.figure(figsize=(15, 6))
+        plt.plot(actual_values, label='Actual', alpha=0.7)
+        plt.plot(predictions, label='Predicted Actions', alpha=0.7)
+        plt.title('Trading Decisions vs Actual Price Movement')
+        plt.xlabel('Time')
+        plt.ylabel('Value')
+        plt.legend()
+        plt.savefig('final_results.png')
+        plt.close()
+        
+        logging.info("Training completed successfully")
+        
+        
+        scaler_features = joblib.load('scaler_features.pkl')
+        scaler_target = joblib.load('scaler_target.pkl')
+        # Predict and retrain sequentially
+        metrics_seq, trade_history, performance_metrics = predict_and_retrain_sequential(
+            agent,
+            test_df,
+            feature_columns,
+            scaler_features=scaler_features,
+            scaler_target=scaler_target
+        )
+        
+        # แสดงผลลัพธ์
+        logging.info("\nFinal Results:")
+        for metric, value in metrics_seq.items():
+            logging.info(f"{metric}: {value:.2f}")
+        
+        # บันทึกผลลัพธ์
+        pd.DataFrame(trade_history).to_csv('trade_history.csv', index=False)
+        pd.DataFrame(performance_metrics).to_csv('performance_metrics.csv', index=False)
     
-    # Evaluate model
-    predictions, actual_values = evaluate_model(agent, X_test, y_test, scaler_target=None)  # scaler_target ไม่ได้ใช้ในการคำนวณ
+    except Exception as e:
+        logging.error(f"Error during training: {str(e)}")
+        raise
     
-    # Save final model
-    agent.model.save('final_model_DQN.h5')
-    
-    # Plot evaluation results
-    plt.figure(figsize=(15, 6))
-    plt.plot(actual_values, label='Actual', color='blue')
-    plt.plot(predictions, label='Predicted Actions', color='red', alpha=0.7)
-    plt.title('Trading Decisions vs Actual Price Movement')
-    plt.xlabel('Time')
-    plt.ylabel('Close Price')
-    plt.legend()
-    plt.savefig('final_results.png')
-    plt.close()
-    
-    # Predict and retrain sequentially
-    metrics, trade_history, performance_metrics = predict_and_retrain_sequential(
-        agent,
-        test_df,
-        feature_columns,
-        scaler_features,
-        scaler_target
-    )
-    
-    # แสดงผลลัพธ์
-    logging.info("\nFinal Results:")
-    for metric, value in metrics.items():
-        logging.info(f"{metric}: {value:.2f}")
-    
-    # บันทึกผลลัพธ์
-    pd.DataFrame(trade_history).to_csv('trade_history.csv', index=False)
-    pd.DataFrame(performance_metrics).to_csv('performance_metrics.csv', index=False)
+    finally:
+        # Cleanup
+        gc.collect()
 
 if __name__ == "__main__":
     main()
