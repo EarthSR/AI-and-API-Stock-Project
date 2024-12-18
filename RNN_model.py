@@ -245,3 +245,75 @@ print(f"R2 Score: {r2:.4f}")
 # แสดงผลกราฟ
 plot_predictions(y_test_true, y_test_pred, 'Stock Prediction')
 plot_residuals(y_test_true, y_test_pred, 'Stock Prediction')
+
+
+# ฟังก์ชันสำหรับการทำนายและปรับโมเดลใหม่ (Retraining)
+def predict_next_day_with_retraining_RNN(model, test_df, feature_columns, seq_length=10):
+    """
+    Predict next day's price and retrain with actual data using only test_df with LSTM
+    """
+    predictions = []
+    actual_values = []
+    
+    # เรียงข้อมูลตามวันที่
+    test_df = test_df.sort_values('Date')
+    
+    for i in range(len(test_df) - 1):  # -1 เพราะเราต้องใช้ค่าเป้าหมายของวันถัดไป
+        current_date = test_df.iloc[i]['Date']
+        current_ticker = test_df.iloc[i]['Ticker']
+        
+        # ดึงข้อมูลย้อนหลังตาม seq_length
+        historical_data = test_df.iloc[:i+1]
+        historical_data = historical_data[historical_data['Ticker'] == current_ticker].tail(seq_length)
+        
+        if len(historical_data) < seq_length:
+            continue
+        
+        # เตรียมข้อมูลฟีเจอร์สำหรับการทำนาย
+        features = historical_data[feature_columns].values
+        ticker_ids = historical_data['Ticker_ID'].values
+        
+        # ปรับสเกลข้อมูล
+        features_scaled = scaler_features.transform(features)
+        X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
+        X_ticker = ticker_ids.reshape(1, seq_length)
+        
+        # ทำการทำนาย
+        pred = model.predict([X_features, X_ticker], verbose=0)
+        pred_unscaled = scaler_target.inverse_transform(pred)[0][0]
+        
+        # ดึงค่าจริงของวันถัดไป
+        actual = test_df.iloc[i + 1]['Close']
+        
+        predictions.append(pred_unscaled)
+        actual_values.append(actual)
+        
+        # ปรับปรุงโมเดลด้วยข้อมูลจริงของวันถัดไป
+        if test_df.iloc[i + 1]['Ticker'] == current_ticker:
+            new_features = test_df.iloc[i][feature_columns].values.reshape(1, -1)
+            new_features_scaled = scaler_features.transform(new_features)
+            new_target = test_df.iloc[i + 1]['Close'].reshape(1, -1)
+            new_target_scaled = scaler_target.transform(new_target)
+            
+            train_seq_features = features_scaled
+            train_seq_ticker = ticker_ids
+            
+            model.fit(
+                [train_seq_features.reshape(1, seq_length, len(feature_columns)),
+                 train_seq_ticker.reshape(1, seq_length)],
+                new_target_scaled,
+                epochs=1,
+                batch_size=1,
+                verbose=0
+            )
+    
+    return predictions, actual_values
+
+predictions, actual_values = predict_next_day_with_retraining_RNN(
+    best_model,
+    test_df,
+    feature_columns
+)
+
+# แสดงผลลัพธ์
+plot_predictions(actual_values, predictions, 'Stock Prediction')
