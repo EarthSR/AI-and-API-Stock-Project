@@ -174,13 +174,7 @@ def prepare_data():
     # Replace infinities and handle
     df = df.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0)
     
-    # Scale numerical features
-    scaler = RobustScaler()
-    numeric_columns = ['Open', 'Close', 'High', 'Low', 'Volume']
-    df[numeric_columns] = scaler.fit_transform(df[numeric_columns])
-    joblib.dump(scaler, 'price_scaler.pkl')
-    
-    # Add technical indicators
+    # Add technical indicators BEFORE scaling
     df = add_technical_indicators(df)
     
     feature_columns = [
@@ -189,7 +183,7 @@ def prepare_data():
         'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low'
     ]
     
-    # Split train/test
+    # Split train/test based on date across all stocks
     sorted_dates = df['Date'].unique()
     train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]
     
@@ -198,25 +192,25 @@ def prepare_data():
     test_df = df[~train_mask].copy()
     
     # Create targets
-    train_targets = train_df['Close'].shift(-1).iloc[:-1]
-    test_targets = test_df['Close'].shift(-1).iloc[:-1]
+    train_targets = train_df.groupby('Ticker')['Close'].shift(-1).iloc[:-1]
+    test_targets = test_df.groupby('Ticker')['Close'].shift(-1).iloc[:-1]
     
     # Prepare features
     train_features = train_df[feature_columns].iloc[:-1].values
     test_features = test_df[feature_columns].iloc[:-1].values
     
-    # Scale features and targets
-    scaler_features = RobustScaler()
-    scaler_target = RobustScaler()
+    # Scale features and targets AFTER creating technical indicators
+    feature_scaler = RobustScaler()
+    target_scaler = RobustScaler()
     
-    train_features_scaled = scaler_features.fit_transform(train_features)
-    test_features_scaled = scaler_features.transform(test_features)
+    train_features_scaled = feature_scaler.fit_transform(train_features)
+    test_features_scaled = feature_scaler.transform(test_features)
     
-    train_targets_scaled = scaler_target.fit_transform(train_targets.values.reshape(-1, 1))
-    test_targets_scaled = scaler_target.transform(test_targets.values.reshape(-1, 1))
+    train_targets_scaled = target_scaler.fit_transform(train_targets.values.reshape(-1, 1))
+    test_targets_scaled = target_scaler.transform(test_targets.values.reshape(-1, 1))
     
-    joblib.dump(scaler_features, 'scaler_features.pkl')
-    joblib.dump(scaler_target, 'scaler_target.pkl')
+    joblib.dump(feature_scaler, 'feature_scaler.pkl')
+    joblib.dump(target_scaler, 'target_scaler.pkl')
     
     logging.info("Data preparation completed")
     logging.info(f"train_features_scaled shape: {train_features_scaled.shape}")
@@ -261,6 +255,8 @@ def calculate_reward(action, current_price, next_price):
 
 def train_model(X_train, y_train, agent):
     total_rewards = []
+    early_stopping = EarlyStopping(monitor='loss', patience=10, restore_best_weights=True)
+    model_checkpoint = ModelCheckpoint('best_model_DQN.h5', save_best_only=True, monitor='loss', mode='min')
     
     for epoch in range(CONFIG['EPOCHS']):
         if epoch % 5 == 0:
@@ -296,9 +292,14 @@ def train_model(X_train, y_train, agent):
         if (epoch + 1) % 10 == 0:
             plot_training_progress(total_rewards)
             agent.model.save(f'model_checkpoint_epoch_{epoch+1}.h5')
+        
+        # ใช้ Early Stopping
+        if early_stopping.on_epoch_end(epoch, logs={'loss': total_reward}):
+            logging.info("Early stopping triggered")
+            break
     
     logging.info("Training completed successfully")
-    return agent
+    return agent, total_rewards
 
 def evaluate_model(agent, X_test, y_test):
     predictions = []
@@ -337,11 +338,11 @@ def plot_training_progress(rewards):
 
 def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_features, scaler_target, initial_balance=100000, window_size=10):
     """
-    ทำนายราคาและ retrain โมเดลแบบ sequential ด้วยข้อมูล test
+    ทำนายราคาและประเมินโมเดลแบบ sequential ด้วยข้อมูล test สำหรับหุ้นหนึ่งหุ้น
     
     Parameters:
-    - agent: DQN agent
-    - test_df: DataFrame ของข้อมูลทดสอบ
+    - agent: DQN agent ที่ถูกฝึกฝนแล้ว
+    - test_df: DataFrame ของข้อมูลทดสอบสำหรับหุ้นหนึ่งหุ้น
     - feature_columns: รายชื่อ features ที่ใช้
     - scaler_features: RobustScaler ที่ใช้สเกลฟีเจอร์
     - scaler_target: RobustScaler ที่ใช้สเกลเป้าหมาย
@@ -359,38 +360,43 @@ def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_featu
     # เตรียมข้อมูลสำหรับการ evaluate
     trade_history = []
     performance_metrics = []
-    
+
     # จัดเรียงข้อมูลตามวันที่
     test_df = test_df.sort_values('Date').reset_index(drop=True)
-    
+
     for i in range(window_size, len(test_df)-1):
         try:
             # ดึงข้อมูลสำหรับ sequence ปัจจุบัน
             current_sequence = test_df.iloc[i-window_size:i]
             current_features = current_sequence[feature_columns].values
-            
+
             # Log shape
             logging.info(f"Current sequence shape: {current_features.shape}")
-            
+
             # Scale features
             scaled_features = scaler_features.transform(current_features)
-            
+
             # ทำนายการกระทำ
             state = np.reshape(scaled_features, (1, window_size, len(feature_columns)))
             logging.info(f"State shape for prediction: {state.shape}")
             action = agent.act(state)
-            
-            # ราคาปัจจุบันและราคาถัดไป
-            current_price = test_df.iloc[i]['Close']
-            next_price = test_df.iloc[i+1]['Close']
-            
+
+            # ราคาปัจจุบันและราคาถัดไป (แปลงกลับจากการสเกล)
+            # สมมติว่า 'Close' เป็นคอลัมน์ที่ 4 ใน feature_columns
+            # ดึงค่าปิดที่สเกลแล้วและทำ inverse_transform
+            current_price_scaled = test_df.iloc[i]['Close']
+            next_price_scaled = test_df.iloc[i+1]['Close']
+            # ทำ inverse_transform เฉพาะราคาปิด
+            current_price = scaler_target.inverse_transform([[current_price_scaled]])[0][0]
+            next_price = scaler_target.inverse_transform([[next_price_scaled]])[0][0]
+
             # บันทึกการทำนาย
             predictions.append(action)
             actual_prices.append(next_price)
-            
+
             # คำนวณผลตอบแทน
             trade_return = 0
-            
+
             # ดำเนินการตามการทำนาย
             if action == 0:  # Buy
                 if position == 0:
@@ -406,7 +412,7 @@ def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_featu
                             'Shares': shares_to_buy,
                             'Balance': balance
                         })
-            
+
             elif action == 2:  # Sell
                 if position > 0:
                     sell_value = position * current_price * (1 - transaction_fee)
@@ -421,61 +427,12 @@ def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_featu
                         'Return': trade_return
                     })
                     position = 0
-            
+
             # คำนวณมูลค่าพอร์ตโฟลิโอ
             portfolio_value = balance + (position * current_price)
             portfolio_values.append(portfolio_value)
             daily_returns.append((portfolio_value - portfolio_values[-2]) / portfolio_values[-2])
-            
-            # Retrain model with new data
-            if i % 1 == 0:  # Retrain ทุก 1 วัน
-                # สร้าง sequence ใหม่สำหรับ training
-                train_sequence = test_df.iloc[max(0, i-window_size):i]  # ใช้ข้อมูล 10 วันล่าสุด
-                train_features_new = train_sequence[feature_columns].values
-                scaled_train_features_new = scaler_features.transform(train_features_new)
-                
-                # Log shape
-                logging.info(f"Scaled train features new shape: {scaled_train_features_new.shape}")
-                
-                # สร้าง sequences สำหรับ training
-                if len(scaled_train_features_new) >= window_size + 1:
-                    X_train_new, y_train_new = create_sequences(
-                        scaled_train_features_new,
-                        train_sequence['Close'].values,
-                        seq_length=window_size
-                    )
-                    
-                    logging.info(f"New training sequences shape: {X_train_new.shape}, {y_train_new.shape}")
-                    
-                    # เพิ่มข้อมูลใหม่ลงใน memory
-                    for j in range(len(X_train_new)):
-                        state_new = X_train_new[j]
-                        if j + 1 < len(X_train_new):
-                            next_state_new = X_train_new[j + 1]
-                        else:
-                            next_state_new = X_train_new[j]  # ถ้าเป็น state สุดท้าย ให้ใช้ state ปัจจุบัน
-                        
-                        # สมมติการกระทำแบบสุ่มสำหรับการฝึกเพิ่มเติม (สามารถปรับปรุงได้)
-                        action_new = random.randrange(agent.action_size)
-                        if j + 1 < len(y_train_new):
-                            reward_new = calculate_reward(action_new, y_train_new[j], y_train_new[j + 1])
-                        else:
-                            reward_new = calculate_reward(action_new, y_train_new[j], y_train_new[j])
-                        
-                        agent.remember(state_new, action_new, reward_new, next_state_new, False)
-                    
-                    # Retrain model
-                    agent.replay(min(CONFIG['BATCH_SIZE'], len(agent.memory)))
-                    
-                    # บันทึก metrics หลัง retrain
-                    current_metrics = {
-                        'Date': test_df.iloc[i]['Date'],
-                        'Portfolio Value': portfolio_value,
-                        'Return': daily_returns[-1] if daily_returns else 0,
-                        'Epsilon': agent.epsilon
-                    }
-                    performance_metrics.append(current_metrics)
-        
+
             # Log progress
             if i % 10 == 0:
                 logging.info(f"""
@@ -486,11 +443,11 @@ def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_featu
                 Position: {position}
                 Balance: {balance:.2f}
                 """)
-                
+
         except Exception as e:
             logging.error(f"Error on day {i}: {str(e)}")
             continue
-    
+
     # คำนวณ final metrics
     final_metrics = calculate_final_metrics(
         portfolio_values, 
@@ -499,10 +456,10 @@ def predict_and_retrain_sequential(agent, test_df, feature_columns, scaler_featu
         actual_prices,
         trade_history
     )
-    
+
     # Plot results
     plot_results(portfolio_values, predictions, actual_prices, test_df['Date'].iloc[window_size:])
-    
+
     return final_metrics, trade_history, performance_metrics
 
 def process_multiple_stocks(agent, test_df, feature_columns, scaler_features, scaler_target, initial_balance=100000, window_size=10):
@@ -654,17 +611,17 @@ def main():
     
     try:
         # Train model
-        agent = train_model(X_train, y_train, agent)
+        agent, total_rewards = train_model(X_train, y_train, agent)
         
         # Save trained model
         agent.model.save('final_model_DQN.h5')
         
         # Plot training progress
-        plot_training_progress([0])  # แทนที่ด้วยข้อมูลจริงถ้ามี
+        plot_training_progress(total_rewards)
         
         # Load scalers
-        scaler_features = joblib.load('scaler_features.pkl')
-        scaler_target = joblib.load('scaler_target.pkl')
+        scaler_features = joblib.load('feature_scaler.pkl')
+        scaler_target = joblib.load('target_scaler.pkl')
         
         # ทดสอบโมเดลสำหรับแต่ละหุ้น
         results, trade_histories, performance_metrics_all = process_multiple_stocks(

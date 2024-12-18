@@ -106,12 +106,6 @@ df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date',
 df.fillna(method='ffill', inplace=True)
 df.fillna(0, inplace=True)
 
-
-# ใช้ Robust Scaling สำหรับจัดการ outliers
-scaler = RobustScaler()
-numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
-df_stock[numeric_columns_to_scale] = scaler.fit_transform(df_stock[numeric_columns_to_scale])
-
 # เพิ่มฟีเจอร์
 df['Change'] = df['Close'] - df['Open']
 df['Change (%)'] = (df['Change'] / df['Open']) * 100
@@ -271,7 +265,7 @@ logging.info("เริ่มฝึกโมเดลสำหรับราค
 
 history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
-    epochs=1,
+    epochs=1000,
     batch_size=32,
     verbose=1,
     shuffle=False,
