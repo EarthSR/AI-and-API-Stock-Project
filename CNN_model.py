@@ -195,9 +195,9 @@ ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, na
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
 # เพิ่ม Convolutional Layers 
-x = Conv1D(64, kernel_size=3, activation='relu')(merged)
+x = Conv1D(32, kernel_size=3, activation='relu')(merged)
 x = MaxPooling1D(pool_size=2)(x)
-x = Conv1D(32, kernel_size=3, activation='relu')(x)
+x = Conv1D(64, kernel_size=3, activation='relu')(x)
 x = MaxPooling1D(pool_size=2)(x)
 
 # Flatten for fully connected layer
@@ -232,8 +232,7 @@ history = model.fit(
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
 
-model.save('price_prediction_CNN_model_embedding.keras')
-logging.info("บันทึกโมเดล CNN ราคาหุ้นรวมเรียบร้อยแล้ว")
+
 
 # แสดงกราฟการฝึก
 plot_training_history(history)
@@ -245,17 +244,6 @@ y_pred_scaled = model.predict([X_test, X_test_ticker])
 y_pred = scaler_target.inverse_transform(y_pred_scaled)
 y_test_original = scaler_target.inverse_transform(y_test)
 
-# คำนวณค่าต่างๆ
-mae = mean_absolute_error(y_test_original, y_pred)
-mse = mean_squared_error(y_test_original, y_pred)
-r2 = r2_score(y_test_original, y_pred)
-mape = mean_absolute_percentage_error(y_test_original, y_pred)
-
-print("\nTest Metrics with Retraining:")
-print(f"MAE: {mae:.4f}")
-print(f"MSE: {mse:.4f}")
-print(f"MAPE: {mape:.4f}")
-print(f"R2 Score: {r2:.4f}")
 
 # แสดงกราฟการทำนาย
 plot_predictions(y_test_original, y_pred, "Stock")
@@ -337,3 +325,47 @@ predictions, actual_values = predict_next_day_with_retraining_CNN(
     test_df, 
     feature_columns
 )
+
+# Calculate metrics
+mae = mean_absolute_error(actual_values, predictions)
+mse = mean_squared_error(actual_values, predictions)
+rmse = np.sqrt(mse)
+mape = mean_absolute_percentage_error(actual_values, predictions)
+r2 = r2_score(actual_values, predictions)
+
+print("\nTest Metrics with Retraining:")
+print(f"MAE: {mae:.4f}")
+print(f"MSE: {mse:.4f}")
+print(f"RMSE: {rmse:.4f}")
+print(f"MAPE: {mape:.4f}")
+print(f"R2 Score: {r2:.4f}")
+
+# Plot results (Actual vs Predicted)
+plt.figure(figsize=(15, 6))
+plt.plot(actual_values, label='Actual', color='blue')
+plt.plot(predictions, label='Predicted', color='red', alpha=0.7)
+plt.title('Next Day Predictions with Retraining')
+plt.xlabel('Time')
+plt.ylabel('Price')
+plt.legend()
+plt.show()
+
+# Save the plot to a file
+plt.savefig('next_day_predictions_with_retraining.png')
+
+# Plot residuals (Actual - Predicted)
+residuals = np.array(actual_values) - np.array(predictions)
+plt.figure(figsize=(15, 6))
+plt.scatter(range(len(residuals)), residuals, alpha=0.5)
+plt.axhline(y=0, color='r', linestyle='-')  # Line at y = 0
+plt.title('Prediction Residuals with Retraining')
+plt.xlabel('Time')
+plt.ylabel('Residual')
+plt.show()
+
+# Save residuals plot to a file
+plt.savefig('prediction_residuals_with_retraining.png')
+
+
+model.save('price_prediction_CNN_model.keras')
+logging.info("บันทึกโมเดล CNN ราคาหุ้นรวมเรียบร้อยแล้ว")

@@ -219,11 +219,6 @@ history = model.fit(
     validation_split=0.1,
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
-
-# บันทึกโมเดล
-model.save('price_prediction_RNN_model_embedding.keras')
-logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
-
 # ประเมินผล
 logging.info("ประเมินโมเดลที่ดีที่สุด")
 best_model = load_model('best_price_model_rnn.keras')
@@ -256,7 +251,7 @@ plot_residuals(y_test_true, y_test_pred, 'Stock Prediction')
 # ฟังก์ชันสำหรับการทำนายและปรับโมเดลใหม่ (Retraining)
 def predict_next_day_with_retraining_RNN(model, test_df, feature_columns, seq_length=10):
     """
-    Predict next day's price and retrain with actual data using only test_df with LSTM
+    Predict next day's price and retrain with actual data using only test_df 
     """
     predictions = []
     actual_values = []
@@ -321,5 +316,47 @@ predictions, actual_values = predict_next_day_with_retraining_RNN(
     feature_columns
 )
 
-# แสดงผลลัพธ์
-plot_predictions(actual_values, predictions, 'Stock Prediction')
+# Calculate metrics
+mae = mean_absolute_error(actual_values, predictions)
+mse = mean_squared_error(actual_values, predictions)
+rmse = np.sqrt(mse)
+mape = mean_absolute_percentage_error(actual_values, predictions)
+r2 = r2_score(actual_values, predictions)
+
+print("\nTest Metrics with Retraining:")
+print(f"MAE: {mae:.4f}")
+print(f"MSE: {mse:.4f}")
+print(f"RMSE: {rmse:.4f}")
+print(f"MAPE: {mape:.4f}")
+print(f"R2 Score: {r2:.4f}")
+
+# Plot results (Actual vs Predicted)
+plt.figure(figsize=(15, 6))
+plt.plot(actual_values, label='Actual', color='blue')
+plt.plot(predictions, label='Predicted', color='red', alpha=0.7)
+plt.title('Next Day Predictions with Retraining')
+plt.xlabel('Time')
+plt.ylabel('Price')
+plt.legend()
+plt.show()
+
+# Save the plot to a file
+plt.savefig('next_day_predictions_with_retraining.png')
+
+# Plot residuals (Actual - Predicted)
+residuals = np.array(actual_values) - np.array(predictions)
+plt.figure(figsize=(15, 6))
+plt.scatter(range(len(residuals)), residuals, alpha=0.5)
+plt.axhline(y=0, color='r', linestyle='-')  # Line at y = 0
+plt.title('Prediction Residuals with Retraining')
+plt.xlabel('Time')
+plt.ylabel('Residual')
+plt.show()
+
+# Save residuals plot to a file
+plt.savefig('prediction_residuals_with_retraining.png')
+
+# บันทึกโมเดล
+model.save('price_prediction_RNN_model.keras')
+logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
+
