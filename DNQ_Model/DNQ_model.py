@@ -141,6 +141,10 @@ df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date',
 df.fillna(method='ffill', inplace=True)
 df.fillna(0, inplace=True)
 
+scaler = RobustScaler()
+numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
+df_stock[numeric_columns_to_scale] = scaler.fit_transform(df_stock[numeric_columns_to_scale])
+
 # เพิ่มฟีเจอร์
 df['Change'] = df['Close'] - df['Open']
 df['Change (%)'] = (df['Change'] / df['Open']) * 100
@@ -180,9 +184,6 @@ train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเข�
 train_df = df[df['Date'] <= train_cutoff].copy()
 test_df = df[df['Date'] > train_cutoff].copy()
 
-scaler = RobustScaler()
-numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
-df_stock[numeric_columns_to_scale] = scaler.fit_transform(df_stock[numeric_columns_to_scale])
 
 # Feature Scaling
 scaler = RobustScaler()
