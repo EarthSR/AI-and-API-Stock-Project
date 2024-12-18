@@ -11,6 +11,8 @@ import joblib
 import ta
 import logging
 from tensorflow.keras.losses import MeanSquaredError
+from sklearn.preprocessing import RobustScaler
+
 
 def create_sequences_for_ticker(features, ticker_ids, targets, seq_length=10):
     X_features, X_tickers, Y = [], [], []
@@ -125,11 +127,16 @@ train_ticker_id = train_df['Ticker_ID'].values
 test_ticker_id = test_df['Ticker_ID'].values
 
 # สเกลข้อมูลจากเทรนเท่านั้น
-scaler_features = MinMaxScaler()
-train_features_scaled = scaler_features.fit_transform(train_features)
-test_features_scaled = scaler_features.transform(test_features)
+scaler = RobustScaler()
+numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
+df_stock[numeric_columns_to_scale] = scaler.fit_transform(df_stock[numeric_columns_to_scale])
 
-scaler_target = MinMaxScaler()
+# สเกลข้อมูลจากชุดฝึก (train) เท่านั้น
+scaler_features = RobustScaler()
+train_features_scaled = scaler_features.fit_transform(train_features)  # ใช้ fit_transform กับชุดฝึก
+test_features_scaled = scaler_features.transform(test_features)  # ใช้ transform กับชุดทดสอบ
+
+scaler_target = RobustScaler()
 train_targets_scaled = scaler_target.fit_transform(train_targets_price)
 test_targets_scaled = scaler_target.transform(test_targets_price)
 
@@ -209,7 +216,7 @@ model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
 model.summary()
 
 # ฝึกโมเดล
-early_stopping = EarlyStopping(monitor='val_loss', patience=35, restore_best_weights=True)
+early_stopping = EarlyStopping(monitor='val_loss', patience=200, restore_best_weights=True)
 checkpoint = ModelCheckpoint('best_price_cnn_model.keras', monitor='val_loss', save_best_only=True, mode='min')
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
 
@@ -217,7 +224,7 @@ logging.info("เริ่มฝึกโมเดล CNN สำหรับร�
 
 history = model.fit(
     [X_train, X_train_ticker], y_train,
-    epochs=100,
+    epochs=1000,
     batch_size=32,
     validation_data=([X_test, X_test_ticker], y_test),
     verbose=1,
