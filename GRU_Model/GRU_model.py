@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from tensorflow.keras.models import load_model
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, GRU, Dense, Dropout, Embedding, concatenate
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
@@ -10,6 +11,8 @@ import matplotlib.pyplot as plt
 import joblib
 import ta
 import logging
+from tensorflow.keras.losses import MeanSquaredError
+from sklearn.preprocessing import RobustScaler
 
 # ตั้งค่า logging
 logging.basicConfig(level=logging.INFO, filename='training.log', filemode='a',
@@ -67,12 +70,19 @@ def plot_residuals(y_true, y_pred, ticker):
     plt.show()
 
 # ตรวจสอบ GPU
+# ตรวจสอบ GPU
 physical_devices = tf.config.list_physical_devices('GPU')
 if len(physical_devices) > 0:
+    # Set visible devices to the first GPU (or any other specific one)
     tf.config.set_visible_devices(physical_devices[0], 'GPU')
-    tf.config.set_memory_growth(physical_devices[0], True)
-    logging.info(f"Using GPU: {physical_devices[0]}")
-    print("Using GPU:", physical_devices[0])
+    # Enable memory growth for the first GPU
+    try:
+        tf.config.experimental.set_memory_growth(physical_devices[0], True)
+        logging.info(f"Memory growth enabled for GPU: {physical_devices[0]}")
+        print("Memory growth enabled for GPU:", physical_devices[0])
+    except Exception as e:
+        logging.error(f"Failed to set memory growth: {e}")
+        print(f"Error setting memory growth: {e}")
 else:
     logging.info("GPU not found, using CPU")
     print("GPU not found, using CPU")
@@ -80,8 +90,12 @@ else:
 # โหลดข้อมูล
 df_stock = pd.read_csv("cleaned_data.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
 df_news = pd.read_csv("news_with_sentiment_gpu.csv")
+df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
+df_stock['Date'] = pd.to_datetime(df_stock['Date'], errors='coerce')
+print(df_news['Date'].dtype)
+print(df_stock['Date'].dtype)
 df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
-df_news['Confidence'] = df_news['Confidence'] / 100
+df_news['Confidence'] = df_news['Confidence']
 df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
 
 # เติมค่าที่ขาดหายไป
@@ -96,11 +110,14 @@ df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
 df['RSI'].fillna(method='ffill', inplace=True)
 df['RSI'].fillna(0, inplace=True)
 
-df['SMA_10'] = df['Close'].rolling(window=10).mean()
-df['SMA_200'] = df['Close'].rolling(window=200).mean()
-df['MACD'] = df['Close'].ewm(span=12, adjust=False).mean() - df['Close'].ewm(span=26, adjust=False).mean()
-df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-
+df['SMA_5'] = df['Close'].rolling(window=5).mean()  # SMA 50 วัน
+df['SMA_10'] = df['Close'].rolling(window=10).mean()  # SMA 200 วัน
+# คำนวณ MACD ด้วย EMA 12 และ EMA 26
+df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
+df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
+# คำนวณ MACD = EMA(12) - EMA(26)
+df['MACD'] = df['EMA_12'] - df['EMA_26']
+df['MACD_Signal'] = df['MACD'].rolling(window=9).mean()  
 bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
 df['Bollinger_High'] = bollinger.bollinger_hband()
 df['Bollinger_Low'] = bollinger.bollinger_lband()
@@ -108,9 +125,9 @@ df['Bollinger_Low'] = bollinger.bollinger_lband()
 df.fillna(method='ffill', inplace=True)
 df.fillna(0, inplace=True)
 
-# feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence',
-#                    'RSI', 'SMA_10', 'SMA_200', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
-feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence']
+feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment',
+                    'RSI', 'SMA_10', 'SMA_5', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+# feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment', 'Confidence']
 
 # Label Encode Ticker
 ticker_encoder = LabelEncoder()
@@ -119,45 +136,45 @@ num_tickers = len(ticker_encoder.classes_)
 
 # แบ่งข้อมูล Train/Val/Test ตามเวลา
 # สมมติเราแบ่งตาม quantile ของวันที่ หรือกำหนดโดยตรง
-train_ratio = 0.7
-val_ratio = 0.15
-test_ratio = 0.15
+sorted_dates = df['Date'].unique()
+train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเขตที่ 6 ปี
 
-sorted_dates = df['Date'].sort_values().unique()
-train_cutoff = sorted_dates[int(len(sorted_dates)*train_ratio)]
-val_cutoff = sorted_dates[int(len(sorted_dates)*(train_ratio+val_ratio))]
 
+# ข้อมูล train, test
 train_df = df[df['Date'] <= train_cutoff].copy()
-val_df = df[(df['Date'] > train_cutoff) & (df['Date'] <= val_cutoff)].copy()
-test_df = df[df['Date'] > val_cutoff].copy()
+test_df = df[df['Date'] > train_cutoff].copy()
+
+print("Train cutoff:", train_cutoff)
+print("First date in train set:", train_df['Date'].min())
+print("Last date in train set:", train_df['Date'].max())
+
 
 # สร้าง target โดย shift(-1)
 train_targets_price = train_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
 train_df = train_df.iloc[:-1]
 
-val_targets_price = val_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
-val_df = val_df.iloc[:-1]
-
 test_targets_price = test_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
 test_df = test_df.iloc[:-1]
 
 train_features = train_df[feature_columns].values
-val_features = val_df[feature_columns].values
 test_features = test_df[feature_columns].values
 
 train_ticker_id = train_df['Ticker_ID'].values
-val_ticker_id = val_df['Ticker_ID'].values
 test_ticker_id = test_df['Ticker_ID'].values
 
-# สเกลข้อมูลจากเทรนเท่านั้น
-scaler_features = MinMaxScaler()
-train_features_scaled = scaler_features.fit_transform(train_features)
-val_features_scaled = scaler_features.transform(val_features)
-test_features_scaled = scaler_features.transform(test_features)
+# สเกลข้อมูลด้วย RobustScaler
+# ใช้ Robust Scaling สำหรับจัดการ outliers
+scaler = RobustScaler()
+numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
+df_stock[numeric_columns_to_scale] = scaler.fit_transform(df_stock[numeric_columns_to_scale])
 
-scaler_target = MinMaxScaler()
+# สเกลข้อมูลจากชุดฝึก (train) เท่านั้น
+scaler_features = RobustScaler()
+train_features_scaled = scaler_features.fit_transform(train_features)  # ใช้ fit_transform กับชุดฝึก
+test_features_scaled = scaler_features.transform(test_features)  # ใช้ transform กับชุดทดสอบ
+
+scaler_target = RobustScaler()
 train_targets_scaled = scaler_target.fit_transform(train_targets_price)
-val_targets_scaled = scaler_target.transform(val_targets_price)
 test_targets_scaled = scaler_target.transform(test_targets_price)
 
 joblib.dump(scaler_features, 'scaler_features.pkl')  # บันทึก scaler ฟีเจอร์
@@ -183,20 +200,7 @@ for t_id in range(num_tickers):
         X_train_list.append(X_t)
         X_train_ticker_list.append(X_ti)
         y_train_list.append(y_t)
-
-    # Val
-    df_val_ticker = val_df[val_df['Ticker_ID'] == t_id]
-    if len(df_val_ticker) > seq_length:
-        indices = df_val_ticker.index
-        mask_val = np.isin(val_df.index, indices)
-        f_v = val_features_scaled[mask_val]
-        t_v = val_ticker_id[mask_val]
-        target_v = val_targets_scaled[mask_val]
-        X_v, X_vi, y_v = create_sequences_for_ticker(f_v, t_v, target_v, seq_length)
-        X_val_list.append(X_v)
-        X_val_ticker_list.append(X_vi)
-        y_val_list.append(y_v)
-
+        
     # Test
     df_test_ticker = test_df[test_df['Ticker_ID'] == t_id]
     if len(df_test_ticker) > seq_length:
@@ -237,6 +241,10 @@ num_feature = train_features_scaled.shape[1]  # จำนวน features ทา�
 features_input = Input(shape=(seq_length, num_feature), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
+print(f"Shape of X_price_train: {X_price_train.shape}")
+print(f"Shape of X_ticker_train: {X_ticker_train.shape}")
+
+
 embedding_dim = 32
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
@@ -249,7 +257,7 @@ x = Dropout(0.2)(x)
 output = Dense(1)(x)
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
 
 early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 checkpoint = ModelCheckpoint('best_price_model.keras', monitor='val_loss', save_best_only=True, mode='min')
@@ -259,35 +267,134 @@ logging.info("เริ่มฝึกโมเดลสำหรับราค
 
 history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
-    epochs=50,
+    epochs=200,
     batch_size=32,
-    validation_data=([X_price_val, X_ticker_val], y_price_val),
     verbose=1,
     shuffle=False,
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
 
-model.save('price_prediction_GRU_model_embedding.h5')
+
+model.save('price_prediction_GRU_model_embedding.keras')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
 
-plot_training_history(history)
+def predict_next_day_with_retraining(model, test_df, feature_columns, seq_length=10):
+    """
+    Predict next day's price and retrain with actual data using only test_df
+    """
+    predictions = []
+    actual_values = []
+    
+    # Sort data by date to ensure sequential prediction
+    test_df = test_df.sort_values('Date')
+    
+    for i in range(len(test_df) - 1):  # -1 because we need next day's actual value
+        current_date = test_df.iloc[i]['Date']
+        next_date = test_df.iloc[i + 1]['Date']
+        current_ticker = test_df.iloc[i]['Ticker']
+        
+         # Print progress
+        if i % 100 == 0:  # Print every 100 iterations
+            print(f"Processing: {i}/{len(test_df)-1}")
+        
+        # Get historical data for this prediction using only test_df
+        historical_data = test_df.iloc[:i+1]
+        historical_data = historical_data[historical_data['Ticker'] == current_ticker].tail(seq_length)
+        
+        if len(historical_data) < seq_length:
+            continue
+        
+        # Prepare features for prediction
+        features = historical_data[feature_columns].values
+        ticker_ids = historical_data['Ticker_ID'].values
+        
+        # Scale features
+        features_scaled = scaler_features.transform(features)
+        
+        # Reshape for model input
+        X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
+        X_ticker = ticker_ids.reshape(1, seq_length)
+        
+        # Make prediction
+        pred = model.predict([X_features, X_ticker], verbose=0)
+        pred_unscaled = scaler_target.inverse_transform(pred)[0][0]
+        
+        # Get actual value (next day's price)
+        actual = test_df.iloc[i + 1]['Close']
+        
+        predictions.append(pred_unscaled)
+        actual_values.append(actual)
+        
+        # Retrain model with new data point using test_df only
+        if test_df.iloc[i + 1]['Ticker'] == current_ticker:
+            # Prepare new training data from test_df
+            new_features = test_df.iloc[i][feature_columns].values.reshape(1, -1)
+            new_features_scaled = scaler_features.transform(new_features)
+            new_target = test_df.iloc[i + 1]['Close'].reshape(1, -1)
+            new_target_scaled = scaler_target.transform(new_target)
+            
+            # Create sequence for training
+            train_seq_features = features_scaled
+            train_seq_ticker = ticker_ids
+            
+            # Fit model for one epoch
+            model.fit(
+                [train_seq_features.reshape(1, seq_length, len(feature_columns)),
+                 train_seq_ticker.reshape(1, seq_length)],
+                new_target_scaled,
+                epochs=1,
+                verbose=0
+            )
+    
+    return predictions, actual_values
 
-y_pred_scaled = model.predict([X_price_test, X_ticker_test])
-y_pred = scaler_target.inverse_transform(y_pred_scaled)
-y_true = scaler_target.inverse_transform(y_price_test)
+# Execute the prediction with retraining using test_df only
+predictions, actual_values = predict_next_day_with_retraining(
+    model, 
+    test_df, 
+    feature_columns
+)
 
-mae = mean_absolute_error(y_true, y_pred)
-mse = mean_squared_error(y_true, y_pred)
+
+# Calculate metrics
+mae = mean_absolute_error(actual_values, predictions)
+mse = mean_squared_error(actual_values, predictions)
 rmse = np.sqrt(mse)
-r2 = r2_score(y_true, y_pred)
-mape = mean_absolute_percentage_error(y_true, y_pred)
+mape = mean_absolute_percentage_error(actual_values, predictions)
+r2 = r2_score(actual_values, predictions)
 
-print("Evaluation on Test Set:")
-print(f"MAE: {mae}")
-print(f"MSE: {mse}")
-print(f"RMSE: {rmse}")
-print(f"R² Score: {r2}")
-print(f"MAPE: {mape}")
+print("\nTest Metrics with Retraining:")
+print(f"MAE: {mae:.4f}")
+print(f"MSE: {mse:.4f}")
+print(f"RMSE: {rmse:.4f}")
+print(f"MAPE: {mape:.4f}")
+print(f"R2 Score: {r2:.4f}")
 
-plot_predictions(y_true[:200], y_pred[:200], "Test Set")
-plot_residuals(y_true, y_pred, "Test Set")
+# Plot results (Actual vs Predicted)
+plt.figure(figsize=(15, 6))
+plt.plot(actual_values, label='Actual', color='blue')
+plt.plot(predictions, label='Predicted', color='red', alpha=0.7)
+plt.title('Next Day Predictions with Retraining')
+plt.xlabel('Time')
+plt.ylabel('Price')
+plt.legend()
+plt.show()
+
+# Save the plot to a file
+plt.savefig('next_day_predictions_with_retraining.png')
+
+# Plot residuals (Actual - Predicted)
+residuals = np.array(actual_values) - np.array(predictions)
+plt.figure(figsize=(15, 6))
+plt.scatter(range(len(residuals)), residuals, alpha=0.5)
+plt.axhline(y=0, color='r', linestyle='-')  # Line at y = 0
+plt.title('Prediction Residuals with Retraining')
+plt.xlabel('Time')
+plt.ylabel('Residual')
+plt.show()
+
+# Save residuals plot to a file
+plt.savefig('prediction_residuals_with_retraining.png')
+
+
+model.save('price_prediction_GRU_model_embedding_aftertest.keras')
