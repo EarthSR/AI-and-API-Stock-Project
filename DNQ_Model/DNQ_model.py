@@ -269,10 +269,14 @@ def plot_training_progress(rewards):
 def train_model(X_train, y_train, agent):
     total_rewards = []
     for epoch in range(CONFIG['EPOCHS']):
+        logging.info(f"เริ่มต้น Epoch {epoch + 1}/{CONFIG['EPOCHS']}")
         state = X_train[0]
         total_reward = 0
         
         for time in range(len(X_train) - 1):
+            if time % 1000 == 0:
+                logging.info(f"Epoch {epoch + 1}: Processing time step {time}/{len(X_train) - 1}")
+                
             action = agent.act(state)
             reward = calculate_reward(action, y_train[time], y_train[time + 1])
             next_state = X_train[time + 1]
@@ -291,6 +295,7 @@ def train_model(X_train, y_train, agent):
             plot_training_progress(total_rewards)
     
     return agent
+
 
 def evaluate_model(agent, X_test, y_test, scaler_target):
     predictions = []
