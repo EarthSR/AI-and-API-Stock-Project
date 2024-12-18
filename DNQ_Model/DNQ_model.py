@@ -256,7 +256,11 @@ def calculate_reward(action, current_price, next_price):
 def train_model(X_train, y_train, agent):
     total_rewards = []
     early_stopping = EarlyStopping(monitor='loss', patience=10, restore_best_weights=True)
-    model_checkpoint = ModelCheckpoint('best_model_DQN.h5', save_best_only=True, monitor='loss', mode='min')
+    model_checkpoint = ModelCheckpoint('best_model_DQN.h5', 
+                                   save_best_only=True, 
+                                   monitor='loss', 
+                                   mode='min',
+                                   save_format='h5')
     
     for epoch in range(CONFIG['EPOCHS']):
         if epoch % 5 == 0:
@@ -291,7 +295,7 @@ def train_model(X_train, y_train, agent):
         
         if (epoch + 1) % 10 == 0:
             plot_training_progress(total_rewards)
-            agent.model.save(f'model_checkpoint_epoch_{epoch+1}.h5')
+            agent.model.save(f'model_checkpoint_epoch_{epoch+1}.h5', save_format='h5')
         
         # ใช้ Early Stopping
         if early_stopping.on_epoch_end(epoch, logs={'loss': total_reward}):
@@ -614,7 +618,7 @@ def main():
         agent, total_rewards = train_model(X_train, y_train, agent)
         
         # Save trained model
-        agent.model.save('final_model_DQN.h5')
+        agent.model.save('final_model_DQN.h5', save_format='h5')
         
         # Plot training progress
         plot_training_progress(total_rewards)
