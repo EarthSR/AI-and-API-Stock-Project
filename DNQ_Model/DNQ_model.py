@@ -255,9 +255,12 @@ def calculate_reward(action, current_price, next_price):
 
 def train_model(X_train, y_train, agent):
     total_rewards = []
+
+    # สร้าง EarlyStopping callback
     early_stopping = EarlyStopping(monitor='loss', patience=10, restore_best_weights=True)
-    model_checkpoint = ModelCheckpoint('best_model_DQN.keras', save_best_only=True, monitor='loss', mode='min')
-    
+    # กำหนดโมเดลให้กับ early_stopping ด้วยตนเอง
+    early_stopping.set_model(agent.model)
+
     for epoch in range(CONFIG['EPOCHS']):
         if epoch % 5 == 0:
             process = psutil.Process(os.getpid())
@@ -289,15 +292,15 @@ def train_model(X_train, y_train, agent):
         total_rewards.append(total_reward)
         logging.info(f"Epoch {epoch + 1} - Total reward: {total_reward:.2f} - Epsilon: {agent.epsilon:.3f}")
         
-        if (epoch + 1) % 10 == 0:
-            plot_training_progress(total_rewards)
-            agent.model.save(f'model_checkpoint_epoch_{epoch+1}.keras')
-        
-        # ใช้ Early Stopping
+        # เรียกใช้ early_stopping.on_epoch_end ด้วย logs={'loss': total_reward}
         if early_stopping.on_epoch_end(epoch, logs={'loss': total_reward}):
             logging.info("Early stopping triggered")
             break
-    
+
+        if (epoch + 1) % 10 == 0:
+            plot_training_progress(total_rewards)
+            agent.model.save(f'model_checkpoint_epoch_{epoch+1}.keras')
+
     logging.info("Training completed successfully")
     return agent, total_rewards
 
