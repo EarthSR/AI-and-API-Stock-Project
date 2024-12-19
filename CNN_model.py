@@ -218,7 +218,7 @@ logging.info("เริ่มฝึกโมเดล CNN สำหรับร�
 
 history = model.fit(
     [X_train, X_train_ticker], y_train,
-    epochs=10,
+    epochs=1000,
     batch_size=32,
     validation_data=([X_test, X_test_ticker], y_test),
     verbose=1,
@@ -259,7 +259,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     - scaler_features: Fitted scaler for features.
     - scaler_target: Fitted scaler for target.
     - ticker_encoder: Fitted LabelEncoder for ticker IDs.
-    - seq_length: Sequence length for GRU.
+    - seq_length: Sequence length.
     
     Returns:
     - results: Dictionary containing metrics and predictions for each ticker.
@@ -278,7 +278,8 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
         
         predictions = []
         actuals = []
-        
+        dates = []  # เก็บวันที่ของข้อมูลจริงและพยากรณ์
+
         for i in range(len(df_ticker) - seq_length):
             if i % 100 == 0:
                 print(f"  Processing: {i}/{len(df_ticker)-seq_length}")
@@ -291,7 +292,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             # สเกลฟีเจอร์
             features_scaled = scaler_features.transform(features)
             
-            # จัดรูปแบบสำหรับโมเดล 3D input: [samples, timesteps, features]
+            # จัดรูปแบบสำหรับโมเดล
             X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
             X_ticker = ticker_ids.reshape(1, seq_length)
             
@@ -301,9 +302,11 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             
             # ค่าจริงของวันถัดไป
             actual = df_ticker.iloc[i + seq_length]['Close']
+            date_value = df_ticker.iloc[i + seq_length]['Date']
             
             predictions.append(pred_unscaled)
             actuals.append(actual)
+            dates.append(date_value)
             
             # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่ใช่ค่าพยากรณ์)
             new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
@@ -319,7 +322,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             model.fit(
                 [train_seq_features, train_seq_ticker],
                 new_target_scaled,
-                epochs=10,
+                epochs=3,
                 batch_size=1,
                 verbose=0
             )
@@ -338,7 +341,8 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             'MAPE': mape,
             'R2': r2,
             'Predictions': predictions,
-            'Actuals': actuals
+            'Actuals': actuals,
+            'Dates': dates
         }
         
         # พล็อตผลการพยากรณ์และ residuals สำหรับหุ้นนี้
@@ -379,8 +383,17 @@ metrics_df = pd.DataFrame({
     }
     for ticker, metrics in results_per_ticker.items()
 }).T
-
 metrics_df.to_csv('metrics_per_ticker.csv', index=True)
 print("\nSaved metrics per ticker to 'metrics_per_ticker.csv'")
 
-plt.savefig('prediction_plot_with_retraining.png')
+# รวบรวม Actual และ Prediction ของทุก ticker ลง CSV
+all_data = []
+for ticker, data in results_per_ticker.items():
+    for date_val, actual_val, pred_val in zip(data['Dates'], data['Actuals'], data['Predictions']):
+        all_data.append([ticker, date_val, actual_val, pred_val])
+
+prediction_df = pd.DataFrame(all_data, columns=['Ticker', 'Date', 'Actual', 'Predicted'])
+prediction_df.to_csv('all_predictions_per_day.csv', index=False)
+
+print("Saved actual and predicted prices to 'all_predictions_per_day.csv'")
+
