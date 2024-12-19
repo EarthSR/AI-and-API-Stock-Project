@@ -221,7 +221,7 @@ model.summary()
 
 history = model.fit(
     [X_train, X_train_ticker], y_train,
-    epochs=1,
+    epochs=1000,
     batch_size=32,
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
