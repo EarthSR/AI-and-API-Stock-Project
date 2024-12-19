@@ -260,7 +260,8 @@ def train_model(X_train, y_train, agent):
     early_stopping = EarlyStopping(monitor='loss', patience=10, restore_best_weights=True)
     # กำหนดโมเดลให้กับ early_stopping ด้วยตนเอง
     early_stopping.set_model(agent.model)
-
+    
+    early_stopping.on_train_begin()
     for epoch in range(CONFIG['EPOCHS']):
         if epoch % 5 == 0:
             process = psutil.Process(os.getpid())
