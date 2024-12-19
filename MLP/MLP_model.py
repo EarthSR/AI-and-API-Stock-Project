@@ -201,9 +201,9 @@ features_flat = Flatten()(features_input)
 merged = concatenate([features_flat, ticker_embedding_flat])
 
 # ลด Dense Layer เหลือ 2 Layers
-x = Dense(64, activation='relu')(merged)
+x = Dense(128, activation='relu')(merged)
 x = Dropout(0.3)(x)  # Dropout หลัง Dense Layer แรก
-x = Dense(32, activation='relu')(x)
+x = Dense(64, activation='relu')(x)
 output = Dense(1)(x)  # Output Layer
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
