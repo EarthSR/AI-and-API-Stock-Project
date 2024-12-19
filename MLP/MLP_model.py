@@ -10,7 +10,9 @@ from tensorflow.keras.models import load_model
 import joblib
 from tensorflow.keras.metrics import MeanSquaredError
 import logging
+from tensorflow.keras.layers import BatchNormalization
 import ta
+from tensorflow.keras.optimizers import Adam
 import tensorflow as tf
 from sklearn.preprocessing import RobustScaler
 import matplotlib.pyplot as plt
@@ -195,25 +197,32 @@ X_test, X_test_ticker, y_test = create_sequences(test_features_scaled, test_tick
 features_input = Input(shape=(seq_length, train_features_scaled.shape[1]), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
-embedding_dim = 32
+embedding_dim = 64
 ticker_embedding = Embedding(input_dim=df['Ticker_ID'].max() + 1, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 ticker_embedding_flat = Flatten()(ticker_embedding)
 
 features_flat = Flatten()(features_input)
 merged = concatenate([features_flat, ticker_embedding_flat])
 
-# ลด Dense Layer เหลือ 2 Layers
-x = Dense(128, activation='relu')(merged)
-x = Dropout(0.3)(x)  # Dropout หลัง Dense Layer แรก
-x = Dense(64, activation='relu')(x)
+
+# Dense Layers with Regularization
+x = Dense(256, activation='relu', kernel_regularizer='l2')(merged)  # เพิ่มขนาด Layer
+x = BatchNormalization()(x)  # ใช้ Batch Normalization
+x = Dropout(0.4)(x)  # เพิ่ม Dropout
+
+x = Dense(128, activation='relu', kernel_regularizer='l2')(x)  # อีกหนึ่ง Dense Layer
+x = BatchNormalization()(x)
+x = Dropout(0.4)(x)
+
+x = Dense(64, activation='relu', kernel_regularizer='l2')(x)  # เพิ่ม Layer
 output = Dense(1)(x)  # Output Layer
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+model.compile(optimizer=Adam(learning_rate=0.0001), loss='mse', metrics=['mae'])
 
 
 # 11. ฝึกสอนโมเดล
-early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+early_stopping = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
 checkpoint = ModelCheckpoint('best_model_mlp.keras', monitor='val_loss', save_best_only=True)
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=10, min_lr=0.0001)
 
@@ -222,7 +231,7 @@ model.summary()
 history = model.fit(
     [X_train, X_train_ticker], y_train,
     epochs=1000,
-    batch_size=32,
+    batch_size=16,
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
 
