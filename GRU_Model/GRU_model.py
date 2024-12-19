@@ -363,7 +363,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             model.fit(
                 [train_seq_features, train_seq_ticker],
                 new_target_scaled,
-                epochs=2,
+                epochs=3,
                 batch_size=1,
                 verbose=0
             )
