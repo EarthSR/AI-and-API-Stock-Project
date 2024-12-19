@@ -342,12 +342,13 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             actuals.append(actual)
             
             # บันทึกข้อมูลลง DataFrame
-            predictions_df = predictions_df.append({
-                'Ticker': ticker,
-                'Date': df_ticker.iloc[i + seq_length]['Date'],
-                'Predicted': pred_unscaled,
-                'Actual': actual
-            }, ignore_index=True)
+            new_row = pd.DataFrame([{
+            'Ticker': ticker,
+            'Date': df_ticker.iloc[i + seq_length]['Date'],
+            'Predicted': pred_unscaled,
+            'Actual': actual
+            }])
+            predictions_df = pd.concat([predictions_df, new_row], ignore_index=True)
             
             # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่ใช่ค่าพยากรณ์)
             new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
