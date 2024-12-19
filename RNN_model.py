@@ -1,8 +1,7 @@
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler, LabelEncoder
-from tensorflow.keras.models import load_model
-from tensorflow.keras.models import Model
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder, RobustScaler
+from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.layers import Input, SimpleRNN, Dense, Dropout, Embedding, concatenate
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 import tensorflow as tf
@@ -10,9 +9,9 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLRO
 import matplotlib.pyplot as plt
 import joblib
 import ta
-from sklearn.preprocessing import RobustScaler
 import logging
 from tensorflow.keras.losses import MeanSquaredError
+
 
 def create_sequences_for_ticker(features, ticker_ids, targets, seq_length=10):
     X_features, X_tickers, Y = [], [], []
@@ -56,6 +55,8 @@ def plot_predictions(y_true, y_pred, ticker):
     plt.show()
 
 def plot_residuals(y_true, y_pred, ticker):
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
     residuals = y_true - y_pred
     plt.figure(figsize=(10, 6))
     plt.scatter(range(len(residuals)), residuals, alpha=0.5)
@@ -84,8 +85,8 @@ df['Change (%)'] = (df['Change'] / df['Open']) * 100
 df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
 df['RSI'].fillna(method='ffill', inplace=True)
 df['RSI'].fillna(0, inplace=True)
-df['SMA_5'] = df['Close'].rolling(window=5).mean()  # SMA 50 วัน
-df['SMA_10'] = df['Close'].rolling(window=10).mean()  # SMA 200 วัน
+df['SMA_5'] = df['Close'].rolling(window=5).mean()  # SMA 5 วัน
+df['SMA_10'] = df['Close'].rolling(window=10).mean()  # SMA 10 วัน
 df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
 df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
 df['MACD'] = df['EMA_12'] - df['EMA_26']
@@ -98,7 +99,7 @@ df.fillna(method='ffill', inplace=True)
 df.fillna(0, inplace=True)
 
 feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment',
-                    'RSI', 'SMA_10', 'SMA_5', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+                   'RSI', 'SMA_10', 'SMA_5', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
 
 # Label Encode Ticker
 ticker_encoder = LabelEncoder()
@@ -107,13 +108,12 @@ num_tickers = len(ticker_encoder.classes_)
 
 # แบ่งข้อมูล Train/Val/Test ตามเวลา
 sorted_dates = df['Date'].unique()
-train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเขตที่ 6 ปี
+train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  
 
 # ข้อมูล train, test
 train_df = df[df['Date'] <= train_cutoff].copy()
 test_df = df[df['Date'] > train_cutoff].copy()
 
-# สร้าง target โดย shift(-1)
 train_targets_price = train_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
 train_df = train_df.iloc[:-1]
 
@@ -126,11 +126,6 @@ test_features = test_df[feature_columns].values
 train_ticker_id = train_df['Ticker_ID'].values
 test_ticker_id = test_df['Ticker_ID'].values
 
-# สเกลข้อมูลจากเทรนเท่านั้น
-scaler = RobustScaler()
-numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
-df_stock[numeric_columns_to_scale] = scaler.fit_transform(df_stock[numeric_columns_to_scale])
-
 # สเกลข้อมูลจากชุดฝึก (train) เท่านั้น
 scaler_features = RobustScaler()
 train_features_scaled = scaler_features.fit_transform(train_features)  # ใช้ fit_transform กับชุดฝึก
@@ -140,14 +135,14 @@ scaler_target = RobustScaler()
 train_targets_scaled = scaler_target.fit_transform(train_targets_price)
 test_targets_scaled = scaler_target.transform(test_targets_price)
 
-joblib.dump(scaler_features, 'rnn_scaler_features.pkl')  # บันทึก scaler ฟีเจอร์
-joblib.dump(scaler_target, 'rnn_scaler_target.pkl')     # บันทึก scaler เป้าหมาย
+# บันทึก Scalers
+joblib.dump(scaler_features, 'rnn_scaler_features.pkl')
+joblib.dump(scaler_target, 'rnn_scaler_target.pkl')
 
 seq_length = 10
 
 # สร้าง sequences แยกตาม Ticker
 X_train_list, X_train_ticker_list, y_train_list = [], [], []
-X_val_list, X_val_ticker_list, y_val_list = [], [], []
 X_test_list, X_test_ticker_list, y_test_list = [], [], []
 
 for t_id in range(num_tickers):
@@ -172,21 +167,20 @@ for t_id in range(num_tickers):
         f_s = test_features_scaled[mask_test]
         t_s = test_ticker_id[mask_test]
         target_s = test_targets_scaled[mask_test]
-        X_s, X_st, y_s = create_sequences_for_ticker(f_s, t_s, target_s, seq_length)
+        X_s, X_si, y_s = create_sequences_for_ticker(f_s, t_s, target_s, seq_length)
         X_test_list.append(X_s)
-        X_test_ticker_list.append(X_st)
+        X_test_ticker_list.append(X_si)
         y_test_list.append(y_s)
 
-# รวมข้อมูลทั้งหมด
-X_train = np.concatenate(X_train_list)
-X_train_ticker = np.concatenate(X_train_ticker_list)
-y_train = np.concatenate(y_train_list)
+X_train = np.concatenate(X_train_list, axis=0)
+X_train_ticker = np.concatenate(X_train_ticker_list, axis=0)
+y_train = np.concatenate(y_train_list, axis=0)
 
-X_test = np.concatenate(X_test_list)
-X_test_ticker = np.concatenate(X_test_ticker_list)
-y_test = np.concatenate(y_test_list)
+X_test = np.concatenate(X_test_list, axis=0)
+X_test_ticker = np.concatenate(X_test_ticker_list, axis=0)
+y_test = np.concatenate(y_test_list, axis=0)
 
-# สร้างโมเดล RNN
+# สร้างโมเดล RNN (SimpleRNN)
 features_input = Input(shape=(seq_length, len(feature_columns)), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
@@ -195,168 +189,199 @@ ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, na
 
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-x = SimpleRNN(64, return_sequences=True)(merged)
+x = SimpleRNN(64, return_sequences=True, activation='relu')(merged)
 x = Dropout(0.2)(x)
-x = SimpleRNN(32)(x) 
+x = SimpleRNN(32, activation='relu')(x)
 x = Dropout(0.2)(x)
 output = Dense(1)(x)
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
 model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
 
-# ตั้งค่า callback
+# แสดงสรุปโมเดล
+model.summary()
+
+# ฝึกโมเดล
 early_stopping = EarlyStopping(monitor='val_loss', patience=200, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_price_model_rnn.keras', monitor='val_loss', save_best_only=True, mode='min')
+checkpoint = ModelCheckpoint('best_price_rnn_model.keras', monitor='val_loss', save_best_only=True, mode='min')
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
 
+logging.info("เริ่มฝึกโมเดล RNN สำหรับราคาหุ้น")
 
 history = model.fit(
     [X_train, X_train_ticker], y_train,
-    epochs=1000,
+    epochs=10,
     batch_size=32,
+    validation_data=([X_test, X_test_ticker], y_test),
     verbose=1,
     shuffle=False,
-    validation_split=0.1,
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
-# ประเมินผล
-logging.info("ประเมินโมเดลที่ดีที่สุด")
-best_model = load_model('best_price_model_rnn.keras')
-y_test_pred_scaled = best_model.predict([X_test, X_test_ticker])
 
-# การกลับคืนค่า
-y_test_pred = scaler_target.inverse_transform(y_test_pred_scaled)
-y_test_true = scaler_target.inverse_transform(y_test)
+# แสดงกราฟการฝึก
+plot_training_history(history)
 
-# ประเมินผล
+# ทำนายค่าจากโมเดล
+y_pred_scaled = model.predict([X_test, X_test_ticker])
 
-mae = mean_absolute_error(y_test_true, y_test_pred)
-mse = mean_squared_error(y_test_true, y_test_pred)
-rmse = np.sqrt(mse)
-r2 = r2_score(y_test_true, y_test_pred)
-mape = mean_absolute_percentage_error(y_test_true, y_test_pred)
+# ย้อนกลับค่าที่ทำนาย
+y_pred = scaler_target.inverse_transform(y_pred_scaled)
+y_test_original = scaler_target.inverse_transform(y_test)
 
-print("\nTest Metrics with Retraining:")
-print(f"MAE: {mae:.4f}")
-print(f"MSE: {mse:.4f}")
-print(f"RMSE: {rmse:.4f}")
-print(f"MAPE: {mape:.4f}")
-print(f"R2 Score: {r2:.4f}")
+# แสดงกราฟการทำนาย
+plot_predictions(y_test_original, y_pred, "Stock")
 
-# แสดงผลกราฟ
-plot_predictions(y_test_true, y_test_pred, 'Stock Prediction')
-plot_residuals(y_test_true, y_test_pred, 'Stock Prediction')
+# แสดง Residuals
+plot_residuals(y_test_original, y_pred, "Stock")
 
 
-# ฟังก์ชันสำหรับการทำนายและปรับโมเดลใหม่ (Retraining)
-def predict_next_day_with_retraining_RNN(model, test_df, feature_columns, seq_length=10):
+model.save('price_prediction_SimpleRNN_model.keras')
+logging.info("บันทึกโมเดล SimpleRNN ราคาหุ้นรวมเรียบร้อยแล้ว")
+
+def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
     """
-    Predict next day's price and retrain with actual data using only test_df 
+    Perform walk-forward validation for each ticker.
+    
+    Parameters:
+    - model: Trained Keras model.
+    - df: DataFrame containing all data.
+    - feature_columns: List of feature column names.
+    - scaler_features: Fitted scaler for features.
+    - scaler_target: Fitted scaler for target.
+    - ticker_encoder: Fitted LabelEncoder for ticker IDs.
+    - seq_length: Sequence length for GRU.
+    
+    Returns:
+    - results: Dictionary containing metrics and predictions for each ticker.
     """
-    predictions = []
-    actual_values = []
+    tickers = df['Ticker'].unique()
+    results = {}
     
-    # เรียงข้อมูลตามวันที่
-    test_df = test_df.sort_values('Date')
-    
-    for i in range(len(test_df) - 1):  # -1 เพราะเราต้องใช้ค่าเป้าหมายของวันถัดไป
-        current_date = test_df.iloc[i]['Date']
-        current_ticker = test_df.iloc[i]['Ticker']
+    for ticker in tickers:
+        print(f"\nProcessing Ticker: {ticker}")
+        ticker_id = ticker_encoder.transform([ticker])[0]
+        df_ticker = df[df['Ticker'] == ticker].sort_values('Date').reset_index(drop=True)
         
-        # ดึงข้อมูลย้อนหลังตาม seq_length
-        historical_data = test_df.iloc[:i+1]
-        historical_data = historical_data[historical_data['Ticker'] == current_ticker].tail(seq_length)
-        
-        if len(historical_data) < seq_length:
+        if len(df_ticker) < seq_length + 1:
+            print(f"Not enough data for ticker {ticker}, skipping...")
             continue
         
-        # เตรียมข้อมูลฟีเจอร์สำหรับการทำนาย
-        features = historical_data[feature_columns].values
-        ticker_ids = historical_data['Ticker_ID'].values
+        predictions = []
+        actuals = []
         
-        # ปรับสเกลข้อมูล
-        features_scaled = scaler_features.transform(features)
-        X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
-        X_ticker = ticker_ids.reshape(1, seq_length)
-        
-        # ทำการทำนาย
-        pred = model.predict([X_features, X_ticker], verbose=0)
-        pred_unscaled = scaler_target.inverse_transform(pred)[0][0]
-        
-        # ดึงค่าจริงของวันถัดไป
-        actual = test_df.iloc[i + 1]['Close']
-        
-        predictions.append(pred_unscaled)
-        actual_values.append(actual)
-        
-        # ปรับปรุงโมเดลด้วยข้อมูลจริงของวันถัดไป
-        if test_df.iloc[i + 1]['Ticker'] == current_ticker:
-            new_features = test_df.iloc[i][feature_columns].values.reshape(1, -1)
+        for i in range(len(df_ticker) - seq_length):
+            if i % 100 == 0:
+                print(f"  Processing: {i}/{len(df_ticker)-seq_length}")
+            
+            # เตรียมข้อมูลย้อนหลัง seq_length วัน
+            historical_data = df_ticker.iloc[i:i+seq_length]
+            features = historical_data[feature_columns].values
+            ticker_ids = historical_data['Ticker_ID'].values
+            
+            # สเกลฟีเจอร์
+            features_scaled = scaler_features.transform(features)
+            
+            # จัดรูปแบบสำหรับโมเดล 3D input: [samples, timesteps, features]
+            X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
+            X_ticker = ticker_ids.reshape(1, seq_length)
+            
+            # พยากรณ์
+            pred = model.predict([X_features, X_ticker], verbose=0)
+            pred_unscaled = scaler_target.inverse_transform(pred)[0][0]
+            
+            # ค่าจริงของวันถัดไป
+            actual = df_ticker.iloc[i + seq_length]['Close']
+            
+            predictions.append(pred_unscaled)
+            actuals.append(actual)
+            
+            # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่ใช่ค่าพยากรณ์)
+            new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
             new_features_scaled = scaler_features.transform(new_features)
-            new_target = test_df.iloc[i + 1]['Close'].reshape(1, -1)
-            new_target_scaled = scaler_target.transform(new_target)
+            new_target = df_ticker.iloc[i + seq_length]['Close']
+            new_target_scaled = scaler_target.transform([[new_target]])
             
-            train_seq_features = features_scaled
-            train_seq_ticker = ticker_ids
+            # สร้าง sequence ใหม่สำหรับการฝึก
+            train_seq_features = features_scaled.reshape(1, seq_length, len(feature_columns))
+            train_seq_ticker = ticker_ids.reshape(1, seq_length)
             
+            # รีเทรนโมเดลด้วยข้อมูลใหม่
             model.fit(
-                [train_seq_features.reshape(1, seq_length, len(feature_columns)),
-                 train_seq_ticker.reshape(1, seq_length)],
+                [train_seq_features, train_seq_ticker],
                 new_target_scaled,
                 epochs=1,
                 batch_size=1,
                 verbose=0
             )
+        
+        # คำนวณเมตริกส์
+        mae = mean_absolute_error(actuals, predictions)
+        mse = mean_squared_error(actuals, predictions)
+        rmse = np.sqrt(mse)
+        mape = mean_absolute_percentage_error(actuals, predictions)
+        r2 = r2_score(actuals, predictions)
+        
+        results[ticker] = {
+            'MAE': mae,
+            'MSE': mse,
+            'RMSE': rmse,
+            'MAPE': mape,
+            'R2': r2,
+            'Predictions': predictions,
+            'Actuals': actuals
+        }
+        
+        # พล็อตผลการพยากรณ์และ residuals สำหรับหุ้นนี้
+        plot_predictions(actuals, predictions, ticker)
+        plot_residuals(actuals, predictions, ticker)
     
-    return predictions, actual_values
+    return results
 
-predictions, actual_values = predict_next_day_with_retraining_RNN(
-    best_model,
-    test_df,
-    feature_columns
+
+# ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
+results_per_ticker = walk_forward_validation(
+    model=load_model('price_prediction_SimpleRNN_model.keras'),
+    df=test_df,  # ใช้ test_df สำหรับการพยากรณ์
+    feature_columns=feature_columns,
+    scaler_features=scaler_features,
+    scaler_target=scaler_target,
+    ticker_encoder=ticker_encoder,
+    seq_length=seq_length
 )
 
-# Calculate metrics
-mae = mean_absolute_error(actual_values, predictions)
-mse = mean_squared_error(actual_values, predictions)
-rmse = np.sqrt(mse)
-mape = mean_absolute_percentage_error(actual_values, predictions)
-r2 = r2_score(actual_values, predictions)
+# แสดงผลสรุปเมตริกส์สำหรับแต่ละหุ้น
+for ticker, metrics in results_per_ticker.items():
+    print(f"\nMetrics for {ticker}:")
+    print(f"MAE: {metrics['MAE']:.4f}")
+    print(f"MSE: {metrics['MSE']:.4f}")
+    print(f"RMSE: {metrics['RMSE']:.4f}")
+    print(f"MAPE: {metrics['MAPE']:.4f}")
+    print(f"R2 Score: {metrics['R2']:.4f}")
 
-print("\nTest Metrics with Retraining:")
-print(f"MAE: {mae:.4f}")
-print(f"MSE: {mse:.4f}")
-print(f"RMSE: {rmse:.4f}")
-print(f"MAPE: {mape:.4f}")
-print(f"R2 Score: {r2:.4f}")
+# บันทึกเมตริกส์ลงไฟล์ CSV สำหรับการวิเคราะห์เพิ่มเติม
+metrics_df = pd.DataFrame({
+    ticker: {
+        'MAE': metrics['MAE'],
+        'MSE': metrics['MSE'],
+        'RMSE': metrics['RMSE'],
+        'MAPE': metrics['MAPE'],
+        'R2': metrics['R2']
+    }
+    for ticker, metrics in results_per_ticker.items()
+}).T
 
-# Plot results (Actual vs Predicted)
-plt.figure(figsize=(15, 6))
-plt.plot(actual_values, label='Actual', color='blue')
-plt.plot(predictions, label='Predicted', color='red', alpha=0.7)
-plt.title('Next Day Predictions with Retraining')
-plt.xlabel('Time')
-plt.ylabel('Price')
-plt.legend()
-plt.show()
+metrics_df.to_csv('metrics_per_ticker.csv', index=True)
+print("\nSaved metrics per ticker to 'metrics_per_ticker.csv'")
 
-# Save the plot to a file
-plt.savefig('next_day_predictions_with_retraining.png')
+# Save predictions and actuals to CSV
+all_predictions = []
 
-# Plot residuals (Actual - Predicted)
-residuals = np.array(actual_values) - np.array(predictions)
-plt.figure(figsize=(15, 6))
-plt.scatter(range(len(residuals)), residuals, alpha=0.5)
-plt.axhline(y=0, color='r', linestyle='-')  # Line at y = 0
-plt.title('Prediction Residuals with Retraining')
-plt.xlabel('Time')
-plt.ylabel('Residual')
-plt.show()
+for ticker, result in results_per_ticker.items():
+    for date, pred, actual in zip(result['Dates'], result['Predictions'], result['Actuals']):
+        all_predictions.append({'Ticker': ticker, 'Date': date, 'Predicted': pred, 'Actual': actual})
 
-# Save residuals plot to a file
+predictions_df = pd.DataFrame(all_predictions)
+predictions_df.to_csv('predictions_results.csv', index=False)
+
+# บันทึกกราฟ Residuals ลงไฟล์
 plt.savefig('prediction_residuals_with_retraining.png')
-
-# บันทึกโมเดล
-model.save('price_prediction_RNN_model.keras')
-logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
-
