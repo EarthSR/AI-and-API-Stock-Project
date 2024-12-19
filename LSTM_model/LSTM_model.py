@@ -179,103 +179,104 @@ joblib.dump(scaler_target, 'scaler_target.pkl')     # บันทึก scaler 
 
 seq_length = 10
 
-# สร้าง sequences แยกตาม Ticker
-X_train_list, X_train_ticker_list, y_train_list = [], [], []
-X_val_list, X_val_ticker_list, y_val_list = [], [], []
-X_test_list, X_test_ticker_list, y_test_list = [], [], []
+# # สร้าง sequences แยกตาม Ticker
+# X_train_list, X_train_ticker_list, y_train_list = [], [], []
+# X_val_list, X_val_ticker_list, y_val_list = [], [], []
+# X_test_list, X_test_ticker_list, y_test_list = [], [], []
 
-for t_id in range(num_tickers):
-    # Train
-    df_train_ticker = train_df[train_df['Ticker_ID'] == t_id]
-    if len(df_train_ticker) > seq_length:
-        indices = df_train_ticker.index
-        mask_train = np.isin(train_df.index, indices)
-        f_t = train_features_scaled[mask_train]
-        t_t = train_ticker_id[mask_train]
-        target_t = train_targets_scaled[mask_train]
-        X_t, X_ti, y_t = create_sequences_for_ticker(f_t, t_t, target_t, seq_length)
-        X_train_list.append(X_t)
-        X_train_ticker_list.append(X_ti)
-        y_train_list.append(y_t)
+# for t_id in range(num_tickers):
+#     # Train
+#     df_train_ticker = train_df[train_df['Ticker_ID'] == t_id]
+#     if len(df_train_ticker) > seq_length:
+#         indices = df_train_ticker.index
+#         mask_train = np.isin(train_df.index, indices)
+#         f_t = train_features_scaled[mask_train]
+#         t_t = train_ticker_id[mask_train]
+#         target_t = train_targets_scaled[mask_train]
+#         X_t, X_ti, y_t = create_sequences_for_ticker(f_t, t_t, target_t, seq_length)
+#         X_train_list.append(X_t)
+#         X_train_ticker_list.append(X_ti)
+#         y_train_list.append(y_t)
         
-    # Test
-    df_test_ticker = test_df[test_df['Ticker_ID'] == t_id]
-    if len(df_test_ticker) > seq_length:
-        indices = df_test_ticker.index
-        mask_test = np.isin(test_df.index, indices)
-        f_s = test_features_scaled[mask_test]
-        t_s = test_ticker_id[mask_test]
-        target_s = test_targets_scaled[mask_test]
-        X_s, X_si, y_s = create_sequences_for_ticker(f_s, t_s, target_s, seq_length)
-        X_test_list.append(X_s)
-        X_test_ticker_list.append(X_si)
-        y_test_list.append(y_s)
+#     # Test
+#     df_test_ticker = test_df[test_df['Ticker_ID'] == t_id]
+#     if len(df_test_ticker) > seq_length:
+#         indices = df_test_ticker.index
+#         mask_test = np.isin(test_df.index, indices)
+#         f_s = test_features_scaled[mask_test]
+#         t_s = test_ticker_id[mask_test]
+#         target_s = test_targets_scaled[mask_test]
+#         X_s, X_si, y_s = create_sequences_for_ticker(f_s, t_s, target_s, seq_length)
+#         X_test_list.append(X_s)
+#         X_test_ticker_list.append(X_si)
+#         y_test_list.append(y_s)
 
-if len(X_train_list) > 0:
-    X_price_train = np.concatenate(X_train_list, axis=0)
-    X_ticker_train = np.concatenate(X_train_ticker_list, axis=0)
-    y_price_train = np.concatenate(y_train_list, axis=0)
-else:
-    X_price_train, X_ticker_train, y_price_train = np.array([]), np.array([]), np.array([])
+# if len(X_train_list) > 0:
+#     X_price_train = np.concatenate(X_train_list, axis=0)
+#     X_ticker_train = np.concatenate(X_train_ticker_list, axis=0)
+#     y_price_train = np.concatenate(y_train_list, axis=0)
+# else:
+#     X_price_train, X_ticker_train, y_price_train = np.array([]), np.array([]), np.array([])
 
-if len(X_val_list) > 0:
-    X_price_val = np.concatenate(X_val_list, axis=0)
-    X_ticker_val = np.concatenate(X_val_ticker_list, axis=0)
-    y_price_val = np.concatenate(y_val_list, axis=0)
-else:
-    X_price_val, X_ticker_val, y_price_val = np.array([]), np.array([]), np.array([])
+# if len(X_val_list) > 0:
+#     X_price_val = np.concatenate(X_val_list, axis=0)
+#     X_ticker_val = np.concatenate(X_val_ticker_list, axis=0)
+#     y_price_val = np.concatenate(y_val_list, axis=0)
+# else:
+#     X_price_val, X_ticker_val, y_price_val = np.array([]), np.array([]), np.array([])
 
-if len(X_test_list) > 0:
-    X_price_test = np.concatenate(X_test_list, axis=0)
-    X_ticker_test = np.concatenate(X_test_ticker_list, axis=0)
-    y_price_test = np.concatenate(y_test_list, axis=0)
-else:
-    X_price_test, X_ticker_test, y_price_test = np.array([]), np.array([]), np.array([])
+# if len(X_test_list) > 0:
+#     X_price_test = np.concatenate(X_test_list, axis=0)
+#     X_ticker_test = np.concatenate(X_test_ticker_list, axis=0)
+#     y_price_test = np.concatenate(y_test_list, axis=0)
+# else:
+#     X_price_test, X_ticker_test, y_price_test = np.array([]), np.array([]), np.array([])
 
-num_feature = train_features_scaled.shape[1]  # จำนวน features ทางเทคนิค
+# num_feature = train_features_scaled.shape[1]  # จำนวน features ทางเทคนิค
 
-# สร้างโมเดล LSTM + Embedding
-features_input = Input(shape=(seq_length, num_feature), name='features_input')
-ticker_input = Input(shape=(seq_length,), name='ticker_input')
+# # สร้างโมเดล LSTM + Embedding
+# features_input = Input(shape=(seq_length, num_feature), name='features_input')
+# ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
-print(f"Shape of X_price_train: {X_price_train.shape}")
-print(f"Shape of X_ticker_train: {X_ticker_train.shape}")
-
-
-embedding_dim = 32
-ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
-
-merged = concatenate([features_input, ticker_embedding], axis=-1)
-
-x = LSTM(64, return_sequences=True)(merged)
-x = Dropout(0.2)(x)
-x = LSTM(32)(x)
-x = Dropout(0.2)(x)
-output = Dense(1)(x)
-
-model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
-
-early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_price_model.keras', monitor='val_loss', save_best_only=True, mode='min')
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
-
-logging.info("เริ่มฝึกโมเดลสำหรับราคาหุ้นรวม (ใช้ Embedding สำหรับ Ticker)")
-
-history = model.fit(
-    [X_price_train, X_ticker_train], y_price_train,
-    epochs=1000,
-    batch_size=32,
-    verbose=1,
-    shuffle=False,
-    callbacks=[early_stopping, checkpoint, reduce_lr]
-)
+# print(f"Shape of X_price_train: {X_price_train.shape}")
+# print(f"Shape of X_ticker_train: {X_ticker_train.shape}")
 
 
-model.save('price_prediction_LSTM_model_embedding.keras')
-logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
+# embedding_dim = 32
+# ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
-# ฟังก์ชัน Walk-Forward Validation สำหรับแต่ละหุ้น
+# merged = concatenate([features_input, ticker_embedding], axis=-1)
+
+# x = LSTM(64, return_sequences=True)(merged)
+# x = Dropout(0.2)(x)
+# x = LSTM(32)(x)
+# x = Dropout(0.2)(x)
+# output = Dense(1)(x)
+
+# model = Model(inputs=[features_input, ticker_input], outputs=output)
+# model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
+
+# model.summary()
+
+# early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+# checkpoint = ModelCheckpoint('best_price_model.keras', monitor='val_loss', save_best_only=True, mode='min')
+# reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
+
+# logging.info("เริ่มฝึกโมเดลสำหรับราคาหุ้นรวม (ใช้ Embedding สำหรับ Ticker)")
+
+# history = model.fit(
+#     [X_price_train, X_ticker_train], y_price_train,
+#     epochs=1000,
+#     batch_size=32,
+#     verbose=1,
+#     shuffle=False,
+#     callbacks=[early_stopping, checkpoint, reduce_lr]
+# )
+
+
+# model.save('price_prediction_LSTM_model_embedding.keras')
+# logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
+
 def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
     """
     Perform walk-forward validation for each ticker.
@@ -294,6 +295,9 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     """
     tickers = df['Ticker'].unique()
     results = {}
+    
+    # สร้าง DataFrame สำหรับบันทึกผลการทำนายทั้งหมด
+    predictions_df = pd.DataFrame(columns=['Ticker', 'Date', 'Predicted', 'Actual'])
     
     for ticker in tickers:
         print(f"\nProcessing Ticker: {ticker}")
@@ -333,6 +337,15 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             predictions.append(pred_unscaled)
             actuals.append(actual)
             
+            # บันทึกข้อมูลลง DataFrame
+            new_row = pd.DataFrame([{
+            'Ticker': ticker,
+            'Date': df_ticker.iloc[i + seq_length]['Date'],
+            'Predicted': pred_unscaled,
+            'Actual': actual
+            }])
+            predictions_df = pd.concat([predictions_df, new_row], ignore_index=True)
+            
             # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่ใช่ค่าพยากรณ์)
             new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
             new_features_scaled = scaler_features.transform(new_features)
@@ -347,7 +360,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             model.fit(
                 [train_seq_features, train_seq_ticker],
                 new_target_scaled,
-                epochs=10,
+                epochs=3,
                 batch_size=1,
                 verbose=0
             )
@@ -368,17 +381,17 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             'Predictions': predictions,
             'Actuals': actuals
         }
-        
-        # พล็อตผลการพยากรณ์และ residuals สำหรับหุ้นนี้
-        plot_predictions(actuals, predictions, ticker)
-        plot_residuals(actuals, predictions, ticker)
+    
+    # บันทึกข้อมูลการทำนายลง CSV
+    predictions_df.to_csv('predictions_per_ticker.csv', index=False)
+    print("\nSaved predictions for all tickers to 'predictions_per_ticker.csv'")
     
     return results
 
 
 # ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
 results_per_ticker = walk_forward_validation(
-    model=load_model('price_prediction_LSTM_model_embedding.keras'),
+    model=load_model('./price_prediction_LSTM_model_embedding.keras'),
     df=test_df,  # ใช้ test_df สำหรับการพยากรณ์
     feature_columns=feature_columns,
     scaler_features=scaler_features,

@@ -6,9 +6,13 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, Dropout, Embedding, Flatten, concatenate
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
+from tensorflow.keras.models import load_model
 import joblib
+from tensorflow.keras.metrics import MeanSquaredError
 import logging
+from tensorflow.keras.layers import BatchNormalization
 import ta
+from tensorflow.keras.optimizers import Adam
 import tensorflow as tf
 from sklearn.preprocessing import RobustScaler
 import matplotlib.pyplot as plt
@@ -193,40 +197,47 @@ X_test, X_test_ticker, y_test = create_sequences(test_features_scaled, test_tick
 features_input = Input(shape=(seq_length, train_features_scaled.shape[1]), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
-embedding_dim = 32
+embedding_dim = 64
 ticker_embedding = Embedding(input_dim=df['Ticker_ID'].max() + 1, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 ticker_embedding_flat = Flatten()(ticker_embedding)
 
 features_flat = Flatten()(features_input)
 merged = concatenate([features_flat, ticker_embedding_flat])
 
-# ลด Dense Layer เหลือ 2 Layers
-x = Dense(128, activation='relu')(merged)
-x = Dropout(0.3)(x)  # Dropout หลัง Dense Layer แรก
-x = Dense(64, activation='relu')(x)
+
+# Dense Layers with Regularization
+x = Dense(256, activation='relu', kernel_regularizer='l2')(merged)  # เพิ่มขนาด Layer
+x = BatchNormalization()(x)  # ใช้ Batch Normalization
+x = Dropout(0.4)(x)  # เพิ่ม Dropout
+
+x = Dense(128, activation='relu', kernel_regularizer='l2')(x)  # อีกหนึ่ง Dense Layer
+x = BatchNormalization()(x)
+x = Dropout(0.4)(x)
+
+x = Dense(64, activation='relu', kernel_regularizer='l2')(x)  # เพิ่ม Layer
 output = Dense(1)(x)  # Output Layer
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+model.compile(optimizer=Adam(learning_rate=0.0001), loss='mse', metrics=['mae'])
 
 
 # 11. ฝึกสอนโมเดล
-early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+early_stopping = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
 checkpoint = ModelCheckpoint('best_model_mlp.keras', monitor='val_loss', save_best_only=True)
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=10, min_lr=0.0001)
+
+model.summary()
 
 history = model.fit(
     [X_train, X_train_ticker], y_train,
     epochs=1000,
-    batch_size=32,
+    batch_size=16,
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
 
-# 16. บันทึกโมเดลในรูปแบบ HDF5 (.h5)
-model.save('mlp_stock_prediction.h5')
-print("Model saved as 'mlp_stock_prediction.h5'")
+model.save('mlp_stock_prediction.keras')
+print("Model saved as 'mlp_stock_prediction.keras'")
 
-# ฟังก์ชัน Walk-Forward Validation สำหรับแต่ละหุ้น
 def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
     """
     Perform walk-forward validation for each ticker.
@@ -245,6 +256,9 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     """
     tickers = df['Ticker'].unique()
     results = {}
+    
+    # สร้าง DataFrame สำหรับบันทึกผลการทำนายทั้งหมด
+    predictions_df = pd.DataFrame(columns=['Ticker', 'Date', 'Predicted', 'Actual'])
     
     for ticker in tickers:
         print(f"\nProcessing Ticker: {ticker}")
@@ -284,6 +298,16 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             predictions.append(pred_unscaled)
             actuals.append(actual)
             
+            # บันทึกข้อมูลลง DataFrame
+            new_row = pd.DataFrame([{
+            'Ticker': ticker,
+            'Date': df_ticker.iloc[i + seq_length]['Date'],
+            'Predicted': pred_unscaled,
+            'Actual': actual
+            }])
+            predictions_df = pd.concat([predictions_df, new_row], ignore_index=True)
+
+            
             # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่ใช่ค่าพยากรณ์)
             new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
             new_features_scaled = scaler_features.transform(new_features)
@@ -298,7 +322,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             model.fit(
                 [train_seq_features, train_seq_ticker],
                 new_target_scaled,
-                epochs=10,
+                epochs=3,
                 batch_size=1,
                 verbose=0
             )
@@ -319,17 +343,18 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             'Predictions': predictions,
             'Actuals': actuals
         }
-        
-        # พล็อตผลการพยากรณ์และ residuals สำหรับหุ้นนี้
-        plot_predictions(actuals, predictions, ticker)
-        plot_residuals(actuals, predictions, ticker)
+    
+    # บันทึกข้อมูลการทำนายลง CSV
+    predictions_df.to_csv('predictions_per_ticker.csv', index=False)
+    print("\nSaved predictions for all tickers to 'predictions_per_ticker.csv'")
     
     return results
 
 
 # ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
+
 results_per_ticker = walk_forward_validation(
-    model=model,
+    model = load_model('mlp_stock_prediction.keras'),
     df=test_df,  # ใช้ test_df สำหรับการพยากรณ์
     feature_columns=feature_columns,
     scaler_features=scaler_features,
