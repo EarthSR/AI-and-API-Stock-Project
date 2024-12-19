@@ -8,6 +8,7 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLRO
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 from tensorflow.keras.models import load_model
 import joblib
+from tensorflow.keras.metrics import MeanSquaredError
 import logging
 import ta
 import tensorflow as tf
@@ -341,8 +342,9 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
 
 
 # ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
+
 results_per_ticker = walk_forward_validation(
-    model=load_model('mlp_stock_prediction.h5'),
+    model = load_model('mlp_stock_prediction.h5', custom_objects={'mse': MeanSquaredError()}),
     df=test_df,  # ใช้ test_df สำหรับการพยากรณ์
     feature_columns=feature_columns,
     scaler_features=scaler_features,
