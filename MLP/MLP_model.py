@@ -217,7 +217,7 @@ reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=10, min_l
 
 history = model.fit(
     [X_train, X_train_ticker], y_train,
-    epochs=100,
+    epochs=1000,
     batch_size=32,
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
