@@ -256,6 +256,8 @@ output = Dense(1)(x)
 model = Model(inputs=[features_input, ticker_input], outputs=output)
 model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
 
+model.summary()
+
 early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 checkpoint = ModelCheckpoint('best_price_model.keras', monitor='val_loss', save_best_only=True, mode='min')
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
@@ -275,7 +277,6 @@ history = model.fit(
 model.save('price_prediction_LSTM_model_embedding.keras')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
 
-# ฟังก์ชัน Walk-Forward Validation สำหรับแต่ละหุ้น
 def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
     """
     Perform walk-forward validation for each ticker.
@@ -294,6 +295,9 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     """
     tickers = df['Ticker'].unique()
     results = {}
+    
+    # สร้าง DataFrame สำหรับบันทึกผลการทำนายทั้งหมด
+    predictions_df = pd.DataFrame(columns=['Ticker', 'Date', 'Predicted', 'Actual'])
     
     for ticker in tickers:
         print(f"\nProcessing Ticker: {ticker}")
@@ -333,6 +337,14 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             predictions.append(pred_unscaled)
             actuals.append(actual)
             
+            # บันทึกข้อมูลลง DataFrame
+            predictions_df = predictions_df.append({
+                'Ticker': ticker,
+                'Date': df_ticker.iloc[i + seq_length]['Date'],
+                'Predicted': pred_unscaled,
+                'Actual': actual
+            }, ignore_index=True)
+            
             # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่ใช่ค่าพยากรณ์)
             new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
             new_features_scaled = scaler_features.transform(new_features)
@@ -347,7 +359,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             model.fit(
                 [train_seq_features, train_seq_ticker],
                 new_target_scaled,
-                epochs=10,
+                epochs=2,
                 batch_size=1,
                 verbose=0
             )
@@ -368,17 +380,17 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             'Predictions': predictions,
             'Actuals': actuals
         }
-        
-        # พล็อตผลการพยากรณ์และ residuals สำหรับหุ้นนี้
-        plot_predictions(actuals, predictions, ticker)
-        plot_residuals(actuals, predictions, ticker)
+    
+    # บันทึกข้อมูลการทำนายลง CSV
+    predictions_df.to_csv('predictions_per_ticker.csv', index=False)
+    print("\nSaved predictions for all tickers to 'predictions_per_ticker.csv'")
     
     return results
 
 
 # ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
 results_per_ticker = walk_forward_validation(
-    model=load_model('price_prediction_LSTM_model_embedding.keras'),
+    model=load_model('./price_prediction_LSTM_model_embedding.keras'),
     df=test_df,  # ใช้ test_df สำหรับการพยากรณ์
     feature_columns=feature_columns,
     scaler_features=scaler_features,

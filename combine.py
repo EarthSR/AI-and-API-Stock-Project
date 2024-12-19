@@ -71,11 +71,6 @@ test_features = test_df[feature_columns].values
 train_ticker_id = train_df['Ticker_ID'].values
 test_ticker_id = test_df['Ticker_ID'].values
 
-# Scale numeric features using RobustScaler
-scaler = RobustScaler()
-numeric_columns_to_scale = ['Open', 'Close', 'High', 'Low', 'Volume']
-df_stock[numeric_columns_to_scale] = scaler.fit_transform(df_stock[numeric_columns_to_scale])
-
 # Scale features and targets
 scaler_features = RobustScaler()
 train_features_scaled = scaler_features.fit_transform(train_features)
