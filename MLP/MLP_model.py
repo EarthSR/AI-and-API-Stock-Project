@@ -16,6 +16,7 @@ from tensorflow.keras.optimizers import Adam
 import tensorflow as tf
 from sklearn.preprocessing import RobustScaler
 import matplotlib.pyplot as plt
+from tensorflow.keras.layers import LeakyReLU
 
 logging.basicConfig(level=logging.INFO, filename='training.log', filemode='a',
                     format='%(asctime)s - %(levelname)s - %(message)s')
@@ -204,18 +205,20 @@ ticker_embedding_flat = Flatten()(ticker_embedding)
 features_flat = Flatten()(features_input)
 merged = concatenate([features_flat, ticker_embedding_flat])
 
-
-# Dense Layers with Regularization
-x = Dense(256, activation='relu', kernel_regularizer='l2')(merged)  # เพิ่มขนาด Layer
-x = BatchNormalization()(x)  # ใช้ Batch Normalization
-x = Dropout(0.4)(x)  # เพิ่ม Dropout
-
-x = Dense(128, activation='relu', kernel_regularizer='l2')(x)  # อีกหนึ่ง Dense Layer
+x = Dense(128, kernel_regularizer='l2')(merged)
+x = LeakyReLU(alpha=0.1)(x)
 x = BatchNormalization()(x)
-x = Dropout(0.4)(x)
+x = Dropout(0.3)(x)
 
-x = Dense(64, activation='relu', kernel_regularizer='l2')(x)  # เพิ่ม Layer
-output = Dense(1)(x)  # Output Layer
+x = Dense(64, kernel_regularizer='l2')(x)
+x = LeakyReLU(alpha=0.1)(x)
+x = BatchNormalization()(x)
+x = Dropout(0.3)(x)
+
+x = Dense(32, kernel_regularizer='l2')(x)
+x = LeakyReLU(alpha=0.1)(x)
+
+output = Dense(1)(x)
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
 model.compile(optimizer=Adam(learning_rate=0.0001), loss='mse', metrics=['mae'])
