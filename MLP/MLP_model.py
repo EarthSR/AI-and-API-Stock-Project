@@ -309,10 +309,6 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
                 'Actual': actual
             })
             
-            # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่แนะนำในขั้นตอนการทดสอบ)
-            # ถ้าคุณต้องการทำการรีเทรนจริงๆ ให้แน่ใจว่าไม่มี Data Leakage
-            # ดังนั้นในที่นี้จะคอมเมนต์ออก
-            """
             new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
             new_features_scaled = scaler_features.transform(new_features)
             new_target = df_ticker.iloc[i + seq_length]['Close']
@@ -329,7 +325,6 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
                 batch_size=1,
                 verbose=0
             )
-            """
         
         # คำนวณเมตริกส์
         mae = mean_absolute_error(actuals, predictions)
@@ -359,7 +354,6 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     print("\nSaved predictions for all tickers to 'predictions_per_ticker.csv'")
     
     return results
-
 
 # ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
 
