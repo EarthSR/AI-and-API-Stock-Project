@@ -300,8 +300,8 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     tickers = df['Ticker'].unique()
     results = {}
     
-    # สร้าง DataFrame สำหรับบันทึกผลการทำนายทั้งหมด
-    predictions_df = pd.DataFrame(columns=['Ticker', 'Date', 'Predicted', 'Actual'])
+    # ใช้ลิสต์เก็บข้อมูลแทน DataFrame ในลูป
+    all_predictions = []
     
     for ticker in tickers:
         print(f"\nProcessing Ticker: {ticker}")
@@ -341,16 +341,18 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             predictions.append(pred_unscaled)
             actuals.append(actual)
             
-            # บันทึกข้อมูลลง DataFrame
-            new_row = pd.DataFrame([{
-            'Ticker': ticker,
-            'Date': df_ticker.iloc[i + seq_length]['Date'],
-            'Predicted': pred_unscaled,
-            'Actual': actual
-            }])
-            predictions_df = pd.concat([predictions_df, new_row], ignore_index=True)
+            # เก็บข้อมูลลงลิสต์
+            all_predictions.append({
+                'Ticker': ticker,
+                'Date': df_ticker.iloc[i + seq_length]['Date'],
+                'Predicted': pred_unscaled,
+                'Actual': actual
+            })
             
-            # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่ใช่ค่าพยากรณ์)
+            # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่แนะนำในขั้นตอนการทดสอบ)
+            # ถ้าคุณต้องการทำการรีเทรนจริงๆ ให้แน่ใจว่าไม่มี Data Leakage
+            # ดังนั้นในที่นี้จะคอมเมนต์ออก
+            """
             new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
             new_features_scaled = scaler_features.transform(new_features)
             new_target = df_ticker.iloc[i + seq_length]['Close']
@@ -360,7 +362,6 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             train_seq_features = features_scaled.reshape(1, seq_length, len(feature_columns))
             train_seq_ticker = ticker_ids.reshape(1, seq_length)
             
-            # รีเทรนโมเดลด้วยข้อมูลใหม่
             model.fit(
                 [train_seq_features, train_seq_ticker],
                 new_target_scaled,
@@ -368,6 +369,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
                 batch_size=1,
                 verbose=0
             )
+            """
         
         # คำนวณเมตริกส์
         mae = mean_absolute_error(actuals, predictions)
@@ -386,12 +388,17 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             'Actuals': actuals
         }
     
+    # สร้าง DataFrame หลังจากลูปทั้งหมด
+    predictions_df = pd.DataFrame(all_predictions)
+    
+    # ลบข้อมูลซ้ำโดยเก็บแถวแรกไว้
+    predictions_df = predictions_df.drop_duplicates(subset=['Ticker', 'Date'], keep='first')
+    
     # บันทึกข้อมูลการทำนายลง CSV
     predictions_df.to_csv('predictions_per_ticker.csv', index=False)
     print("\nSaved predictions for all tickers to 'predictions_per_ticker.csv'")
     
     return results
-
 
 # ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
 results_per_ticker = walk_forward_validation(

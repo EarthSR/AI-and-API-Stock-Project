@@ -183,63 +183,63 @@ joblib.dump(scaler_target, 'scaler_target.pkl')     # บันทึก scaler 
 # 9. เตรียมข้อมูลสำหรับโมเดล
 seq_length = 10
 
-def create_sequences(features, ticker_ids, targets, seq_length):
-    X_features, X_tickers, Y = [], [], []
-    for i in range(len(features) - seq_length):
-        X_features.append(features[i:i+seq_length])
-        X_tickers.append(ticker_ids[i:i+seq_length])
-        Y.append(targets[i+seq_length])
-    return np.array(X_features), np.array(X_tickers), np.array(Y)
+# def create_sequences(features, ticker_ids, targets, seq_length):
+#     X_features, X_tickers, Y = [], [], []
+#     for i in range(len(features) - seq_length):
+#         X_features.append(features[i:i+seq_length])
+#         X_tickers.append(ticker_ids[i:i+seq_length])
+#         Y.append(targets[i+seq_length])
+#     return np.array(X_features), np.array(X_tickers), np.array(Y)
 
-X_train, X_train_ticker, y_train = create_sequences(train_features_scaled, train_ticker_id, train_targets_scaled, seq_length)
-X_test, X_test_ticker, y_test = create_sequences(test_features_scaled, test_ticker_id, test_targets_scaled, seq_length)
+# X_train, X_train_ticker, y_train = create_sequences(train_features_scaled, train_ticker_id, train_targets_scaled, seq_length)
+# X_test, X_test_ticker, y_test = create_sequences(test_features_scaled, test_ticker_id, test_targets_scaled, seq_length)
 
-# 10. สร้างโมเดล MLP
-features_input = Input(shape=(seq_length, train_features_scaled.shape[1]), name='features_input')
-ticker_input = Input(shape=(seq_length,), name='ticker_input')
+# # 10. สร้างโมเดล MLP
+# features_input = Input(shape=(seq_length, train_features_scaled.shape[1]), name='features_input')
+# ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
-embedding_dim = 64
-ticker_embedding = Embedding(input_dim=df['Ticker_ID'].max() + 1, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
-ticker_embedding_flat = Flatten()(ticker_embedding)
+# embedding_dim = 64
+# ticker_embedding = Embedding(input_dim=df['Ticker_ID'].max() + 1, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
+# ticker_embedding_flat = Flatten()(ticker_embedding)
 
-features_flat = Flatten()(features_input)
-merged = concatenate([features_flat, ticker_embedding_flat])
+# features_flat = Flatten()(features_input)
+# merged = concatenate([features_flat, ticker_embedding_flat])
 
-x = Dense(128, kernel_regularizer='l2')(merged)
-x = LeakyReLU(alpha=0.1)(x)
-x = BatchNormalization()(x)
-x = Dropout(0.3)(x)
+# x = Dense(128, kernel_regularizer='l2')(merged)
+# x = LeakyReLU(alpha=0.1)(x)
+# x = BatchNormalization()(x)
+# x = Dropout(0.3)(x)
 
-x = Dense(64, kernel_regularizer='l2')(x)
-x = LeakyReLU(alpha=0.1)(x)
-x = BatchNormalization()(x)
-x = Dropout(0.3)(x)
+# x = Dense(64, kernel_regularizer='l2')(x)
+# x = LeakyReLU(alpha=0.1)(x)
+# x = BatchNormalization()(x)
+# x = Dropout(0.3)(x)
 
-x = Dense(32, kernel_regularizer='l2')(x)
-x = LeakyReLU(alpha=0.1)(x)
+# x = Dense(32, kernel_regularizer='l2')(x)
+# x = LeakyReLU(alpha=0.1)(x)
 
-output = Dense(1)(x)
+# output = Dense(1)(x)
 
-model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer=Adam(learning_rate=0.0001), loss='mse', metrics=['mae'])
+# model = Model(inputs=[features_input, ticker_input], outputs=output)
+# model.compile(optimizer=Adam(learning_rate=0.0001), loss='mse', metrics=['mae'])
 
 
-# 11. ฝึกสอนโมเดล
-early_stopping = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_model_mlp.keras', monitor='val_loss', save_best_only=True)
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=10, min_lr=0.0001)
+# # 11. ฝึกสอนโมเดล
+# early_stopping = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
+# checkpoint = ModelCheckpoint('best_model_mlp.keras', monitor='val_loss', save_best_only=True)
+# reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=10, min_lr=0.0001)
 
-model.summary()
+# model.summary()
 
-history = model.fit(
-    [X_train, X_train_ticker], y_train,
-    epochs=1000,
-    batch_size=16,
-    callbacks=[early_stopping, checkpoint, reduce_lr]
-)
+# history = model.fit(
+#     [X_train, X_train_ticker], y_train,
+#     epochs=1000,
+#     batch_size=16,
+#     callbacks=[early_stopping, checkpoint, reduce_lr]
+# )
 
-model.save('mlp_stock_prediction.keras')
-print("Model saved as 'mlp_stock_prediction.keras'")
+# model.save('mlp_stock_prediction.keras')
+# print("Model saved as 'mlp_stock_prediction.keras'")
 
 def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
     """
@@ -260,8 +260,8 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     tickers = df['Ticker'].unique()
     results = {}
     
-    # สร้าง DataFrame สำหรับบันทึกผลการทำนายทั้งหมด
-    predictions_df = pd.DataFrame(columns=['Ticker', 'Date', 'Predicted', 'Actual'])
+    # ใช้ลิสต์เก็บข้อมูลแทน DataFrame ในลูป
+    all_predictions = []
     
     for ticker in tickers:
         print(f"\nProcessing Ticker: {ticker}")
@@ -301,17 +301,18 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             predictions.append(pred_unscaled)
             actuals.append(actual)
             
-            # บันทึกข้อมูลลง DataFrame
-            new_row = pd.DataFrame([{
-            'Ticker': ticker,
-            'Date': df_ticker.iloc[i + seq_length]['Date'],
-            'Predicted': pred_unscaled,
-            'Actual': actual
-            }])
-            predictions_df = pd.concat([predictions_df, new_row], ignore_index=True)
-
+            # เก็บข้อมูลลงลิสต์
+            all_predictions.append({
+                'Ticker': ticker,
+                'Date': df_ticker.iloc[i + seq_length]['Date'],
+                'Predicted': pred_unscaled,
+                'Actual': actual
+            })
             
-            # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่ใช่ค่าพยากรณ์)
+            # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่แนะนำในขั้นตอนการทดสอบ)
+            # ถ้าคุณต้องการทำการรีเทรนจริงๆ ให้แน่ใจว่าไม่มี Data Leakage
+            # ดังนั้นในที่นี้จะคอมเมนต์ออก
+            """
             new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
             new_features_scaled = scaler_features.transform(new_features)
             new_target = df_ticker.iloc[i + seq_length]['Close']
@@ -321,7 +322,6 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             train_seq_features = features_scaled.reshape(1, seq_length, len(feature_columns))
             train_seq_ticker = ticker_ids.reshape(1, seq_length)
             
-            # รีเทรนโมเดลด้วยข้อมูลใหม่
             model.fit(
                 [train_seq_features, train_seq_ticker],
                 new_target_scaled,
@@ -329,6 +329,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
                 batch_size=1,
                 verbose=0
             )
+            """
         
         # คำนวณเมตริกส์
         mae = mean_absolute_error(actuals, predictions)
@@ -346,6 +347,12 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             'Predictions': predictions,
             'Actuals': actuals
         }
+    
+    # สร้าง DataFrame หลังจากลูปทั้งหมด
+    predictions_df = pd.DataFrame(all_predictions)
+    
+    # ลบข้อมูลซ้ำโดยเก็บแถวแรกไว้
+    predictions_df = predictions_df.drop_duplicates(subset=['Ticker', 'Date'], keep='first')
     
     # บันทึกข้อมูลการทำนายลง CSV
     predictions_df.to_csv('predictions_per_ticker.csv', index=False)
