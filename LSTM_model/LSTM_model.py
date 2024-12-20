@@ -280,7 +280,7 @@ seq_length = 10
 def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
     """
     Perform walk-forward validation for each ticker.
-    
+
     Parameters:
     - model: Trained Keras model.
     - df: DataFrame containing all data.
@@ -289,54 +289,45 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     - scaler_target: Fitted scaler for target.
     - ticker_encoder: Fitted LabelEncoder for ticker IDs.
     - seq_length: Sequence length for GRU.
-    
+
     Returns:
-    - results: Dictionary containing metrics and predictions for each ticker.
+    - predictions_df: DataFrame containing all predictions without duplicates.
     """
     tickers = df['Ticker'].unique()
-    results = {}
-    
-    # ใช้ลิสต์เก็บข้อมูลแทน DataFrame ในลูป
     all_predictions = []
-    
+
     for ticker in tickers:
         print(f"\nProcessing Ticker: {ticker}")
         ticker_id = ticker_encoder.transform([ticker])[0]
         df_ticker = df[df['Ticker'] == ticker].sort_values('Date').reset_index(drop=True)
-        
+
         if len(df_ticker) < seq_length + 1:
             print(f"Not enough data for ticker {ticker}, skipping...")
             continue
-        
-        predictions = []
-        actuals = []
-        
+
         for i in range(len(df_ticker) - seq_length):
             if i % 100 == 0:
                 print(f"  Processing: {i}/{len(df_ticker)-seq_length}")
-            
+
             # เตรียมข้อมูลย้อนหลัง seq_length วัน
             historical_data = df_ticker.iloc[i:i+seq_length]
             features = historical_data[feature_columns].values
             ticker_ids = historical_data['Ticker_ID'].values
-            
+
             # สเกลฟีเจอร์
             features_scaled = scaler_features.transform(features)
-            
+
             # จัดรูปแบบสำหรับโมเดล 3D input: [samples, timesteps, features]
             X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
             X_ticker = ticker_ids.reshape(1, seq_length)
-            
+
             # พยากรณ์
             pred = model.predict([X_features, X_ticker], verbose=0)
             pred_unscaled = scaler_target.inverse_transform(pred)[0][0]
-            
+
             # ค่าจริงของวันถัดไป
             actual = df_ticker.iloc[i + seq_length]['Close']
-            
-            predictions.append(pred_unscaled)
-            actuals.append(actual)
-            
+
             # เก็บข้อมูลลงลิสต์
             all_predictions.append({
                 'Ticker': ticker,
@@ -344,16 +335,17 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
                 'Predicted': pred_unscaled,
                 'Actual': actual
             })
-            
+
+            # อัปเดตโมเดลด้วยข้อมูลใหม่ (ถ้าจำเป็น)
             new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
             new_features_scaled = scaler_features.transform(new_features)
             new_target = df_ticker.iloc[i + seq_length]['Close']
             new_target_scaled = scaler_target.transform([[new_target]])
-            
+
             # สร้าง sequence ใหม่สำหรับการฝึก
             train_seq_features = features_scaled.reshape(1, seq_length, len(feature_columns))
             train_seq_ticker = ticker_ids.reshape(1, seq_length)
-            
+
             model.fit(
                 [train_seq_features, train_seq_ticker],
                 new_target_scaled,
@@ -361,39 +353,23 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
                 batch_size=1,
                 verbose=0
             )
-        
-        # คำนวณเมตริกส์
-        mae = mean_absolute_error(actuals, predictions)
-        mse = mean_squared_error(actuals, predictions)
-        rmse = np.sqrt(mse)
-        mape = mean_absolute_percentage_error(actuals, predictions)
-        r2 = r2_score(actuals, predictions)
-        
-        results[ticker] = {
-            'MAE': mae,
-            'MSE': mse,
-            'RMSE': rmse,
-            'MAPE': mape,
-            'R2': r2,
-            'Predictions': predictions,
-            'Actuals': actuals
-        }
     
-    # สร้าง DataFrame หลังจากลูปทั้งหมด
+
+    # สร้าง DataFrame จาก all_predictions
     predictions_df = pd.DataFrame(all_predictions)
-    
+
     # ลบข้อมูลซ้ำโดยเก็บแถวแรกไว้
     predictions_df = predictions_df.drop_duplicates(subset=['Ticker', 'Date'], keep='first')
-    
-    # บันทึกข้อมูลการทำนายลง CSV
-    predictions_df.to_csv('predictions_per_ticker.csv', index=False)
-    print("\nSaved predictions for all tickers to 'predictions_per_ticker.csv'")
-    
-    return results
 
-# ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
-results_per_ticker = walk_forward_validation(
-    model=load_model('./price_prediction_LSTM_model_embedding.keras'),
+    # บันทึกข้อมูลการทำนายลง CSV
+    predictions_df.to_csv('predictions_per_ticker_dedup.csv', index=False)
+    print("\nSaved deduplicated predictions for all tickers to 'predictions_per_ticker_dedup.csv'")
+
+    return predictions_df
+
+# เรียกใช้ฟังก์ชัน Walk-Forward Validation
+predictions_df = walk_forward_validation(
+    model = load_model('mlp_stock_prediction.keras'),
     df=test_df,  # ใช้ test_df สำหรับการพยากรณ์
     feature_columns=feature_columns,
     scaler_features=scaler_features,
@@ -402,26 +378,39 @@ results_per_ticker = walk_forward_validation(
     seq_length=seq_length
 )
 
-# แสดงผลสรุปเมตริกส์สำหรับแต่ละหุ้น
-for ticker, metrics in results_per_ticker.items():
+# ประเมินผลเมตริกส์จาก DataFrame ที่ตัดค่าซ้ำแล้ว
+results_per_ticker = {}
+
+tickers = predictions_df['Ticker'].unique()
+
+for ticker in tickers:
+    ticker_df = predictions_df[predictions_df['Ticker'] == ticker]
+    predictions = ticker_df['Predicted'].values
+    actuals = ticker_df['Actual'].values
+
+    mae = mean_absolute_error(actuals, predictions)
+    mse = mean_squared_error(actuals, predictions)
+    rmse = np.sqrt(mse)
+    mape = mean_absolute_percentage_error(actuals, predictions)
+    r2 = r2_score(actuals, predictions)
+
+    results_per_ticker[ticker] = {
+        'MAE': mae,
+        'MSE': mse,
+        'RMSE': rmse,
+        'MAPE': mape,
+        'R2': r2
+    }
+
+    # แสดงเมตริกส์สำหรับแต่ละหุ้น
     print(f"\nMetrics for {ticker}:")
-    print(f"MAE: {metrics['MAE']:.4f}")
-    print(f"MSE: {metrics['MSE']:.4f}")
-    print(f"RMSE: {metrics['RMSE']:.4f}")
-    print(f"MAPE: {metrics['MAPE']:.4f}")
-    print(f"R2 Score: {metrics['R2']:.4f}")
+    print(f"MAE: {mae:.4f}")
+    print(f"MSE: {mse:.4f}")
+    print(f"RMSE: {rmse:.4f}")
+    print(f"MAPE: {mape:.4f}")
+    print(f"R2 Score: {r2:.4f}")
 
 # บันทึกเมตริกส์ลงไฟล์ CSV สำหรับการวิเคราะห์เพิ่มเติม
-metrics_df = pd.DataFrame({
-    ticker: {
-        'MAE': metrics['MAE'],
-        'MSE': metrics['MSE'],
-        'RMSE': metrics['RMSE'],
-        'MAPE': metrics['MAPE'],
-        'R2': metrics['R2']
-    }
-    for ticker, metrics in results_per_ticker.items()
-}).T
-
-metrics_df.to_csv('metrics_per_ticker.csv', index=True)
-print("\nSaved metrics per ticker to 'metrics_per_ticker.csv'")
+metrics_df = pd.DataFrame(results_per_ticker).T
+metrics_df.to_csv('metrics_per_ticker_dedup.csv', index=True)
+print("\nSaved metrics per ticker to 'metrics_per_ticker_dedup.csv'")
