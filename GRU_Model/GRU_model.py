@@ -373,7 +373,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
 
 # เรียกใช้ฟังก์ชัน Walk-Forward Validation
 predictions_df = walk_forward_validation(
-    model = load_model('mlp_stock_prediction.keras'),
+    model = load_model('./price_prediction_GRU_model_embedding.keras'),
     df=test_df,  # ใช้ test_df สำหรับการพยากรณ์
     feature_columns=feature_columns,
     scaler_features=scaler_features,
