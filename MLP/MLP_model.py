@@ -323,7 +323,8 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     predictions_df = pd.DataFrame(all_predictions)
 
     # ลบข้อมูลซ้ำโดยเก็บแถวแรกไว้
-    predictions_df = predictions_df.drop_duplicates(subset=['Ticker', 'Date'], keep='first')
+    # predictions_df = predictions_df.drop_duplicates(subset=['Ticker', 'Date'], keep='first')
+    predictions_df = predictions_df.drop_duplicates(subset=['Ticker', 'Date'], keep='last')
 
     # บันทึกข้อมูลการทำนายลง CSV
     predictions_df.to_csv('predictions_per_ticker_dedup.csv', index=False)
