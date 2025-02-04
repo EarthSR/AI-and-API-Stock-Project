@@ -2,11 +2,11 @@ import yfinance as yf
 import pandas as pd
 
 # กำหนดรายชื่อหุ้น
-tickers = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL']
+tickers = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL','META','TSLA', 'AVGO', 'TSM', 'AMD']
 
 # กำหนดวันที่เริ่มต้นและวันที่สิ้นสุด
 start_date = '2018-01-01'  # กำหนดวันที่เริ่มต้น
-end_date = '2024-12-01'    # กำหนดวันที่สิ้นสุด
+end_date = '2025-02-03'    # กำหนดวันที่สิ้นสุด
 
 # ดึงข้อมูลราคาหุ้นจากวันที่เริ่มต้นถึงวันที่สิ้นสุด
 data = yf.download(tickers, start=start_date, end=end_date)
