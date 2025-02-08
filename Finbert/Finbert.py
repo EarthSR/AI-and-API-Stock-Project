@@ -38,7 +38,7 @@ def main():
     )
 
     # โหลดข้อมูล
-    input_data = pd.read_csv("./news_cleaned.csv")
+    input_data = pd.read_csv("./bangkok_post_news.csv")
     input_data.dropna(subset=['title', 'description'], how='all', inplace=True)
 
     # รวมข้อความ

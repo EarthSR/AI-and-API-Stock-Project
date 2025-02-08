@@ -4,22 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import yfinance as yf
 
-def fetch_all_us_tickers():
-    """
-    ดึงรายชื่อหุ้นทั้งหมดจาก NASDAQ
-    """
-    nasdaq_url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
 
-    try:
-        print("Fetching NASDAQ tickers...")
-        nasdaq_data = pd.read_csv(nasdaq_url)
-        tickers = nasdaq_data['Symbol'].tolist()
-        print(f"Total NASDAQ tickers fetched: {len(tickers)}")
-        return tickers
-    except Exception as e:
-        print(f"Error fetching NASDAQ tickers: {e}")
-        return []
-    
     # ฟังก์ชันดึงงบการเงินจาก Yahoo Finance
 def get_financials_yfinance(ticker):
     try:
@@ -32,7 +17,7 @@ def get_financials_yfinance(ticker):
 
 # ฟังก์ชันรวมข้อมูลการเงินของหุ้นทั้งหมด
 def fetch_and_save_all_financials():
-    stocks = fetch_all_us_tickers()  # ดึงรายชื่อหุ้น
+    stocks = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL','META','TSLA', 'AVGO', 'TSM', 'AMD']
     all_financials = []  # เก็บข้อมูลทั้งหมด
 
     for ticker in stocks:

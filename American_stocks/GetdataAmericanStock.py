@@ -3,7 +3,6 @@ import pandas as pd
 
 # กำหนดรายชื่อหุ้น
 tickers = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL','META','TSLA', 'AVGO', 'TSM', 'AMD']
-
 # กำหนดวันที่เริ่มต้นและวันที่สิ้นสุด
 start_date = '2018-01-01'  # กำหนดวันที่เริ่มต้น
 end_date = '2025-02-03'    # กำหนดวันที่สิ้นสุด

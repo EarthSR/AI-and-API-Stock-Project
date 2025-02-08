@@ -73,7 +73,7 @@ def get_financials_yfinance(ticker):
 
 # ฟังก์ชันรวมข้อมูลการเงินของหุ้นทั้งหมด
 def fetch_and_save_all_financials():
-    stocks = get_set_stocks()  # ดึงรายชื่อหุ้น
+    stocks = ['ADVANC', 'INTUCH', 'TRUE', 'DITTO', 'DIF','INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
     all_financials = []  # เก็บข้อมูลทั้งหมด
 
     for ticker in stocks:

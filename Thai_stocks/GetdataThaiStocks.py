@@ -69,8 +69,9 @@ def get_set_stocks():
 def fetch_stock_data(stock_list, start_date=None, end_date=None):
     stock_data = []
     
-    end_date = pd.to_datetime('today')
-    start_date = end_date - pd.DateOffset(years=10)
+    start_date = '2018-01-01'  # กำหนดวันที่เริ่มต้น
+    end_date = '2025-02-03'    # กำหนดวันที่สิ้นสุด
+
 
     for symbol in stock_list:
         try:
@@ -190,10 +191,10 @@ if __name__ == "__main__":
         print(f"Folder '{folder_name}' created.")
 
     # ดึงรายชื่อหุ้นจาก SET
-    stock_list = get_set_stocks()
-
+    # stock_list = ['ADVANC', 'INTUCH', 'TRUE', 'DITTO', 'DIF','INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
+    stock_list = ['^SET']
     # ไฟล์ CSV ที่เก็บข้อมูลหุ้นทั้งหมด
-    output_file_csv = os.path.join(folder_name, "SET_Stock_History_10Y.csv")
+    output_file_csv = os.path.join(folder_name, "SET50_Stock_History.csv")
 
     # ตรวจสอบว่าไฟล์ข้อมูลเก่ามีอยู่หรือไม่
     if os.path.exists(output_file_csv):
