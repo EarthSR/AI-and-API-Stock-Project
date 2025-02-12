@@ -26,23 +26,26 @@ def merge_and_filter_csv(directory, output_file):
 
     # 🔹 จัดการคอลัมน์ Date
     if 'Date' in merged_df.columns:
-        # ตัดส่วนที่เป็นเวลาออก และแปลงวันที่เป็น datetime
-        merged_df['Date'] = pd.to_datetime(
-            merged_df['Date'].str.split(' at ').str[0],  # แยกวันที่ออกจากเวลา
+        # สร้างคอลัมน์ใหม่สำหรับการประมวลผลวันที่
+        merged_df['Processed Date'] = pd.to_datetime(
+            merged_df['Date'].str.split(' at ').str[0],  # ตัดส่วนเวลาออก
             format='%d %b %Y',  # ระบุรูปแบบวันที่
             errors='coerce'
         )
         # ลบแถวที่ไม่มีวันที่
-        merged_df = merged_df.dropna(subset=['Date'])
+        merged_df = merged_df.dropna(subset=['Processed Date'])
 
     # 🔹 กรองข้อมูลที่ไม่เก่ากว่า 8 ปี
-    merged_df = merged_df[merged_df['Date'] >= cutoff_date]
+    merged_df = merged_df[merged_df['Processed Date'] >= cutoff_date]
 
     # 🔹 ลบข้อมูลซ้ำ (ใช้ Title และ Link เป็นตัวระบุ)
     merged_df = merged_df.drop_duplicates(subset=['Title', 'Link'], keep='first')
 
-    # 🔹 เรียงลำดับวันที่จากใหม่ -> เก่า
-    merged_df = merged_df.sort_values(by='Date', ascending=False)
+    # 🔹 เรียงลำดับวันที่จากใหม่ -> เก่า โดยยังเก็บคอลัมน์ Date เดิมไว้
+    merged_df = merged_df.sort_values(by='Processed Date', ascending=False)
+
+    # 🔹 ลบคอลัมน์ที่ใช้สำหรับประมวลผลวันที่
+    merged_df = merged_df.drop(columns=['Processed Date'])
 
     # 🔹 บันทึกไฟล์ CSV ใหม่
     merged_df.to_csv(output_file, index=False, encoding='utf-8-sig')
@@ -50,8 +53,8 @@ def merge_and_filter_csv(directory, output_file):
     print(f"✅ รวมข้อมูลและลบข่าวที่เก่ากว่า 8 ปีสำเร็จ! บันทึกที่: {output_file}")
 
 # 🔹 ตั้งค่าโฟลเดอร์ที่เก็บไฟล์ CSV และชื่อไฟล์ผลลัพธ์
-csv_directory = "D:/Stock_Project/AI-and-API-Stock-Project/news_data"
-filtered_output_csv = "D:/Stock_Project/AI-and-API-Stock-Project/clean_news_csv/BangkokPost_cleaned.csv"
+csv_directory = "D:/StockData/AI-and-API-Stock-Project/news_data"
+filtered_output_csv = "D:/StockData/AI-and-API-Stock-Project/clean_news_csv/BangkokPost_Merge.csv"
 
 # 🔹 เรียกใช้งานฟังก์ชัน
 merge_and_filter_csv(csv_directory, filtered_output_csv)
