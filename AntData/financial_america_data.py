@@ -1,5 +1,6 @@
 import time
 import pandas as pd
+import re
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -7,70 +8,48 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
-from webdriver_manager.chrome import ChromeDriverManager  # ใช้ WebDriverManager
+from webdriver_manager.chrome import ChromeDriverManager
 
 # 🔹 ตั้งค่า Chrome options
 options = Options()
-options.add_argument('--headless')  # ทำงานแบบไม่มี UI
+options.add_argument('--headless')
 options.add_argument('--disable-gpu')
 options.add_argument('--ignore-certificate-errors')
 options.add_argument('--no-sandbox')
 options.add_argument('--disable-dev-shm-usage')
-options.add_argument('--blink-settings=imagesEnabled=false')  # ปิดการโหลดรูปภาพ
+options.add_argument('--blink-settings=imagesEnabled=false')
 
-# 🔹 เริ่มต้น Chrome driver อัตโนมัติ
+# 🔹 เริ่มต้น Chrome driver
 print("🚀 กำลังเปิด WebDriver...")
 service = Service(ChromeDriverManager().install())
 driver = webdriver.Chrome(service=service, options=options)
 print("✅ WebDriver เปิดสำเร็จ!")
 
-# ฟังก์ชันดึงข้อมูลจากไตรมาสของปี 2567
-def fetch_quarterly_data_2567(stock):
-    print(f"🔄 ดึงข้อมูลไตรมาสของปี 2567 สำหรับ {stock}...")
-    soup = BeautifulSoup(driver.page_source, "html.parser")
+# 🔹 ฟังก์ชันแปลงค่าปีให้ถูกต้อง
+def clean_year(value):
+    if isinstance(value, str):
+        # 🔹 ถ้ามีวันที่/เดือน เช่น "11 ก.พ. 68" → ดึงเฉพาะปี
+        match = re.search(r"\b(\d{2,4})\b", value)
+        if match:
+            year = int(match.group())
+            
+            # 🔹 ถ้าเป็น พ.ศ. (มากกว่า 2500) → แปลงเป็น ค.ศ.
+            if year > 2500:
+                return str(year - 543)
 
-    # ✅ ค้นหาตารางงบการเงินไตรมาส
-    tables = soup.find_all("table")
+            # 🔹 ถ้าเป็นเลข 2 หลัก และไม่มี พ.ศ.
+            elif 50 <= year <= 99:  # 68 → 2568 → 2025
+                return str(1900 + year)
 
-    if not tables:
-        print(f"❌ ไม่พบตารางไตรมาสของ {stock}!")
-        return None
+            elif 0 <= year <= 49:  # 25 → 2025, 30 → 2030
+                return str(2000 + year)
 
-    print(f"✅ พบ {len(tables)} ตารางไตรมาส!")
+        return None  # ถ้าหาปีไม่ได้
+    return value
 
-    quarterly_data = {}
-
-    # 🔹 ดึงข้อมูลจากตาราง
-    for table in tables:
-        rows = table.find_all("tr")
-        headers = [th.text.strip() for th in rows[0].find_all("th")[1:]]
-
-        if not any("2567" in h for h in headers):
-            continue
-
-        metrics = [row.find("td").text.strip() for row in rows[1:]]
-        q_values = {metric: [] for metric in metrics}
-
-        for row in rows[1:]:
-            cols = row.find_all("td")[1:]
-            metric_name = row.find("td").text.strip()
-            for col, header in zip(cols, headers):
-                value = col.text.strip().replace(",", "")
-                if "2567" in header:
-                    q_values[metric_name].append(float(value) if value.replace(".", "", 1).isdigit() else 0)
-
-        # ✅ รวม 4 ไตรมาสให้เป็นข้อมูลรายปี
-        for metric, values in q_values.items():
-            if len(values) == 4:
-                quarterly_data[metric] = sum(values)
-
-    print(f"✅ ดึงข้อมูลไตรมาสของปี 2567 สำหรับ {stock} สำเร็จ!")
-    return quarterly_data
-
-# ฟังก์ชันดึงข้อมูลงบการเงินทั้งหมด
+# 🔹 ฟังก์ชันดึงข้อมูล
 def fetch_full_financial_data(stock):
     url = f"https://www.finnomena.com/stock/{stock}.US"
-
     print(f"🌍 เปิดเว็บ: {url}")
     driver.get(url)
 
@@ -82,21 +61,17 @@ def fetch_full_financial_data(stock):
         )
         print("✅ หน้าโหลดเสร็จแล้ว!")
 
-        # ✅ ดึงข้อมูลไตรมาสของปี 2567
-        data_2567 = fetch_quarterly_data_2567(stock)
-
-        # ✅ คลิกปุ่มเปลี่ยนจาก "ไตรมาส" เป็น "ปี"
-        print("🔄 กำลังคลิกปุ่มเปลี่ยนเป็น 'ปี' ...")
-        toggle_button = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.XPATH, '//div[@data-alias="btn_growth_summary_year"]'))
-        )
-        driver.execute_script("arguments[0].click();", toggle_button)
-        print("✅ คลิกเปลี่ยนเป็น 'ปี' สำเร็จ!")
-
-        # ✅ รอให้ข้อมูลโหลด
-        print("⏳ รอให้ข้อมูลปีโหลด...")
-        time.sleep(3)
-        print("✅ ข้อมูลปีโหลดเสร็จแล้ว!")
+        # ✅ กดปุ่มเปลี่ยนเป็น "ปี"
+        try:
+            print("🔄 กำลังคลิกปุ่มเปลี่ยนเป็น 'ปี' ...")
+            toggle_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, '//div[@data-alias="btn_growth_summary_year"]'))
+            )
+            driver.execute_script("arguments[0].click();", toggle_button)
+            print("✅ คลิกเปลี่ยนเป็น 'ปี' สำเร็จ!")
+            time.sleep(3)
+        except:
+            print(f"⚠️ หุ้น {stock} ไม่มีปุ่มเปลี่ยนเป็น 'ปี' หรือเกิดข้อผิดพลาด")
 
         # ✅ ดึง HTML ของหน้า
         soup = BeautifulSoup(driver.page_source, "html.parser")
@@ -105,7 +80,7 @@ def fetch_full_financial_data(stock):
         tables = soup.find_all("table")
 
         if not tables:
-            print(f"❌ ไม่พบตารางข้อมูลทั้งหมดของ {stock}!")
+            print(f"❌ ไม่พบตารางข้อมูลของ {stock}!")
             return None
 
         print(f"✅ พบ {len(tables)} ตารางข้อมูล!")
@@ -115,7 +90,16 @@ def fetch_full_financial_data(stock):
         # 🔹 ดึงข้อมูลจากแต่ละตาราง
         for table in tables:
             rows = table.find_all("tr")
-            years = [th.text.strip() for th in rows[0].find_all("th")[1:] if "256" in th.text]
+            headers = [th.text.strip() for th in rows[0].find_all("th")[1:]]
+            if not any("256" in h or "20" in h for h in headers):
+                continue
+
+            years = []
+            for header in headers:
+                clean_header = clean_year(header)  # 🔹 แปลงปีให้ถูกต้อง
+                if clean_header:
+                    years.append(clean_header)
+
             values_dict = {year: [] for year in years}
 
             for row in rows[1:]:
@@ -123,37 +107,31 @@ def fetch_full_financial_data(stock):
                 metric_name = cols[0].text.strip()
                 for year, col in zip(years, cols[1:]):
                     value = col.text.strip().replace(",", "")
+
                     try:
-                        values_dict[year].append(float(value))  # แปลงเป็น float ถ้าเป็นตัวเลข
+                        values_dict[year].append(float(value)) if value else values_dict[year].append(None)
                     except ValueError:
-                        values_dict[year].append(value)  # ถ้าไม่ใช่ตัวเลข ให้เก็บเป็น string
+                        values_dict[year].append(value)
 
             # ✅ สร้าง DataFrame
             df = pd.DataFrame(values_dict, index=[row.find("td").text.strip() for row in rows[1:]]).T
             df.insert(0, "Stock", stock)
             df.insert(1, "Year", df.index)
             df.reset_index(drop=True, inplace=True)
+
             all_data.append(df)
 
         # ✅ รวมทุกตารางเข้าด้วยกัน
-        full_df = pd.concat(all_data, axis=1).loc[:, ~pd.concat(all_data, axis=1).columns.duplicated()]
+        if all_data:
+            full_df = pd.concat(all_data, axis=1).loc[:, ~pd.concat(all_data, axis=1).columns.duplicated()]
+            full_df = full_df.sort_values(by="Year", ascending=False)
 
-        # ✅ เพิ่มข้อมูลของปี 2567 จากไตรมาส
-        if data_2567:
-            data_2567["Stock"] = stock
-            data_2567["Year"] = "2567"
-            df_2567 = pd.DataFrame([data_2567])
-            full_df = pd.concat([df_2567, full_df], ignore_index=True)
+            # ✅ จัดเรียงคอลัมน์ให้ Stock & Year อยู่ข้างหน้า
+            columns_order = ["Stock", "Year"] + [col for col in full_df.columns if col not in ["Stock", "Year"]]
+            full_df = full_df[columns_order]
 
-        # ✅ เรียงปีจากใหม่ไปเก่า
-        full_df = full_df.sort_values(by="Year", ascending=False)
-
-        # ✅ จัดเรียงคอลัมน์ให้ Stock & Year อยู่ข้างหน้า
-        columns_order = ["Stock", "Year"] + [col for col in full_df.columns if col not in ["Stock", "Year"]]
-        full_df = full_df[columns_order]
-
-        print("✅ ข้อมูลทั้งหมดรวมกันสำเร็จ!")
-        return full_df
+            print(f"✅ ดึงข้อมูลของ {stock} สำเร็จ!")
+            return full_df
 
     except Exception as e:
         print(f"⚠️ เกิดข้อผิดพลาดขณะดึงข้อมูล {stock}: {e}")
