@@ -161,5 +161,5 @@ def scrape_abc_news(query):
         driver.quit()
         print("🛑 Scraper Stopped.")
 
-query = 'stock'
+query = 'stock technology'
 scrape_abc_news(query)
