@@ -33,7 +33,7 @@ def scrape_abc_news():
     # 🚀 ตั้งค่าพื้นฐาน
     base_url = "https://abcnews.go.com"
     page = 1
-    search_url = f'https://abcnews.go.com/search?searchtext=Finance&sort=date&page={page}'
+    search_url = f'https://abcnews.go.com/search?searchtext=stock technology&sort=date&page={page}'
     driver.get(search_url)
 
     news_data = []
