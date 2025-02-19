@@ -16,6 +16,7 @@ from datetime import datetime
 def scrape_abc_news(query):
     """
     ดึงข้อมูลข่าวจาก ABC News โดยใช้ Selenium และ BeautifulSoup
+    ถ้าลิงก์มาจาก Good Morning America จะใช้วิธีดึงข้อมูลต่างจากเดิม
     """
     print("🔹 Initializing Web Scraper...")
     
@@ -84,6 +85,9 @@ def scrape_abc_news(query):
                     real_link = urllib.parse.urljoin("https://abcnews.go.com", link)
                     
                     try:
+                        if "/video" in real_link:
+                            print(f"⚠️ Detected video link: {real_link}")
+                            continue  # ข้ามไปยังข่าวถัดไปเมื่อเจอวิดีโอ
                         driver.get(real_link)
                         WebDriverWait(driver, 15).until(
                             EC.presence_of_element_located((By.CSS_SELECTOR, 'div[data-testid="prism-article-body"]'))
@@ -93,37 +97,37 @@ def scrape_abc_news(query):
                         print(f"⚠️ Unable to fetch news: {title}")
                         continue
                     
-                    date_tag = soup.find('div', class_='VZTD mLASH gpiba ')
-                    if date_tag:
-                        date_text = date_tag.find('div', class_='jTKbV zIIsP ZdbeE xAPpq QtiLO JQYD ').get_text(strip=True)
+                    # ถ้าลิงก์มาจาก Good Morning America ให้ใช้วิธีดึงข้อมูลจากเว็บนั้น
+                    if "goodmorningamerica" in real_link:
+                        continue  # ข้ามไปยังข่าวถัดไปเมื่อเจอลิงก์จาก Good Morning America
                     else:
-                        date_text = 'No Date'
-                    
-                    # ตรวจสอบหากพบคำว่า "hours ago" หรือ "minutes ago" ในข้อความวันที่
-                    if 'hours ago' in date_text or 'minutes ago' in date_text:
-                        date = datetime.today().strftime('%d %b %Y')
-                    else:
-                        try:
-                            # ลองแปลงวันที่
-                            date_obj = datetime.strptime(date_text.replace(',', ''), '%B %d %Y')
-                            date = date_obj.strftime('%d %b %Y')
-                        except ValueError:
-                            # หากไม่สามารถแปลงได้
-                            print(f"⚠️ Invalid date format: {date_text}. Setting date to 'No Date'.")
-                            date = 'No Date'
-                            
-                    content_div = news_soup.find('div', {'data-testid': 'prism-article-body'})
-                    paragraphs = content_div.find_all('p') if content_div else []
-                    full_content = '\n'.join([p.get_text(strip=True).replace(',', ' ') for p in paragraphs])
-                    
-                    if not full_content:
-                        full_content = 'Content not found'
-                    
+                        # วิธีดึงข้อมูลปกติจาก ABC News
+                        date_tag = news_soup.find('time')  # ค้นหาจาก <time> tag ที่มักมีวันที่
+                        if not date_tag:
+                            date_tag = soup.find('div', class_='TimeStamp__Date')  # หากไม่พบ, ใช้ div อื่นๆ
+                        date_text = date_tag.get_text(strip=True) if date_tag else 'No Date'
+                        
+                        if 'hours ago' in date_text or 'minutes ago' in date_text:
+                            date = datetime.today().strftime('%d %b %Y')
+                        else:
+                            try:
+                                date_obj = datetime.strptime(date_text.replace(',', ''), '%B %d %Y')
+                                date = date_obj.strftime('%d %b %Y')
+                            except ValueError:
+                                print(f"⚠️ Invalid date format: {date_text}. Setting date to 'No Date'.")
+                                date = 'No Date'
+                        
+                        content_div = news_soup.find('div', {'data-testid': 'prism-article-body'})
+                        paragraphs = content_div.find_all('p') if content_div else []
+                        description_text = '\n'.join([p.get_text(strip=True).replace(',', ' ') for p in paragraphs])
+                        if not description_text:
+                            description_text = 'Content not found'
+
                     news_data.append({
                         "Title": title.replace(',', ' '),
                         "Link": real_link,
-                        "Date": date,
-                        "Description": full_content
+                        "Date": date_text,
+                        "Description": description_text
                     })
                     existing_titles.add(title)
                     print(f"✅ Scraped: {title}")
