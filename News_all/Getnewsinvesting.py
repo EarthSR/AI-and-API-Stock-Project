@@ -5,16 +5,15 @@ from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import time
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor
 
-# ตั้งค่า Chrome ให้เร็วขึ้น 🚀
+# ตั้งค่า Chrome 🚀
 chrome_options = uc.ChromeOptions()
-chrome_options.add_argument("--headless")  # รันแบบไม่แสดง GUI
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--blink-settings=imagesEnabled=false")  # ปิดการโหลดรูป
 chrome_options.add_argument("--disable-gpu")  # ปิด GPU acceleration
 chrome_options.add_argument("--disable-extensions")
+
 # ใช้ undetected_chromedriver
 driver = uc.Chrome(options=chrome_options)
 
@@ -52,9 +51,17 @@ def scrape_news():
     
     return news_list
 
+# ฟังก์ชันบันทึกข้อมูลทุก 5 หน้า
+def save_to_csv(data, filename="investing_news_partial.csv"):
+    df = pd.DataFrame(data)
+    df.to_csv(filename, index=False, encoding='utf-8')
+    print(f"✅ Data saved to {filename}")
+
 # ดึงข่าวจากหลายหน้า
 all_news = []
 max_pages = 7499  # ตั้งค่าจำนวนหน้าที่ต้องการดึง
+count = 0  # ตัวแปรนับจำนวนหน้า
+
 for page in range(1, max_pages + 1):
     print(f"Scraping page {page}...")
 
@@ -69,12 +76,15 @@ for page in range(1, max_pages + 1):
 
     # ดึงข่าวจากหน้านี้
     news = scrape_news()
+    print(f"Found {len(news)} articles on page {page}")
     all_news.extend(news)
+    count += 1
 
-# บันทึกข้อมูลเป็น CSV
-df = pd.DataFrame(all_news)
-df.to_csv("investing_news_full.csv", index=False, encoding='utf-8')
+    # บันทึกข้อมูลทุก ๆ 5 หน้า
+    if count % 5 == 0:
+        save_to_csv(all_news)
+        all_news = []  # ล้างข้อมูลหลังจากบันทึก
 
 # ปิด WebDriver
 driver.quit()
-print("Scraping complete. Data saved to investing_news_full.csv")
+print("✅ Scraping complete.")
