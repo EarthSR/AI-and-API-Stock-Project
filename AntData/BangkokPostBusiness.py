@@ -102,10 +102,10 @@ def scrape_bangkok_post_selenium(query):
                     full_content = f'"{full_content}"'
 
                     news_data.append({
-                        "Title": title,
-                        "Link": real_link,
-                        "Date": date,
-                        "Description": full_content  # เปลี่ยนจาก Content เป็น Description
+                        "Title": title.replace(',', ''),
+                        "URL": real_link,
+                        "PublishedDate": date,
+                        "Content": full_content
                     })
                     existing_titles.add(title)
 
