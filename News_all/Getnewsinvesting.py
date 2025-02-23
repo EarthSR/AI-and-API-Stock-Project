@@ -5,39 +5,43 @@ from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import time
 import pandas as pd
+import concurrent.futures
+import threading
+import os
 
-# ตั้งค่า Chrome 🚀
-chrome_options = uc.ChromeOptions()
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.add_argument("--blink-settings=imagesEnabled=false")  # ปิดการโหลดรูป
-chrome_options.add_argument("--disable-gpu")  # ปิด GPU acceleration
-chrome_options.add_argument("--disable-extensions")
-
-# ใช้ undetected_chromedriver
-driver = uc.Chrome(options=chrome_options)
-
-# เปิดหน้าแรก
 base_url = 'https://www.investing.com/news/stock-market-news'
-driver.get(base_url)
-time.sleep(3)  # รอให้หน้าเว็บโหลด
+output_filename = "investing_news.csv"
 
-# ฟังก์ชันปิด popup ถ้ามี
-def close_popup():
+# Lock สำหรับการใช้ Chrome instance
+driver_lock = threading.Lock()
+
+def init_driver():
+    """สร้าง Chrome driver instance แบบปลอดภัย"""
+    with driver_lock:
+        options = uc.ChromeOptions()
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--blink-settings=imagesEnabled=false")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-extensions")
+        driver = uc.Chrome(options=options)
+    return driver
+
+def close_popup(driver):
+    """ปิด popup ถ้ามี"""
     try:
         close_button = WebDriverWait(driver, 3).until(
             EC.element_to_be_clickable((By.XPATH, "//svg[@data-test='sign-up-dialog-close-button']"))
         )
         close_button.click()
-        print("Popup closed.")
-    except:
-        pass  # ถ้าไม่มี popup ก็ข้ามไป
+        print("✅ Popup closed.")
+    except Exception:
+        pass
 
-# ฟังก์ชันดึงข่าวจากหน้าเว็บ
-def scrape_news():
+def scrape_news(driver):
+    """ดึงข่าวจากหน้าเว็บ"""
     soup = BeautifulSoup(driver.page_source, 'html.parser')
     articles = soup.find_all('article', {'data-test': 'article-item'})
-
     news_list = []
     for article in articles:
         title_tag = article.find('a', {'data-test': 'article-title-link'})
@@ -48,43 +52,72 @@ def scrape_news():
         date_tag = article.find('time', {'data-test': 'article-publish-date'})
         date = date_tag['datetime'] if date_tag and 'datetime' in date_tag.attrs else 'No Date'
         news_list.append({'title': title, 'link': link, 'description': description, 'date': date})
-    
     return news_list
 
-# ฟังก์ชันบันทึกข้อมูลทุก 5 หน้า
-def save_to_csv(data, filename="investing_news_partial.csv"):
+def safe_quit(driver):
+    """ ปิด driver อย่างปลอดภัย """
+    try:
+        if driver:
+            driver.quit()
+    except Exception as e:
+        print(f"⚠️ Warning: Driver quit failed: {e}")
+
+def scrape_page(page):
+    """Scrape ข่าวจากหน้าเว็บ"""
+    driver = None
+    try:
+        driver = init_driver()
+        if page == 1:
+            driver.get(base_url)
+        else:
+            page_url = f"{base_url}/{page}"
+            driver.get(page_url)
+
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "article")))
+        close_popup(driver)
+        news = scrape_news(driver)
+        print(f"✅ Scraped page {page} ({len(news)} articles)")
+    except Exception as e:
+        print(f"❌ Error on page {page}: {e}")
+        news = []
+    finally:
+        safe_quit(driver)
+    return news
+
+def save_to_csv(data, filename, write_header=False):
+    """บันทึกข้อมูลลง CSV"""
     df = pd.DataFrame(data)
-    df.to_csv(filename, index=False, encoding='utf-8')
-    print(f"✅ Data saved to {filename}")
+    mode = 'w' if write_header else 'a'
+    header = True if write_header else False
+    df.to_csv(filename, index=False, encoding='utf-8', mode=mode, header=header)
+    print(f"✅ Data saved to {filename} (mode={mode}, header={header})")
 
-# ดึงข่าวจากหลายหน้า
-all_news = []
-max_pages = 7499  # ตั้งค่าจำนวนหน้าที่ต้องการดึง
-count = 0  # ตัวแปรนับจำนวนหน้า
+def main():
+    # เตรียม driver
+    temp_driver = init_driver()
+    temp_driver.quit()
 
-for page in range(1, max_pages + 1):
-    print(f"Scraping page {page}...")
+    if os.path.exists(output_filename):
+        os.remove(output_filename)
 
-    # โหลดหน้าเว็บ
-    if page > 1:
-        page_url = f"{base_url}/{page}"
-        driver.get(page_url)
-        time.sleep(5)  # รอให้หน้าเว็บโหลด
+    batch_size = 5  # ลดจำนวน thread ลงเพื่อป้องกัน Chrome crash
+    max_pages = 7499
+    all_news = []
+    is_first_save = True
 
-    # ปิด popup ถ้ามี
-    close_popup()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+        futures = []
+        for page in range(1, max_pages + 1):
+            futures.append(executor.submit(scrape_page, page))
+            
+            if len(futures) == batch_size or page == max_pages:
+                for future in concurrent.futures.as_completed(futures):
+                    all_news.extend(future.result())
+                save_to_csv(all_news, output_filename, write_header=is_first_save)
+                is_first_save = False
+                all_news = []
+                futures = []
+    print("✅ Scraping complete.")
 
-    # ดึงข่าวจากหน้านี้
-    news = scrape_news()
-    print(f"Found {len(news)} articles on page {page}")
-    all_news.extend(news)
-    count += 1
-
-    # บันทึกข้อมูลทุก ๆ 5 หน้า
-    if count % 5 == 0:
-        save_to_csv(all_news)
-        all_news = []  # ล้างข้อมูลหลังจากบันทึก
-
-# ปิด WebDriver
-driver.quit()
-print("✅ Scraping complete.")
+if __name__ == "__main__":
+    main()
