@@ -1,87 +1,51 @@
-# Import required libraries
 import pandas as pd
-import ta
-from sklearn.preprocessing import LabelEncoder, RobustScaler
 
-# Load and preprocess data
-# Load stock data and sort by Ticker and Date
-df_stock = pd.read_csv("./GRU_Model/cleaned_data.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
-df_stock['Date'] = pd.to_datetime(df_stock['Date'], errors='coerce')
+# โหลดข้อมูล Sentiment
+sentiment_df_th = pd.read_csv("./Finbert/daily_sentiment_result_th.csv")
+sentiment_df_us = pd.read_csv("./Finbert/daily_sentiment_result_us.csv")
 
-# Load news data
-df_news = pd.read_csv("./GRU_Model/news_with_sentiment_gpu.csv")
-df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
+# โหลดข้อมูลหุ้น
+stock_df_th = pd.read_csv("./Finbert/stock_data_with_marketcap_thai.csv")
+stock_df_us = pd.read_csv("./Finbert/stock_data_from_dates.csv")
 
-# Map Sentiment values to numerical representations
-df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
-df_news = df_news[['Date', 'Sentiment', 'Confidence']]
+# แปลงคอลัมน์วันที่เป็น datetime เพื่อให้สามารถรวมข้อมูลได้ถูกต้อง
+sentiment_df_th["date"] = pd.to_datetime(sentiment_df_th["date"])
+sentiment_df_us["date"] = pd.to_datetime(sentiment_df_us["date"])
+stock_df_th["Date"] = pd.to_datetime(stock_df_th["Date"])
+stock_df_us["Date"] = pd.to_datetime(stock_df_us["Date"])
 
-# Merge stock data and news data on Date
-df = pd.merge(df_stock, df_news, on='Date', how='left')
+# เปลี่ยนชื่อคอลัมน์ Sentiment Category เป็น Sentiment
+sentiment_df_th.rename(columns={'Sentiment Category': 'Sentiment'}, inplace=True)
+sentiment_df_us.rename(columns={'Sentiment Category': 'Sentiment'}, inplace=True)
 
-# Fill missing values
-df.fillna(method='ffill', inplace=True)
-df.fillna(0, inplace=True)
+# รวมข้อมูลโดยใช้ Date เป็นตัวเชื่อม
+merged_df_th = stock_df_th.merge(
+    sentiment_df_th[['date', 'Sentiment']],
+    left_on='Date',
+    right_on='date',
+    how='left'
+)
 
-# Add features
-df['Change'] = df['Close'] - df['Open']
-df['Change (%)'] = (df['Change'] / df['Open']) * 100
-df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
-df['RSI'].fillna(method='ffill', inplace=True)
-df['RSI'].fillna(0, inplace=True)
-df['SMA_5'] = df['Close'].rolling(window=5).mean()
-df['SMA_10'] = df['Close'].rolling(window=10).mean()
-df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
-df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
-df['MACD'] = df['EMA_12'] - df['EMA_26']
-df['MACD_Signal'] = df['MACD'].rolling(window=9).mean()
-bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
-df['Bollinger_High'] = bollinger.bollinger_hband()
-df['Bollinger_Low'] = bollinger.bollinger_lband()
-df.fillna(0, inplace=True)
+merged_df_us = stock_df_us.merge(
+    sentiment_df_us[['date', 'Sentiment']],
+    left_on='Date',
+    right_on='date',
+    how='left'
+)
 
-# Label Encode Ticker
-ticker_encoder = LabelEncoder()
-df['Ticker_ID'] = ticker_encoder.fit_transform(df['Ticker'])
-num_tickers = len(ticker_encoder.classes_)
-print(f"Number of tickers: {num_tickers}")
+# ลบคอลัมน์ 'date' และ 'Market Cap' ที่ซ้ำกันออก
+merged_df_th.drop(columns=['date', 'Market Cap'], inplace=True)
+merged_df_us.drop(columns=['date'], inplace=True)
 
-# Split data into train and test based on date
-sorted_dates = df['Date'].unique()
-train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # 6/7 of the data as training
-train_df = df[df['Date'] <= train_cutoff].copy()
-test_df = df[df['Date'] > train_cutoff].copy()
+# รวมข้อมูลของไทยและสหรัฐฯ เข้าด้วยกัน
+merged_df = pd.concat([merged_df_th, merged_df_us], ignore_index=True)
 
-print("Train cutoff:", train_cutoff)
-print("First date in train set:", train_df['Date'].min())
-print("Last date in train set:", train_df['Date'].max())
+# ลบข้อมูลที่มีค่าว่างในหุ้น
+merged_df.dropna(subset=['Ticker', 'Date', 'Close'], inplace=True)
 
-# Create target variable by shifting 'Close' prices
-train_targets_price = train_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
-train_df = train_df.iloc[:-1]
-test_targets_price = test_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
-test_df = test_df.iloc[:-1]
+# บันทึกข้อมูลที่รวมแล้วลงไฟล์ CSV
+merged_df.to_csv("merged_stock_sentiment.csv", index=False)
 
-# Define feature columns
-feature_columns = ['Open', 'Close', 'High', 'Low', 'Volume', 'RSI', 'SMA_5', 'SMA_10', 
-                   'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low', 'Sentiment', 'Confidence']
-
-train_features = train_df[feature_columns].values
-test_features = test_df[feature_columns].values
-train_ticker_id = train_df['Ticker_ID'].values
-test_ticker_id = test_df['Ticker_ID'].values
-
-# Scale features and targets
-scaler_features = RobustScaler()
-train_features_scaled = scaler_features.fit_transform(train_features)
-test_features_scaled = scaler_features.transform(test_features)
-
-scaler_target = RobustScaler()
-train_targets_scaled = scaler_target.fit_transform(train_targets_price)
-test_targets_scaled = scaler_target.transform(test_targets_price)
-
-# Save processed data (optional)
-train_df.to_csv("train_data.csv", index=False)
-test_df.to_csv("test_data.csv", index=False)
-
-print("Data preprocessing completed successfully!")
+# แสดงข้อมูลที่รวมแล้ว
+print(merged_df_th.head())
+print(merged_df_us.head())
