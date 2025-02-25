@@ -50,7 +50,7 @@ column_translation = {
     "กระแสเงินสดจากการดำเนินงาน": "Operating Cash Flow",
     "กระแสเงินสดจากการลงทุน": "Investing Cash Flow",
     "กระแสเงินสดจากกิจกรรมทางการเงิน": "Financing Cash Flow",
-    "กำไรต่อหุ้น (ดอลลาร์สหรัฐฯ)": "EPS (USD)",
+    "กำไรต่อหุ้น (บาท)": "EPS (THB)",
     "ROA (%)": "ROA (%)",
     "ROE (%)": "ROE (%)",
     "อัตรากำไรขั้นต้น (%)": "Gross Margin (%)",
@@ -58,11 +58,11 @@ column_translation = {
     "อัตรากำไรสุทธิ (%)": "Net Profit Margin (%)",
     "หนี้สิน/ทุน (เท่า)": "Debt to Equity (x)",
     "วงจรเงินสด (วัน)": "Cash Cycle (Days)",
-    "ราคาล่าสุด (ดอลลาร์สหรัฐฯ)": "Last Price (USD)",
-    "มูลค่าหลักทรัพย์ตามราคาตลาด (ล้านดอลลาร์สหรัฐฯ)": "Market Cap (Million USD)",
+    "ราคาล่าสุด (บาท)": "Last Price (THB)",
+    "มูลค่าหลักทรัพย์ตามราคาตลาด (ล้านบาท)": "Market Cap (Million THB)",
     "P/E (เท่า)": "P/E Ratio (x)",
     "P/BV (เท่า)": "P/BV Ratio (x)",
-    "มูลค่าหุ้นทางบัญชีต่อหุ้น (ดอลลาร์สหรัฐฯ)": "Book Value Per Share (USD)",
+    "มูลค่าหุ้นทางบัญชีต่อหุ้น (บาท)": "Book Value Per Share (THB)",
     "อัตราส่วนเงินปันผลตอบแทน(%)": "Dividend Yield (%)",
     "EV / EBITDA": "EV / EBITDA"
 }
