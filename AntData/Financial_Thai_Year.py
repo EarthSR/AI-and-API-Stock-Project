@@ -191,8 +191,8 @@ for stock in stocks:
 final_df = pd.concat(all_dfs, ignore_index=True)
 
 # ✅ บันทึกข้อมูลลง CSV
-final_df.to_csv("financial_thai_data.csv", index=False, encoding="utf-8-sig")
-print("✅ บันทึกข้อมูลลง 'financial_thai_data.csv' สำเร็จ!")
+final_df.to_csv("Financial_Thai_Year.csv", index=False, encoding="utf-8-sig")
+print("✅ บันทึกข้อมูลลง 'Financial_Thai_Year.csv' สำเร็จ!")
 
 # ✅ ปิด WebDriver
 driver.quit()
