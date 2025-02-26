@@ -38,6 +38,7 @@ def clean_year(value):
 # ฟังก์ชันสำหรับแปลงชื่อคอลัมน์จากภาษาไทยเป็นภาษาอังกฤษ
 column_translation = {
     "รายได้รวม": "Total Revenue",
+    "การเติบโตต่อไตรมาส (%)": "QoQ Growth (%)",
     "การเติบโตเทียบปีก่อนหน้า (%)": "YoY Growth (%)",
     "กำไรสุทธิ": "Net Profit",
     "กำไรต่อหุ้น (EPS)": "Earnings Per Share (EPS)",
