@@ -91,15 +91,9 @@ else:
     print("GPU not found, using CPU")
 
 # โหลดข้อมูล
-df_stock = pd.read_csv("cleaned_data.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
-df_news = pd.read_csv("news_with_sentiment_gpu.csv")
-df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
-df_stock['Date'] = pd.to_datetime(df_stock['Date'], errors='coerce')
-print(df_news['Date'].dtype)
-print(df_stock['Date'].dtype)
-df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
-df_news['Confidence'] = df_news['Confidence']
-df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
+df = pd.read_csv('../merged_stock_sentiment_financial.csv')
+
+df['Sentiment'] = df['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
 
 # เติมค่าที่ขาดหายไป
 df.fillna(method='ffill', inplace=True)
@@ -113,6 +107,8 @@ df['RSI'].fillna(method='ffill', inplace=True)
 df['RSI'].fillna(0, inplace=True)
 df['SMA_5'] = df['Close'].rolling(window=5).mean()  # SMA 5 วัน
 df['SMA_10'] = df['Close'].rolling(window=10).mean()  # SMA 10 วัน
+df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
+df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
 df['EMA_10'] = df['Close'].ewm(span=10, adjust=False).mean()
 df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
 df['MACD'] = df['EMA_12'] - df['EMA_26']
@@ -124,8 +120,11 @@ df['Bollinger_Low'] = bollinger.bollinger_lband()
 df.fillna(method='ffill', inplace=True)
 df.fillna(0, inplace=True)
 
-feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment',
-                   'RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment','Total Revenue', 
+                   'YoY Growth (%)', 'Net Profit', 'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 
+                   'Gross Margin (%)', 'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ',
+                   'P/BV Ratio ', 'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
+                   'Bollinger_High', 'Bollinger_Low']
 
 # Label Encode Ticker
 ticker_encoder = LabelEncoder()
@@ -261,7 +260,7 @@ logging.info("เริ่มฝึกโมเดลสำหรับราค
 
 history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
-    epochs=1000,
+    epochs=2000,
     batch_size=32,
     verbose=1,
     shuffle=False,
