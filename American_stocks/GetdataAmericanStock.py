@@ -34,8 +34,8 @@ for ticker in tickers:
     all_dates = pd.date_range(start=start_date, end=end_date, freq='D')  # ทุกวัน
     ticker_data = ticker_data.reindex(all_dates)  
 
-    # เติมค่าของวันหยุด (เสาร์-อาทิตย์) ด้วยค่าจากวันศุกร์ก่อนหน้า
-    ticker_data.ffill(inplace=True)
+    # เปลี่ยนค่าในวันเสาร์-อาทิตย์เป็น 0
+    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Market Cap']] = ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Market Cap']].fillna(0)
 
     data_list.append(ticker_data)
 

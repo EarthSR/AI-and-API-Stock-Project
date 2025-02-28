@@ -88,9 +88,6 @@ if 'Quarter' not in merged_df.columns:
     # หากไม่มี 'Quarter' ให้เพิ่มคอลัมน์ Quarter ด้วยการใช้ Date เพื่อดึงไตรมาส
     merged_df['Quarter'] = merged_df['Date'].dt.to_period('Q').astype(str)
 
-# ตรวจสอบชื่อคอลัมน์ใน merged_df
-print("Merged Columns: ", merged_df.columns)
-
 # ใช้ Ticker และ Quarter เป็นตัวเชื่อมในการรวมข้อมูลการเงิน
 merged_df = merged_df.merge(
     financial_thai_df,
@@ -106,8 +103,8 @@ merged_df = merged_df.merge(
     how='left'
 )
 
-# ตรวจสอบชื่อคอลัมน์ทั้งหมดใน merged_df
-print("Merged Columns after financial merge: ", merged_df.columns)
+# เติมค่า 'Neutral' ในช่องที่เป็น NaN ในคอลัมน์ 'Sentiment'
+merged_df['Sentiment'].fillna('Neutral', inplace=True)
 
 # ลบข้อมูลที่มีค่าว่างในหุ้น
 merged_df.dropna(subset=['Ticker', 'Date', 'Close'], inplace=True)
@@ -149,9 +146,25 @@ def clean_data_based_on_dates(df):
 # เรียกใช้งานฟังก์ชัน Clean
 merged_df = clean_data_based_on_dates(merged_df)
 
-
 # บันทึกข้อมูลที่รวมแล้วลงไฟล์ CSV
 merged_df.to_csv("merged_stock_sentiment_financial.csv", index=False)
 
 # แสดงข้อมูลที่รวมแล้ว
 print(merged_df.head())
+
+# เพิ่มการเติมข้อมูลในคอลัมน์ Quarter Date และ Stock หลังจากโค้ดหลักทำงานเสร็จ
+# เติมค่า 'Quarter Date' ที่ขาดหายไปตามวันที่ (Date)
+merged_df['Quarter Date'] = merged_df['Quarter Date'].fillna(
+    merged_df['Date'].dt.to_period('Q').astype(str)
+)
+
+# เติมค่า 'Stock' ที่ขาดหายไปจาก Ticker
+merged_df['Stock'] = merged_df['Stock'].fillna(merged_df['Ticker'])
+
+# ตรวจสอบข้อมูลที่เติม
+print("ข้อมูลหลังจากเติมข้อมูล Quarter Date และ Stock:")
+print(merged_df[['Date', 'Ticker', 'Quarter Date', 'Stock']].head())
+
+# บันทึกข้อมูลที่รวมแล้วลงไฟล์ CSV
+merged_df.to_csv("merged_stock_sentiment_financial.csv", index=False)
+
