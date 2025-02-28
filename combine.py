@@ -106,8 +106,7 @@ merged_df = merged_df.merge(
 # เติมค่า 'Neutral' ในช่องที่เป็น NaN ในคอลัมน์ 'Sentiment'
 merged_df['Sentiment'].fillna('Neutral', inplace=True)
 
-# ลบข้อมูลที่มีค่าว่างในหุ้น
-merged_df.dropna(subset=['Ticker', 'Date', 'Close'], inplace=True)
+
 
 # เช็คคอลัมน์ที่ลงท้ายด้วย '_x' ถ้ามี NaN ให้ไปเติมค่าในคอลัมน์ที่ลงท้ายด้วย '_y'
 for col in merged_df.columns:
