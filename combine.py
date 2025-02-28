@@ -6,7 +6,7 @@ sentiment_df_us = pd.read_csv("./Finbert/daily_sentiment_result_us.csv")
 
 # โหลดข้อมูลหุ้น
 stock_df_th = pd.read_csv("./Finbert/stock_data_with_marketcap_thai.csv")
-stock_df_us = pd.read_csv("./Finbert/stock_data_from_dates.csv")
+stock_df_us = pd.read_csv("./Finbert/stock_data_with_marketcap_usa.csv")
 
 # โหลดข้อมูลการเงิน
 financial_thai_df = pd.read_csv("./Finbert/Financial_Thai_Quarter.csv")
