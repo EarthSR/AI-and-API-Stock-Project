@@ -35,6 +35,39 @@ const pool = mysql.createPool({
     connectTimeout: 60000,
   });
 
+  // ฟังก์ชันสำหรับตรวจสอบ JWT token
+const verifyToken = (req, res, next) => {
+  const token = req.headers['authorization'];
+
+  if (!token) {
+    return res.status(403).json({ message: "Token is required" });
+  }
+
+  // ตัดคำว่า "Bearer" ออกจาก token
+  const bearerToken = token.split(' ')[1];
+
+  jwt.verify(bearerToken, JWT_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(401).json({ message: "Invalid token" });
+    }
+    req.userId = decoded.id; // เก็บ userId จาก token ใน request object
+    next(); // ส่งต่อให้กับ middleware หรือ route handler ถัดไป
+  });
+};
+
+module.exports = verifyToken; // เพื่อให้สามารถนำไปใช้ในไฟล์อื่นได้
+
+// Storage configuration for profile picture upload
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, './uploads/');
+  },
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + path.extname(file.originalname));
+  }
+});
+const upload = multer({ storage: storage });
+
   function generateOtp() {
     const otp = crypto.randomBytes(3).toString("hex"); // 3 bytes = 6 hex characters
     return parseInt(otp, 16).toString().slice(0, 6); // Convert hex to decimal and take first 6 digits
@@ -48,6 +81,7 @@ const pool = mysql.createPool({
         pass: process.env.emailpassword,
       },
     });
+    
   
     const mailOptions = {
       from: process.env.email,
@@ -80,6 +114,8 @@ const pool = mysql.createPool({
       callback(null, info); // Proceed if the email was successfully sent
     });
   }
+
+
   app.post("/api/register/email", async (req, res) => {
     try {
         const { email } = req.body;
@@ -156,61 +192,92 @@ const pool = mysql.createPool({
 //Verify-OTP
 app.post("/api/register/verify-otp", async (req, res) => {
   try {
-    const { email, otp } = req.body;
-      
-    pool.query("SELECT * FROM OTP WHERE Email = ? AND OTP_Code = ?", [email, otp], (err, results) => {
+    const { userId, otp } = req.body;
+    
+    // ตรวจสอบว่า UserID กับ OTP ถูกส่งมาหรือไม่
+    if (!userId || !otp) return res.status(400).json({ error: "UserID หรือ OTP ไม่ถูกต้อง" });
+
+    // ค้นหา OTP ในฐานข้อมูลโดยใช้ UserID และ OTP
+    pool.query("SELECT * FROM OTP WHERE UserID = ? AND OTP_Code = ?", [userId, otp], (err, results) => {
       if (err) return res.status(500).json({ error: "Database error" });
-  
+
+      // ถ้าไม่พบ OTP ในฐานข้อมูล
       if (results.length === 0) return res.status(400).json({ error: "OTP ไม่ถูกต้อง" });
-  
+
+      // ตรวจสอบว่า OTP ยังไม่หมดอายุ
       const { Expires_At } = results[0];
       if (new Date() > new Date(Expires_At)) return res.status(400).json({ error: "OTP หมดอายุ" });
-  
+
+      // ถ้า OTP ถูกต้องและไม่หมดอายุ
       res.status(200).json({ message: "OTP ถูกต้อง คุณสามารถตั้งรหัสผ่านได้" });
     });
   } catch (error) {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
   
-//Set-Pass
 app.post("/api/register/set-password", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { userId, password } = req.body;
+    
+    if (!userId || !password) {
+      return res.status(400).json({ error: "UserID และ Password ต้องถูกต้อง" });
+    }
+
     const hash = await bcrypt.hash(password, 10);
 
+    // อัปเดตข้อมูลรหัสผ่านในตาราง User โดยใช้ UserID
     pool.query(
-      "INSERT INTO User (Email, Password, Status, Role) VALUES (?, ?, 'active', 'user') ON DUPLICATE KEY UPDATE Password = ?, Status = 'active'",
-      [email, hash, hash],
+      "UPDATE User SET Password = ?, Status = 'active' WHERE UserID = ?",
+      [hash, userId],
       (err) => {
-        if (err) return res.status(500).json({ error: "Database error" });
+        if (err) {
+          console.error("Database error during User update:", err);
+          return res.status(500).json({ error: "Database error during User update" });
+        }
 
-        pool.query("DELETE FROM OTP WHERE Email = ?", [email]);
-        res.status(201).json({ message: "ลงทะเบียนสำเร็จ" });
+        // ไม่ต้องส่ง OTP ใหม่แล้ว
+        res.status(200).json({ message: "รหัสผ่านถูกตั้งเรียบร้อยแล้ว" });
       }
     );
   } catch (error) {
+    console.error("Internal server error:", error.message);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
+
+
 //Resend-OTP
 app.post("/api/resend-otp/register", async (req, res) => {
   try {
-    const { email } = req.body;
+    const { userId } = req.body;
     
-    const newOtp = generateOtp();
-    const newExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    // ตรวจสอบว่า userId ถูกส่งมาหรือไม่
+    if (!userId) return res.status(400).json({ error: "UserID ไม่ถูกต้อง" });
 
+    const newOtp = generateOtp();
+    const newExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // OTP หมดอายุใน 10 นาที
+
+    // แทรก OTP ใหม่ในตาราง OTP โดยไม่ลบ OTP เดิม
     pool.query(
-      "UPDATE OTP SET OTP_Code = ?, Expires_At = ? WHERE Email = ?",
-      [newOtp, newExpiresAt, email],
+      "INSERT INTO OTP (OTP_Code, Created_At, Expires_At, UserID) VALUES (?, ?, ?, ?)",
+      [newOtp, new Date(), newExpiresAt, userId],
       (err) => {
         if (err) return res.status(500).json({ error: "Database error" });
 
-        sendOtpEmail(email, newOtp, (error) => {
-          if (error) return res.status(500).json({ error: "Error sending OTP email" });
-          res.status(200).json({ message: "OTP ถูกส่งใหม่แล้ว" });
+        // ค้นหาอีเมลของผู้ใช้จาก UserID เพื่อส่ง OTP
+        pool.query("SELECT Email FROM User WHERE UserID = ?", [userId], (err, userResults) => {
+          if (err) return res.status(500).json({ error: "Database error during user lookup" });
+          if (userResults.length === 0) return res.status(404).json({ error: "User not found" });
+
+          const email = userResults[0].Email;
+
+          sendOtpEmail(email, newOtp, (error) => {
+            if (error) return res.status(500).json({ error: "Error sending OTP email" });
+            res.status(200).json({ message: "OTP ถูกส่งใหม่แล้ว" });
+          });
         });
       }
     );
@@ -219,14 +286,14 @@ app.post("/api/resend-otp/register", async (req, res) => {
   }
 });
 
-//Login
+
+
 app.post("/api/login", async (req, res) => {
   try {
     const { email, password, googleId } = req.body;
 
     // รับ IP Address ของผู้ใช้
-    const ipAddress =
-      req.headers["x-forwarded-for"] || req.connection.remoteAddress;
+    const ipAddress = req.headers["x-forwarded-for"] || req.connection.remoteAddress;
 
     // ค้นหาผู้ใช้จากฐานข้อมูล
     pool.query("SELECT * FROM User WHERE Email = ?", [email], (err, results) => {
@@ -318,6 +385,34 @@ app.post("/api/login", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+// Set profile route (Profile setup or update)
+app.post("/api/set-profile", verifyToken, upload.single('picture'), (req, res) => {
+  const { newUsername, birthday } = req.body;
+  const userId = req.userId; // รับ UserID จาก token
+  const picture = req.file ? `/uploads/${req.file.filename}` : null; 
+
+  // ตรวจสอบว่า newUsername, picture, และ birthday ถูกส่งมาหรือไม่
+  if (!newUsername || !picture || !birthday) {
+    return res.status(400).json({ message: "New username, picture, and birthday are required" });
+  }
+
+  // แปลงวันที่จาก DD/MM/YYYY เป็น YYYY-MM-DD
+  const birthdayParts = birthday.split('/');
+  const formattedBirthday = `${birthdayParts[2]}-${birthdayParts[1]}-${birthdayParts[0]}`;
+
+    // อัปเดตโปรไฟล์ของผู้ใช้
+    const updateProfileQuery = "UPDATE User SET Username = ?, ProfileImageURL = ?, Birthday = ? WHERE UserID = ?";
+    pool.query(updateProfileQuery, [newUsername, picture, formattedBirthday, userId], (err) => {
+      if (err) {
+        console.error("Error updating profile: ", err);
+        return res.status(500).json({ message: "Error updating profile" });
+      }
+
+      return res.status(200).json({ message: "Profile set/updated successfully" });
+    });
+});
+
 
 //Login Google
 app.post("/api/google-signin", async (req, res) => {
