@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler, LabelEncoder, StandardScaler
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder, RobustScaler, StandardScaler
 from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.layers import (Input, Conv1D, MaxPooling1D, Dense, Dropout, Embedding, 
                                      concatenate, GlobalAveragePooling1D, BatchNormalization)
@@ -80,6 +80,8 @@ df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
 df['RSI'].fillna(method='ffill', inplace=True)
 df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
 df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
+df['EMA_10'] = df['Close'].ewm(span=10, adjust=False).mean()
+df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
 df['MACD'] = df['EMA_12'] - df['EMA_26']
 df['MACD_Signal'] = df['MACD'].rolling(window=9).mean()
 bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
