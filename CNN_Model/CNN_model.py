@@ -67,40 +67,58 @@ def plot_residuals(y_true, y_pred, ticker):
     plt.savefig(f'residuals_{ticker}.png')  # บันทึกกราฟแยกแต่ละหุ้น
     plt.close()
 
-# โหลดข้อมูล
-df_stock = pd.read_csv("cleaned_data.csv", parse_dates=["Date"]).sort_values(by=["Ticker", "Date"])
-df_news = pd.read_csv("news_with_sentiment_gpu.csv")
-df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce')
-df_stock['Date'] = pd.to_datetime(df_stock['Date'], errors='coerce')
-df_news['Sentiment'] = df_news['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
-df_news['Confidence'] = df_news['Confidence']
-df = pd.merge(df_stock, df_news[['Date', 'Sentiment', 'Confidence']], on='Date', how='left')
 
-# เติมค่าที่ขาดหายไป
-df.fillna(method='ffill', inplace=True)
-df.fillna(0, inplace=True)
+df = pd.read_csv('../merged_stock_sentiment_financial.csv')
+# โหลดข้อมูล
+df['Sentiment'] = df['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
 
 # เพิ่มฟีเจอร์
 df['Change'] = df['Close'] - df['Open']
-df['Change (%)'] = (df['Change'] / df['Open']) * 100
+df['Change (%)'] = df['Close'].pct_change()
+df['Change (%)'] = np.clip(df['Change (%)'], -50, 50)
+df['Change (%)'] *= 100  # ทำให้เป็นเปอร์เซ็นต์
 df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
 df['RSI'].fillna(method='ffill', inplace=True)
 df['RSI'].fillna(0, inplace=True)
-df['SMA_5'] = df['Close'].rolling(window=5).mean()  # SMA 50 วัน
-df['SMA_10'] = df['Close'].rolling(window=10).mean()  # SMA 200 วัน
 df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
 df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
+df['EMA_10'] = df['Close'].ewm(span=10, adjust=False).mean()
+df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
 df['MACD'] = df['EMA_12'] - df['EMA_26']
 df['MACD_Signal'] = df['MACD'].rolling(window=9).mean()  
 bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
 df['Bollinger_High'] = bollinger.bollinger_hband()
 df['Bollinger_Low'] = bollinger.bollinger_lband()
+upper_bound = df["Change (%)"].quantile(0.99)
+lower_bound = df["Change (%)"].quantile(0.01)
+df["Change (%)"] = np.clip(df["Change (%)"], lower_bound, upper_bound)
 
-df.fillna(method='ffill', inplace=True)
+
+# ✅ ใช้ Backward Fill (เติมค่าล่าสุดก่อนหน้า แทนที่จะเติมค่าทุกวัน)
+financial_columns = ['Total Revenue', 'QoQ Growth (%)', 'YoY Growth (%)', 'Net Profit', 
+                     'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 'Gross Margin (%)', 
+                     'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ',
+                     'P/BV Ratio ', 'Dividend Yield (%)']
+# ✅ กรองเฉพาะแถวที่มีข้อมูลงบการเงิน ไม่เอาวันที่ซ้ำกัน
+df_financial = df[['Date', 'Ticker'] + financial_columns].drop_duplicates()
+# ✅ เติมค่าที่ขาดหายไปในงบการเงิน ด้วย Backfill
+df_financial[financial_columns] = df_financial[financial_columns].where(df_financial[financial_columns].ne(0)).bfill()
+
+
+# ✅ ใช้ Forward Fill เฉพาะตัวชี้วัดทางเทคนิคของหุ้น
+stock_columns = ['RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+df[stock_columns] = df[stock_columns].fillna(method='ffill')
+
+# ✅ ตรวจสอบว่าไม่มีค่าซ้ำทุกวัน
+print(df[['Date', 'Ticker', 'Total Revenue', 'Net Profit']].tail(20))
+
 df.fillna(0, inplace=True)
 
-feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment',
-                    'RSI', 'SMA_10', 'SMA_5', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment','Total Revenue','QoQ Growth (%)', 
+                   'YoY Growth (%)', 'Net Profit', 'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 
+                   'Gross Margin (%)', 'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ',
+                   'P/BV Ratio ', 'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
+                   'Bollinger_High', 'Bollinger_Low']
 
 # Label Encode Ticker
 ticker_encoder = LabelEncoder()
@@ -108,17 +126,27 @@ df['Ticker_ID'] = ticker_encoder.fit_transform(df['Ticker'])
 num_tickers = len(ticker_encoder.classes_)
 
 # แบ่งข้อมูล Train/Val/Test ตามเวลา
+# สมมติเราแบ่งตาม quantile ของวันที่ หรือกำหนดโดยตรง
 sorted_dates = df['Date'].unique()
-train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  
+train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเขตที่ 6 ปี
+
 
 # ข้อมูล train, test
 train_df = df[df['Date'] <= train_cutoff].copy()
 test_df = df[df['Date'] > train_cutoff].copy()
 
-train_targets_price = train_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
+train_df.to_csv('train_df.csv', index=False)
+test_df.to_csv('test_df.csv', index=False)
+print("Train cutoff:", train_cutoff)
+print("First date in train set:", train_df['Date'].min())
+print("Last date in train set:", train_df['Date'].max())
+
+
+# สร้าง target โดย shift(-1)
+train_targets_price = train_df['Change (%)'].shift(-1).dropna().values.reshape(-1, 1)
 train_df = train_df.iloc[:-1]
 
-test_targets_price = test_df['Close'].shift(-1).dropna().values.reshape(-1, 1)
+test_targets_price = test_df['Change (%)'].shift(-1).dropna().values.reshape(-1, 1)
 test_df = test_df.iloc[:-1]
 
 train_features = train_df[feature_columns].values
@@ -127,14 +155,20 @@ test_features = test_df[feature_columns].values
 train_ticker_id = train_df['Ticker_ID'].values
 test_ticker_id = test_df['Ticker_ID'].values
 
+# 🔎 ค้นหาว่าคอลัมน์ไหนใน train_features มีค่า inf
+for i, col in enumerate(feature_columns):
+    if np.any(np.isinf(train_features[:, i])):
+        print(f"⚠️ พบค่า Infinity ในคอลัมน์: {col}")
+
+
 # สเกลข้อมูลจากชุดฝึก (train) เท่านั้น
 scaler_features = RobustScaler()
 train_features_scaled = scaler_features.fit_transform(train_features)  # ใช้ fit_transform กับชุดฝึก
 test_features_scaled = scaler_features.transform(test_features)  # ใช้ transform กับชุดทดสอบ
 
-scaler_target = RobustScaler()
-train_targets_scaled = scaler_target.fit_transform(train_targets_price)
-test_targets_scaled = scaler_target.transform(test_targets_price)
+scaler_target = MinMaxScaler(feature_range=(-1, 1))
+train_targets_scaled = scaler_target.fit_transform(train_targets_price)  # ใช้ fit_transform กับชุดฝึก
+test_targets_scaled = scaler_target.transform(test_targets_price)  # ใช้ transform กับชุดทดสอบ
 
 joblib.dump(scaler_features, 'cnn_scaler_features.pkl')
 joblib.dump(scaler_target, 'cnn_scaler_target.pkl')
@@ -211,14 +245,14 @@ model.summary()
 
 # ฝึกโมเดล
 early_stopping = EarlyStopping(monitor='val_loss', patience=200, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_price_cnn_model.keras', monitor='val_loss', save_best_only=True, mode='min')
+checkpoint = ModelCheckpoint('best_price_cnn_model.h5', monitor='val_loss', save_best_only=True, mode='min')
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
 
 logging.info("เริ่มฝึกโมเดล CNN สำหรับราคาหุ้น")
 
 history = model.fit(
     [X_train, X_train_ticker], y_train,
-    epochs=1000,
+    epochs=1,
     batch_size=32,
     validation_data=([X_test, X_test_ticker], y_test),
     verbose=1,
@@ -237,125 +271,95 @@ y_pred = scaler_target.inverse_transform(y_pred_scaled)
 y_test_original = scaler_target.inverse_transform(y_test)
 
 
-# แสดงกราฟการทำนาย
-plot_predictions(y_test_original, y_pred, "Stock")
 
-# แสดง Residuals
-plot_residuals(y_test_original, y_pred, "Stock")
-
-
-model.save('price_prediction_CNN_model.keras')
+model.save('price_prediction_CNN_model.keras', save_format='h5')
 logging.info("บันทึกโมเดล CNN ราคาหุ้นรวมเรียบร้อยแล้ว")
 
 
 def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
     """
-    Perform walk-forward validation for each ticker.
-    
-    Parameters:
-    - model: Trained Keras model.
-    - df: DataFrame containing all data.
-    - feature_columns: List of feature column names.
-    - scaler_features: Fitted scaler for features.
-    - scaler_target: Fitted scaler for target.
-    - ticker_encoder: Fitted LabelEncoder for ticker IDs.
-    - seq_length: Sequence length.
-    
-    Returns:
-    - results: Dictionary containing metrics and predictions for each ticker.
+    ฟังก์ชันนี้จะทำการทำนายแบบ walk-forward สำหรับแต่ละ ticker
+    พร้อมทั้งรีเทรนโมเดลเล็กน้อย (online learning) และเก็บผลลัพธ์สำหรับการคำนวณ metrics
     """
+    all_predictions = []
+
     tickers = df['Ticker'].unique()
-    results = {}
-    
     for ticker in tickers:
         print(f"\nProcessing Ticker: {ticker}")
         ticker_id = ticker_encoder.transform([ticker])[0]
         df_ticker = df[df['Ticker'] == ticker].sort_values('Date').reset_index(drop=True)
-        
+
         if len(df_ticker) < seq_length + 1:
             print(f"Not enough data for ticker {ticker}, skipping...")
             continue
-        
-        predictions = []
-        actuals = []
-        dates = []  # เก็บวันที่ของข้อมูลจริงและพยากรณ์
 
+        # Loop ผ่านข้อมูลทีละ sequence (target เป็นวันถัดไป)
         for i in range(len(df_ticker) - seq_length):
-            if i % 100 == 0:
-                print(f"  Processing: {i}/{len(df_ticker)-seq_length}")
-            
-            # เตรียมข้อมูลย้อนหลัง seq_length วัน
             historical_data = df_ticker.iloc[i:i+seq_length]
+            target_data = df_ticker.iloc[i+seq_length]  # target สำหรับพยากรณ์
             features = historical_data[feature_columns].values
             ticker_ids = historical_data['Ticker_ID'].values
-            
-            # สเกลฟีเจอร์
+
+            # สเกลฟีเจอร์และจัดรูปแบบข้อมูลให้เป็น 3D input
             features_scaled = scaler_features.transform(features)
-            
-            # จัดรูปแบบสำหรับโมเดล
             X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
             X_ticker = ticker_ids.reshape(1, seq_length)
-            
-            # พยากรณ์
+
+            # พยากรณ์ Change (%)
             pred = model.predict([X_features, X_ticker], verbose=0)
-            pred_unscaled = scaler_target.inverse_transform(pred)[0][0]
-            
-            # ค่าจริงของวันถัดไป
-            actual = df_ticker.iloc[i + seq_length]['Close']
-            date_value = df_ticker.iloc[i + seq_length]['Date']
-            
-            predictions.append(pred_unscaled)
-            actuals.append(actual)
-            dates.append(date_value)
-            
-            # รีเทรนโมเดลด้วยข้อมูลจริง (ไม่ใช่ค่าพยากรณ์)
-            new_features = df_ticker.iloc[i + seq_length][feature_columns].values.reshape(1, -1)
-            new_features_scaled = scaler_features.transform(new_features)
-            new_target = df_ticker.iloc[i + seq_length]['Close']
-            new_target_scaled = scaler_target.transform([[new_target]])
-            
-            # สร้าง sequence ใหม่สำหรับการฝึก
-            train_seq_features = features_scaled.reshape(1, seq_length, len(feature_columns))
-            train_seq_ticker = ticker_ids.reshape(1, seq_length)
-            
-            # รีเทรนโมเดลด้วยข้อมูลใหม่
-            model.fit(
-                [train_seq_features, train_seq_ticker],
-                new_target_scaled,
-                epochs=3,
-                batch_size=1,
-                verbose=0
-            )
-        
-        # คำนวณเมตริกส์
-        mae = mean_absolute_error(actuals, predictions)
-        mse = mean_squared_error(actuals, predictions)
+            pred_change_pct = scaler_target.inverse_transform(pred.reshape(-1, 1))[0][0]
+            actual_change_pct = target_data['Change (%)']
+            future_date = target_data['Date']
+
+            all_predictions.append({
+                'Ticker': ticker,
+                'Date': future_date,
+                'Predicted Change (%)': pred_change_pct,
+                'Actual Change (%)': actual_change_pct
+            })
+
+            # รีเทรนโมเดลด้วยข้อมูลจริง (online learning)
+            new_target_scaled = scaler_target.transform([[actual_change_pct]])
+            model.fit([X_features, X_ticker], new_target_scaled, epochs=3, batch_size=4, verbose=0)
+
+            if i % 100 == 0:
+                print(f"  Processing: {i}/{len(df_ticker)-seq_length}")
+
+    # สร้าง DataFrame จากผลการทำนาย
+    predictions_df = pd.DataFrame(all_predictions)
+
+    # คำนวณ Metrics สำหรับแต่ละ ticker
+    metrics_dict = {}
+    for ticker, group in predictions_df.groupby('Ticker'):
+        actuals = group['Actual Change (%)'].values
+        preds = group['Predicted Change (%)'].values
+        mae = mean_absolute_error(actuals, preds)
+        mse = mean_squared_error(actuals, preds)
         rmse = np.sqrt(mse)
-        mape = mean_absolute_percentage_error(actuals, predictions)
-        r2 = r2_score(actuals, predictions)
-        
-        results[ticker] = {
+        mape = mean_absolute_percentage_error(actuals, preds)
+        r2 = r2_score(actuals, preds)
+        metrics_dict[ticker] = {
             'MAE': mae,
             'MSE': mse,
             'RMSE': rmse,
             'MAPE': mape,
-            'R2': r2,
-            'Predictions': predictions,
-            'Actuals': actuals,
-            'Dates': dates
+            'R2 Score': r2,
+            'Dates': group['Date'].tolist(),
+            'Actuals': actuals.tolist(),
+            'Predictions': preds.tolist()
         }
-        
-        # พล็อตผลการพยากรณ์และ residuals สำหรับหุ้นนี้
-        plot_predictions(actuals, predictions, ticker)
-        plot_residuals(actuals, predictions, ticker)
-    
-    return results
+
+    # บันทึกผลการทำนายลง CSV
+    predictions_df.to_csv('predictions_change_pct.csv', index=False)
+    print("\n✅ Saved deduplicated predictions for all tickers to 'predictions_change_pct.csv'")
+
+    return predictions_df, metrics_dict
 
 
 # ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
-results_per_ticker = walk_forward_validation(
-    model=load_model('price_prediction_CNN_model.keras'),
-    df=test_df,  # ใช้ test_df สำหรับการพยากรณ์
+predictions_df, results_per_ticker = walk_forward_validation(
+    model=load_model('./price_prediction_CNN_model.keras'),
+    df=test_df,
     feature_columns=feature_columns,
     scaler_features=scaler_features,
     scaler_target=scaler_target,
@@ -363,26 +367,16 @@ results_per_ticker = walk_forward_validation(
     seq_length=seq_length
 )
 
-# แสดงผลสรุปเมตริกส์สำหรับแต่ละหุ้น
 for ticker, metrics in results_per_ticker.items():
     print(f"\nMetrics for {ticker}:")
     print(f"MAE: {metrics['MAE']:.4f}")
     print(f"MSE: {metrics['MSE']:.4f}")
     print(f"RMSE: {metrics['RMSE']:.4f}")
     print(f"MAPE: {metrics['MAPE']:.4f}")
-    print(f"R2 Score: {metrics['R2']:.4f}")
+    print(f"R2 Score: {metrics['R2 Score']:.4f}")
 
 # บันทึกเมตริกส์ลงไฟล์ CSV สำหรับการวิเคราะห์เพิ่มเติม
-metrics_df = pd.DataFrame({
-    ticker: {
-        'MAE': metrics['MAE'],
-        'MSE': metrics['MSE'],
-        'RMSE': metrics['RMSE'],
-        'MAPE': metrics['MAPE'],
-        'R2': metrics['R2']
-    }
-    for ticker, metrics in results_per_ticker.items()
-}).T
+metrics_df = pd.DataFrame(results_per_ticker).T
 metrics_df.to_csv('metrics_per_ticker.csv', index=True)
 print("\nSaved metrics per ticker to 'metrics_per_ticker.csv'")
 
@@ -394,6 +388,5 @@ for ticker, data in results_per_ticker.items():
 
 prediction_df = pd.DataFrame(all_data, columns=['Ticker', 'Date', 'Actual', 'Predicted'])
 prediction_df.to_csv('all_predictions_per_day.csv', index=False)
-
 print("Saved actual and predicted prices to 'all_predictions_per_day.csv'")
 
