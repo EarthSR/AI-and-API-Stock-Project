@@ -303,6 +303,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     """
     ฟังก์ชันนี้จะทำการทำนายแบบ walk-forward สำหรับแต่ละ ticker
     พร้อมทั้งรีเทรนโมเดลเล็กน้อย (online learning) และเก็บผลลัพธ์สำหรับการคำนวณ metrics
+    โดยเพิ่มการตรวจเช็คทิศทาง (Up/Down) ของการเปลี่ยนแปลงด้วย
     """
     all_predictions = []
 
@@ -333,12 +334,18 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             pred_change_pct = scaler_target.inverse_transform(pred.reshape(-1, 1))[0][0]
             actual_change_pct = target_data['Change (%)']
             future_date = target_data['Date']
+            
+            # ตรวจเช็คทิศทางของการเปลี่ยนแปลง
+            predicted_direction = "Up" if pred_change_pct >= 0 else "Down"
+            actual_direction = "Up" if actual_change_pct >= 0 else "Down"
 
             all_predictions.append({
                 'Ticker': ticker,
                 'Date': future_date,
                 'Predicted Change (%)': pred_change_pct,
-                'Actual Change (%)': actual_change_pct
+                'Actual Change (%)': actual_change_pct,
+                'Predicted Direction': predicted_direction,
+                'Actual Direction': actual_direction
             })
 
             # รีเทรนโมเดลด้วยข้อมูลจริง (online learning)
@@ -361,15 +368,21 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
         rmse = np.sqrt(mse)
         mape = mean_absolute_percentage_error(actuals, preds)
         r2 = r2_score(actuals, preds)
+        # คำนวณ directional accuracy โดยเปรียบเทียบทิศทางที่ทำนายกับทิศทางจริง
+        direction_accuracy = np.mean((group['Predicted Direction'] == group['Actual Direction']).astype(int))
+        
         metrics_dict[ticker] = {
             'MAE': mae,
             'MSE': mse,
             'RMSE': rmse,
             'MAPE': mape,
             'R2 Score': r2,
+            'Direction Accuracy': direction_accuracy,
             'Dates': group['Date'].tolist(),
             'Actuals': actuals.tolist(),
-            'Predictions': preds.tolist()
+            'Predictions': preds.tolist(),
+            'Predicted Directions': group['Predicted Direction'].tolist(),
+            'Actual Directions': group['Actual Direction'].tolist()
         }
 
     # บันทึกผลการทำนายลง CSV
@@ -377,7 +390,6 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     print("\n✅ Saved deduplicated predictions for all tickers to 'predictions_change_pct.csv'")
 
     return predictions_df, metrics_dict
-
 
 # ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
 predictions_df, results_per_ticker = walk_forward_validation(
