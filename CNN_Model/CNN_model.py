@@ -252,7 +252,7 @@ logging.info("เริ่มฝึกโมเดล CNN สำหรับร�
 
 history = model.fit(
     [X_train, X_train_ticker], y_train,
-    epochs=1,
+    epochs=2000,
     batch_size=32,
     validation_data=([X_test, X_test_ticker], y_test),
     verbose=1,
