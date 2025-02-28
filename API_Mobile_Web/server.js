@@ -588,7 +588,7 @@ app.post("/api/set-profile", verifyToken, upload.single('picture'), (req, res) =
     });
 });
 
-// Login with Google * ยังไม่ได้เช็คบน PostMan
+// Login with Google * ยังไม่ได้เช็คบน Postman
 app.post("/api/google-signin", async (req, res) => {
   try {
     const { googleId, email } = req.body;
