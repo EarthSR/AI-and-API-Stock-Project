@@ -95,18 +95,16 @@ df = pd.read_csv('../merged_stock_sentiment_financial.csv')
 
 df['Sentiment'] = df['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
 
-# เติมค่าที่ขาดหายไป
-df.fillna(method='ffill', inplace=True)
-df.fillna(0, inplace=True)
+
 
 # เพิ่มฟีเจอร์
 df['Change'] = df['Close'] - df['Open']
-df['Change (%)'] = df['Close'].pct_change() * 100
+df['Change (%)'] = df['Close'].pct_change()
+df['Change (%)'] = np.clip(df['Change (%)'], -50, 50)
+df['Change (%)'] *= 100  # ทำให้เป็นเปอร์เซ็นต์
 df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
 df['RSI'].fillna(method='ffill', inplace=True)
 df['RSI'].fillna(0, inplace=True)
-df['SMA_5'] = df['Close'].rolling(window=5).mean()  # SMA 5 วัน
-df['SMA_10'] = df['Close'].rolling(window=10).mean()  # SMA 10 วัน
 df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
 df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
 df['EMA_10'] = df['Close'].ewm(span=10, adjust=False).mean()
@@ -116,8 +114,29 @@ df['MACD_Signal'] = df['MACD'].rolling(window=9).mean()
 bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
 df['Bollinger_High'] = bollinger.bollinger_hband()
 df['Bollinger_Low'] = bollinger.bollinger_lband()
+upper_bound = df["Change (%)"].quantile(0.99)
+lower_bound = df["Change (%)"].quantile(0.01)
+df["Change (%)"] = np.clip(df["Change (%)"], lower_bound, upper_bound)
 
-df.fillna(method='ffill', inplace=True)
+
+# ✅ ใช้ Backward Fill (เติมค่าล่าสุดก่อนหน้า แทนที่จะเติมค่าทุกวัน)
+financial_columns = ['Total Revenue', 'QoQ Growth (%)', 'YoY Growth (%)', 'Net Profit', 
+                     'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 'Gross Margin (%)', 
+                     'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ',
+                     'P/BV Ratio ', 'Dividend Yield (%)']
+# ✅ กรองเฉพาะแถวที่มีข้อมูลงบการเงิน ไม่เอาวันที่ซ้ำกัน
+df_financial = df[['Date', 'Ticker'] + financial_columns].drop_duplicates()
+# ✅ เติมค่าที่ขาดหายไปในงบการเงิน ด้วย Backfill
+df_financial[financial_columns] = df_financial[financial_columns].where(df_financial[financial_columns].ne(0)).bfill()
+
+
+# ✅ ใช้ Forward Fill เฉพาะตัวชี้วัดทางเทคนิคของหุ้น
+stock_columns = ['RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+df[stock_columns] = df[stock_columns].fillna(method='ffill')
+
+# ✅ ตรวจสอบว่าไม่มีค่าซ้ำทุกวัน
+print(df[['Date', 'Ticker', 'Total Revenue', 'Net Profit']].tail(20))
+
 df.fillna(0, inplace=True)
 
 feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment','Total Revenue','QoQ Growth (%)', 
@@ -141,6 +160,8 @@ train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเข�
 train_df = df[df['Date'] <= train_cutoff].copy()
 test_df = df[df['Date'] > train_cutoff].copy()
 
+train_df.to_csv('train_df.csv', index=False)
+test_df.to_csv('test_df.csv', index=False)
 print("Train cutoff:", train_cutoff)
 print("First date in train set:", train_df['Date'].min())
 print("Last date in train set:", train_df['Date'].max())
@@ -159,14 +180,21 @@ test_features = test_df[feature_columns].values
 train_ticker_id = train_df['Ticker_ID'].values
 test_ticker_id = test_df['Ticker_ID'].values
 
+# 🔎 ค้นหาว่าคอลัมน์ไหนใน train_features มีค่า inf
+for i, col in enumerate(feature_columns):
+    if np.any(np.isinf(train_features[:, i])):
+        print(f"⚠️ พบค่า Infinity ในคอลัมน์: {col}")
+
+
 # สเกลข้อมูลจากชุดฝึก (train) เท่านั้น
 scaler_features = RobustScaler()
 train_features_scaled = scaler_features.fit_transform(train_features)  # ใช้ fit_transform กับชุดฝึก
 test_features_scaled = scaler_features.transform(test_features)  # ใช้ transform กับชุดทดสอบ
 
-scaler_target = RobustScaler()
-train_targets_scaled = scaler_target.fit_transform(train_targets_price)
-test_targets_scaled = scaler_target.transform(test_targets_price)
+scaler_target = MinMaxScaler(feature_range=(-1, 1))
+train_targets_scaled = scaler_target.fit_transform(train_targets_price)  # ใช้ fit_transform กับชุดฝึก
+test_targets_scaled = scaler_target.transform(test_targets_price)  # ใช้ transform กับชุดทดสอบ
+
 
 joblib.dump(scaler_features, 'scaler_features.pkl')  # บันทึก scaler ฟีเจอร์
 joblib.dump(scaler_target, 'scaler_target.pkl')     # บันทึก scaler เป้าหมาย
