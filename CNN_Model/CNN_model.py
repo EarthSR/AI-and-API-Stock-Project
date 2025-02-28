@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder, RobustScaler
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, Flatten, Dense, Dropout, Embedding, concatenate
+from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, Flatten, Dense, Dropout, Embedding, concatenate, GlobalAveragePooling1D, BatchNormalization
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
@@ -216,39 +216,55 @@ X_test_ticker = np.concatenate(X_test_ticker_list, axis=0)
 y_test = np.concatenate(y_test_list, axis=0)
 
 # สร้างโมเดล CNN
+# Input layers สำหรับ features และ ticker
 features_input = Input(shape=(seq_length, len(feature_columns)), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
+# Embedding สำหรับ ticker
 embedding_dim = 32
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
+# รวมข้อมูล features กับ ticker embedding
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-# เพิ่ม Convolutional Layers 
-x = Conv1D(32, kernel_size=3, activation='relu')(merged)
-x = MaxPooling1D(pool_size=2)(x)
-x = Conv1D(64, kernel_size=3, activation='relu')(x)
+# Convolutional Block ที่ 1
+x = Conv1D(32, kernel_size=3, padding='same')(merged)
+x = BatchNormalization()(x)
+x = tf.keras.activations.relu(x)
 x = MaxPooling1D(pool_size=2)(x)
 
-# Flatten for fully connected layer
-x = Flatten()(x)
+# Convolutional Block ที่ 2
+x = Conv1D(64, kernel_size=3, padding='same')(x)
+x = BatchNormalization()(x)
+x = tf.keras.activations.relu(x)
+x = MaxPooling1D(pool_size=2)(x)
+
+# Convolutional Block ที่ 3
+x = Conv1D(128, kernel_size=3, padding='same')(x)
+x = BatchNormalization()(x)
+x = tf.keras.activations.relu(x)
+x = MaxPooling1D(pool_size=2)(x)
+
+# Global Average Pooling แทนการ Flatten เพื่อลดจำนวนพารามิเตอร์
+x = GlobalAveragePooling1D()(x)
+
+# Fully connected layers พร้อม Dropout
 x = Dense(64, activation='relu')(x)
-x = Dropout(0.2)(x)
+x = Dropout(0.3)(x)
 x = Dense(128, activation='relu')(x)
+x = Dropout(0.3)(x)
 output = Dense(1)(x)
 
+# สร้างและ compile โมเดล
 model = Model(inputs=[features_input, ticker_input], outputs=output)
 model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
 
-# แสดงสรุปโมเดล
 model.summary()
 
-# ฝึกโมเดล
+# Callbacks สำหรับเทรน
 early_stopping = EarlyStopping(monitor='val_loss', patience=200, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_price_cnn_model.keras', monitor='val_loss', save_best_only=True, mode='min')
+checkpoint = ModelCheckpoint('best_price_cnn_model.h5', monitor='val_loss', save_best_only=True, mode='min')
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
-
-logging.info("เริ่มฝึกโมเดล CNN สำหรับราคาหุ้น")
 
 history = model.fit(
     [X_train, X_train_ticker], y_train,
@@ -260,6 +276,8 @@ history = model.fit(
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
 
+# แสดงกราฟการฝึก
+plot_training_history(history)
 
 # ทำนายค่าจากโมเดล
 y_pred_scaled = model.predict([X_test, X_test_ticker])
@@ -268,8 +286,7 @@ y_pred_scaled = model.predict([X_test, X_test_ticker])
 y_pred = scaler_target.inverse_transform(y_pred_scaled)
 y_test_original = scaler_target.inverse_transform(y_test)
 
-
-
+# บันทึกโมเดล
 model.save('price_prediction_CNN_model.keras', save_format='h5')
 logging.info("บันทึกโมเดล CNN ราคาหุ้นรวมเรียบร้อยแล้ว")
 
