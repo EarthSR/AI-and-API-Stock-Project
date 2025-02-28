@@ -6,7 +6,7 @@ from tensorflow.keras.layers import (Input, Conv1D, MaxPooling1D, Dense, Dropout
                                      concatenate, GlobalAveragePooling1D, BatchNormalization)
 from tensorflow.keras.regularizers import l2
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
-from tensorflow.keras.losses import Huber
+from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 import matplotlib.pyplot as plt
 import tensorflow as tf
