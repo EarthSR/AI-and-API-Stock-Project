@@ -263,7 +263,7 @@ model.summary()
 
 # Callbacks สำหรับเทรน
 early_stopping = EarlyStopping(monitor='val_loss', patience=200, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_price_cnn_model.h5', monitor='val_loss', save_best_only=True, mode='min')
+checkpoint = ModelCheckpoint('best_price_cnn_model.keras', monitor='val_loss', save_best_only=True, mode='min')
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
 
 history = model.fit(
