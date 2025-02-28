@@ -260,8 +260,6 @@ history = model.fit(
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
 
-# แสดงกราฟการฝึก
-plot_training_history(history)
 
 # ทำนายค่าจากโมเดล
 y_pred_scaled = model.predict([X_test, X_test_ticker])
