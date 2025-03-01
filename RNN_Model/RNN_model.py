@@ -381,7 +381,9 @@ for ticker, metrics in results_per_ticker.items():
     print(f"R2 Score: {metrics['R2 Score']:.4f}")
 
 # บันทึกเมตริกส์ลงไฟล์ CSV สำหรับการวิเคราะห์เพิ่มเติม
+selected_columns = ['MAE', 'MSE', 'RMSE', 'MAPE', 'R2 Score'] 
 metrics_df = pd.DataFrame.from_dict(results_per_ticker, orient='index')
+filtered_metrics_df = metrics_df[selected_columns]
 metrics_df.to_csv('metrics_per_ticker.csv', index=True)
 print("\nSaved metrics per ticker to 'metrics_per_ticker.csv'")
 

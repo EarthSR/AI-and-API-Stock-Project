@@ -47,7 +47,7 @@ def plot_training_history(history):
     plt.legend()
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig('training_history.png')  # บันท��กกรา��การเทรน
 
 def plot_predictions(y_true, y_pred, ticker):
     plt.figure(figsize=(10, 6))
@@ -295,6 +295,8 @@ history = model.fit(
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
 
+# แสดงกราฟการฝึก
+plot_training_history(history)
 
 model.save('price_prediction_LSTM_model_embedding.keras')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
@@ -411,7 +413,10 @@ for ticker, metrics in results_per_ticker.items():
     print(f"R2 Score: {metrics['R2 Score']:.4f}")
 
 # บันทึกเมตริกส์ลงไฟล์ CSV สำหรับการวิเคราะห์เพิ่มเติม
-metrics_df = pd.DataFrame(results_per_ticker).T
+# บันทึกเมตริกส์ลงไฟล์ CSV สำหรับการวิเคราะห์เพิ่มเติม
+selected_columns = ['MAE', 'MSE', 'RMSE', 'MAPE', 'R2 Score'] 
+metrics_df = pd.DataFrame.from_dict(results_per_ticker, orient='index')
+filtered_metrics_df = metrics_df[selected_columns]
 metrics_df.to_csv('metrics_per_ticker.csv', index=True)
 print("\nSaved metrics per ticker to 'metrics_per_ticker.csv'")
 
