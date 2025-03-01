@@ -485,28 +485,60 @@ app.post("/api/login", async (req, res) => {
         return res.status(403).json({ message: "บัญชีถูกระงับการใช้งาน" });
       }
 
-      // 📌 ถ้าผู้ใช้ล็อกอินด้วย Google
       if (googleId) {
-        if (user.GoogleID === googleId) {
-          // สร้าง JWT Token
-          const token = jwt.sign({ id: user.UserID, role: user.Role }, JWT_SECRET, { expiresIn: "7d" });
-
-          // อัปเดตข้อมูลล็อกอินล่าสุด
-          pool.query("UPDATE User SET LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?", [ipAddress, user.UserID]);
-
-          return res.status(200).json({
-            message: "เข้าสู่ระบบด้วย Google สำเร็จ",
-            token,
-            user: {
-              id: user.UserID,
-              email: user.Email,
-              username: user.Username,
-            },
-          });
-        } else {
-          return res.status(400).json({ message: "บัญชีนี้ไม่ได้ลงทะเบียนด้วย Google" });
-        }
+        // ค้นหาผู้ใช้จาก GoogleID
+        pool.query("SELECT * FROM User WHERE GoogleID = ?", [googleId], (err, results) => {
+          if (err) {
+            return res.status(500).json({ message: "เกิดข้อผิดพลาดในระบบ" });
+          }
+      
+          if (results.length > 0) {
+            // ผู้ใช้เคยล็อกอินด้วย Google แล้ว
+            const user = results[0];
+      
+            // สร้าง JWT Token
+            const token = jwt.sign({ id: user.UserID, role: user.Role }, JWT_SECRET);
+      
+            // อัปเดตข้อมูลล็อกอินล่าสุด
+            pool.query("UPDATE User SET LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?", [ipAddress, user.UserID]);
+      
+            return res.status(200).json({
+              message: "เข้าสู่ระบบด้วย Google สำเร็จ",
+              token,
+              user: {
+                id: user.UserID,
+                email: user.Email,
+                username: user.Username,
+              },
+            });
+          } else {
+            // ล็อกอินครั้งแรก → ลงทะเบียนบัญชีใหม่
+            pool.query(
+              "INSERT INTO User (GoogleID, Email, Username, Role, LastLogin, LastLoginIP) VALUES (?, ?, ?, 'user', NOW(), ?)",
+              [googleId, googleEmail, googleUsername, ipAddress],
+              (err, result) => {
+                if (err) {
+                  return res.status(500).json({ message: "เกิดข้อผิดพลาดในการสร้างบัญชี" });
+                }
+      
+                const newUserId = result.insertId;
+                const token = jwt.sign({ id: newUserId, role: "user" }, JWT_SECRET);
+      
+                return res.status(201).json({
+                  message: "สมัครสมาชิกและเข้าสู่ระบบด้วย Google สำเร็จ",
+                  token,
+                  user: {
+                    id: newUserId,
+                    email: googleEmail,
+                    username: googleUsername,
+                  },
+                });
+              }
+            );
+          }
+        });
       }
+      
 
       // 📌 ถ้าผู้ใช้ล็อกอินด้วย Email + Password
       if (!password) {
