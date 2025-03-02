@@ -144,3 +144,7 @@ node_modules/
 
 # Folder Upload Image
 uploads/
+
+*.png
+*.npy
+*.sh
