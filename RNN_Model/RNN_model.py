@@ -42,7 +42,7 @@ def plot_training_history(history):
     plt.legend()
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig('training_history.png')
 
 def plot_predictions(y_true, y_pred, ticker):
     plt.figure(figsize=(10, 6))
