@@ -199,6 +199,12 @@ test_targets_scaled = scaler_target.transform(test_targets_price)  # ใช้ t
 joblib.dump(scaler_features, 'scaler_features.pkl')  # บันทึก scaler ฟีเจอร์
 joblib.dump(scaler_target, 'scaler_target.pkl')     # บันทึก scaler เป้าหมาย
 
+# ✅ บันทึก test set สำหรับใช้งานภายหลัง
+np.save('test_features.npy', test_features_scaled)
+np.save('test_targets.npy', test_targets_scaled)
+
+print("✅ บันทึก test_features.npy และ test_targets.npy สำเร็จ!")
+
 seq_length = 10
 
 # สร้าง sequences แยกตาม Ticker
