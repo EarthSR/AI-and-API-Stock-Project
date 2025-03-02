@@ -47,7 +47,7 @@ def plot_training_history(history):
     plt.legend()
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig('training_history.png')
 
 def plot_predictions(y_true, y_pred, ticker):
     plt.figure(figsize=(10, 6))
@@ -95,18 +95,16 @@ df = pd.read_csv('../merged_stock_sentiment_financial.csv')
 
 df['Sentiment'] = df['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
 
-# เติมค่าที่ขาดหายไป
-df.fillna(method='ffill', inplace=True)
-df.fillna(0, inplace=True)
+
 
 # เพิ่มฟีเจอร์
 df['Change'] = df['Close'] - df['Open']
-df['Change (%)'] = df['Close'].pct_change() * 100
+df['Change (%)'] = df['Close'].pct_change()
+df['Change (%)'] = np.clip(df['Change (%)'], -50, 50)
+df['Change (%)'] *= 100  # ทำให้เป็นเปอร์เซ็นต์
 df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
 df['RSI'].fillna(method='ffill', inplace=True)
 df['RSI'].fillna(0, inplace=True)
-df['SMA_5'] = df['Close'].rolling(window=5).mean()  # SMA 5 วัน
-df['SMA_10'] = df['Close'].rolling(window=10).mean()  # SMA 10 วัน
 df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
 df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
 df['EMA_10'] = df['Close'].ewm(span=10, adjust=False).mean()
@@ -116,11 +114,32 @@ df['MACD_Signal'] = df['MACD'].rolling(window=9).mean()
 bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
 df['Bollinger_High'] = bollinger.bollinger_hband()
 df['Bollinger_Low'] = bollinger.bollinger_lband()
+upper_bound = df["Change (%)"].quantile(0.99)
+lower_bound = df["Change (%)"].quantile(0.01)
+df["Change (%)"] = np.clip(df["Change (%)"], lower_bound, upper_bound)
 
-df.fillna(method='ffill', inplace=True)
+
+# ✅ ใช้ Backward Fill (เติมค่าล่าสุดก่อนหน้า แทนที่จะเติมค่าทุกวัน)
+financial_columns = ['Total Revenue', 'QoQ Growth (%)', 'YoY Growth (%)', 'Net Profit', 
+                     'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 'Gross Margin (%)', 
+                     'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ',
+                     'P/BV Ratio ', 'Dividend Yield (%)']
+# ✅ กรองเฉพาะแถวที่มีข้อมูลงบการเงิน ไม่เอาวันที่ซ้ำกัน
+df_financial = df[['Date', 'Ticker'] + financial_columns].drop_duplicates()
+# ✅ เติมค่าที่ขาดหายไปในงบการเงิน ด้วย Backfill
+df_financial[financial_columns] = df_financial[financial_columns].where(df_financial[financial_columns].ne(0)).bfill()
+
+
+# ✅ ใช้ Forward Fill เฉพาะตัวชี้วัดทางเทคนิคของหุ้น
+stock_columns = ['RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low']
+df[stock_columns] = df[stock_columns].fillna(method='ffill')
+
+# ✅ ตรวจสอบว่าไม่มีค่าซ้ำทุกวัน
+print(df[['Date', 'Ticker', 'Total Revenue', 'Net Profit']].tail(20))
+
 df.fillna(0, inplace=True)
 
-feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment','Total Revenue', 'QoQ Growth (%)',
+feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment','Total Revenue','QoQ Growth (%)', 
                    'YoY Growth (%)', 'Net Profit', 'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 
                    'Gross Margin (%)', 'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ',
                    'P/BV Ratio ', 'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
@@ -141,6 +160,8 @@ train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเข�
 train_df = df[df['Date'] <= train_cutoff].copy()
 test_df = df[df['Date'] > train_cutoff].copy()
 
+train_df.to_csv('train_df.csv', index=False)
+test_df.to_csv('test_df.csv', index=False)
 print("Train cutoff:", train_cutoff)
 print("First date in train set:", train_df['Date'].min())
 print("Last date in train set:", train_df['Date'].max())
@@ -159,14 +180,21 @@ test_features = test_df[feature_columns].values
 train_ticker_id = train_df['Ticker_ID'].values
 test_ticker_id = test_df['Ticker_ID'].values
 
+# 🔎 ค้นหาว่าคอลัมน์ไหนใน train_features มีค่า inf
+for i, col in enumerate(feature_columns):
+    if np.any(np.isinf(train_features[:, i])):
+        print(f"⚠️ พบค่า Infinity ในคอลัมน์: {col}")
+
+
 # สเกลข้อมูลจากชุดฝึก (train) เท่านั้น
 scaler_features = RobustScaler()
 train_features_scaled = scaler_features.fit_transform(train_features)  # ใช้ fit_transform กับชุดฝึก
 test_features_scaled = scaler_features.transform(test_features)  # ใช้ transform กับชุดทดสอบ
 
-scaler_target = RobustScaler()
-train_targets_scaled = scaler_target.fit_transform(train_targets_price)
-test_targets_scaled = scaler_target.transform(test_targets_price)
+scaler_target = MinMaxScaler(feature_range=(-1, 1))
+train_targets_scaled = scaler_target.fit_transform(train_targets_price)  # ใช้ fit_transform กับชุดฝึก
+test_targets_scaled = scaler_target.transform(test_targets_price)  # ใช้ transform กับชุดทดสอบ
+
 
 joblib.dump(scaler_features, 'scaler_features.pkl')  # บันทึก scaler ฟีเจอร์
 joblib.dump(scaler_target, 'scaler_target.pkl')     # บันทึก scaler เป้าหมาย
@@ -267,6 +295,8 @@ history = model.fit(
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
 
+# แสดงกราฟการฝึก
+plot_training_history(history)
 
 model.save('price_prediction_GRU_model_embedding.keras')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
@@ -275,6 +305,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     """
     ฟังก์ชันนี้จะทำการทำนายแบบ walk-forward สำหรับแต่ละ ticker
     พร้อมทั้งรีเทรนโมเดลเล็กน้อย (online learning) และเก็บผลลัพธ์สำหรับการคำนวณ metrics
+    โดยเพิ่มการตรวจเช็คทิศทาง (Up/Down) ของการเปลี่ยนแปลงด้วย
     """
     all_predictions = []
 
@@ -305,12 +336,18 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             pred_change_pct = scaler_target.inverse_transform(pred.reshape(-1, 1))[0][0]
             actual_change_pct = target_data['Change (%)']
             future_date = target_data['Date']
+            
+            # ตรวจเช็คทิศทางของการเปลี่ยนแปลง
+            predicted_direction = "Up" if pred_change_pct >= 0 else "Down"
+            actual_direction = "Up" if actual_change_pct >= 0 else "Down"
 
             all_predictions.append({
                 'Ticker': ticker,
                 'Date': future_date,
                 'Predicted Change (%)': pred_change_pct,
-                'Actual Change (%)': actual_change_pct
+                'Actual Change (%)': actual_change_pct,
+                'Predicted Direction': predicted_direction,
+                'Actual Direction': actual_direction
             })
 
             # รีเทรนโมเดลด้วยข้อมูลจริง (online learning)
@@ -333,15 +370,21 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
         rmse = np.sqrt(mse)
         mape = mean_absolute_percentage_error(actuals, preds)
         r2 = r2_score(actuals, preds)
+        # คำนวณ directional accuracy โดยเปรียบเทียบทิศทางที่ทำนายกับทิศทางจริง
+        direction_accuracy = np.mean((group['Predicted Direction'] == group['Actual Direction']).astype(int))
+        
         metrics_dict[ticker] = {
             'MAE': mae,
             'MSE': mse,
             'RMSE': rmse,
             'MAPE': mape,
             'R2 Score': r2,
+            'Direction Accuracy': direction_accuracy,
             'Dates': group['Date'].tolist(),
             'Actuals': actuals.tolist(),
-            'Predictions': preds.tolist()
+            'Predictions': preds.tolist(),
+            'Predicted Directions': group['Predicted Direction'].tolist(),
+            'Actual Directions': group['Actual Direction'].tolist()
         }
 
     # บันทึกผลการทำนายลง CSV
@@ -371,7 +414,9 @@ for ticker, metrics in results_per_ticker.items():
     print(f"R2 Score: {metrics['R2 Score']:.4f}")
 
 # บันทึกเมตริกส์ลงไฟล์ CSV สำหรับการวิเคราะห์เพิ่มเติม
-metrics_df = pd.DataFrame(results_per_ticker).T
+selected_columns = ['MAE', 'MSE', 'RMSE', 'MAPE', 'R2 Score'] 
+metrics_df = pd.DataFrame.from_dict(results_per_ticker, orient='index')
+filtered_metrics_df = metrics_df[selected_columns]
 metrics_df.to_csv('metrics_per_ticker.csv', index=True)
 print("\nSaved metrics per ticker to 'metrics_per_ticker.csv'")
 
