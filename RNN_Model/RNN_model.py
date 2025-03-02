@@ -11,7 +11,6 @@ import joblib
 import ta
 import logging
 from tensorflow.keras.losses import MeanSquaredError
-from tensorflow.keras.regularizers import l2
 
 
 def create_sequences_for_ticker(features, ticker_ids, targets, seq_length=10):
@@ -43,7 +42,7 @@ def plot_training_history(history):
     plt.legend()
 
     plt.tight_layout()
-    plt.savefig('training_history.png')
+    plt.show()
 
 def plot_predictions(y_true, y_pred, ticker):
     plt.figure(figsize=(10, 6))
@@ -218,8 +217,7 @@ X_test = np.concatenate(X_test_list, axis=0)
 X_test_ticker = np.concatenate(X_test_ticker_list, axis=0)
 y_test = np.concatenate(y_test_list, axis=0)
 
-
-# สร้างโมเดล SimpleRNN
+# สร้างโมเดล RNN (SimpleRNN)
 features_input = Input(shape=(seq_length, len(feature_columns)), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
@@ -228,11 +226,10 @@ ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, na
 
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-# เพิ่ม Regularization และ Dropout
-x = SimpleRNN(64, return_sequences=True, activation='relu', kernel_regularizer=l2(0.01))(merged)  # เพิ่ม L2 regularization
-x = Dropout(0.3)(x)  # เพิ่มค่า Dropout
-x = SimpleRNN(32, activation='relu', kernel_regularizer=l2(0.01))(x)  # เพิ่ม L2 regularization
-x = Dropout(0.3)(x)  # เพิ่มค่า Dropout
+x = SimpleRNN(64, return_sequences=True, activation='relu')(merged)
+x = Dropout(0.2)(x)
+x = SimpleRNN(32, activation='relu')(x)
+x = Dropout(0.2)(x)
 output = Dense(1)(x)
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
@@ -271,7 +268,6 @@ y_test_original = scaler_target.inverse_transform(y_test)
 
 model.save('price_prediction_SimpleRNN_model.keras')
 logging.info("บันทึกโมเดล SimpleRNN ราคาหุ้นรวมเรียบร้อยแล้ว")
-
 
 def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
     """
