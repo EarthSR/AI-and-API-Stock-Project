@@ -224,7 +224,8 @@ X_test = np.concatenate(X_test_list, axis=0)
 X_test_ticker = np.concatenate(X_test_ticker_list, axis=0)
 y_test = np.concatenate(y_test_list, axis=0)
 
-# สร้างโมเดล RNN (SimpleRNN)
+
+# สร้างโมเดล RNN (SimpleRNN) ที่ปรับปรุง
 features_input = Input(shape=(seq_length, len(feature_columns)), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
@@ -233,11 +234,11 @@ ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, na
 
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-# เพิ่ม Regularization และ Dropout
-x = SimpleRNN(64, return_sequences=True, activation='relu', kernel_regularizer=l2(0.01))(merged)  # เพิ่ม L2 regularization
-x = Dropout(0.3)(x)  # เพิ่มค่า Dropout
-x = SimpleRNN(32, activation='relu', kernel_regularizer=l2(0.01))(x)  # เพิ่ม L2 regularization
-x = Dropout(0.3)(x)  # เพิ่มค่า Dropout
+# เพิ่มจำนวนหน่วยใน RNN, Dropout และ L2 Regularization
+x = SimpleRNN(128, return_sequences=True, activation='relu', kernel_regularizer=l2(0.01))(merged)  # ใช้หน่วย 128
+x = Dropout(0.4)(x)  # เพิ่ม Dropout เป็น 0.4
+x = SimpleRNN(64, activation='relu', kernel_regularizer=l2(0.01))(x)  # ใช้หน่วย 64
+x = Dropout(0.4)(x)  # เพิ่ม Dropout เป็น 0.4
 output = Dense(1)(x)
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
@@ -273,9 +274,9 @@ y_pred_scaled = model.predict([X_test, X_test_ticker])
 y_pred = scaler_target.inverse_transform(y_pred_scaled)
 y_test_original = scaler_target.inverse_transform(y_test)
 
-
 model.save('price_prediction_SimpleRNN_model.keras')
 logging.info("บันทึกโมเดล SimpleRNN ราคาหุ้นรวมเรียบร้อยแล้ว")
+
 
 def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
     """
