@@ -6,34 +6,20 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import MinMaxScaler
 
 # ✅ โหลดโมเดลที่ฝึกไว้แล้ว
-model_1 = load_model('model_1.keras')
-model_2 = load_model('model_2.keras')
-model_3 = load_model('model_3.keras')
+model_1 = load_model('./LSTM_model/price_prediction_LSTM_model_embedding.keras')
+model_2 = load_model('./RNN_Model/')
+model_3 = load_model('./GRU_Model/')
 
-df = pd.read_csv('../merged_stock_sentiment_financial.csv')
 # ✅ โหลด Scaler ที่เคยใช้สเกลข้อมูล
 scaler_features = joblib.load('./LSTM_model/scaler_features.pkl')
 scaler_target = joblib.load('./LSTM_model/scaler_target.pkl')
 
-feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment','Total Revenue','QoQ Growth (%)', 
-                   'YoY Growth (%)', 'Net Profit', 'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 
-                   'Gross Margin (%)', 'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ',
-                   'P/BV Ratio ', 'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
-                   'Bollinger_High', 'Bollinger_Low']
+# ✅ โหลดข้อมูลทดสอบ
+test_features = np.load('./RNN_Model/test_features.npy')  # ฟีเจอร์ทดสอบที่เคยใช้
+test_targets = np.load('./RNN_Model/test_targets.npy')  # ค่าจริงที่ต้องทำนาย
 
-
-sorted_dates = df['Date'].unique()
-train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเขตที่ 6 ปี
-
-# ข้อมูล train, test
-train_df = df[df['Date'] <= train_cutoff].copy()
-test_df = df[df['Date'] > train_cutoff].copy()
-
-train_df.to_csv('train_df.csv', index=False)
-test_df.to_csv('test_df.csv', index=False)
-print("Train cutoff:", train_cutoff)
-print("First date in train set:", train_df['Date'].min())
-print("Last date in train set:", train_df['Date'].max())
+# ✅ สเกลข้อมูลเหมือนที่ใช้ฝึก
+test_features_scaled = scaler_features.transform(test_features)
 
 # ✅ ทำนายผลลัพธ์จากแต่ละโมเดล
 y_pred_1 = model_1.predict(test_features_scaled).flatten()
