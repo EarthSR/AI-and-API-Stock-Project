@@ -1,113 +1,63 @@
-import pandas as pd
 import numpy as np
-import tensorflow as tf
 import xgboost as xgb
-import optuna
-import shap
-import h2o
-from h2o.automl import H2OAutoML
-from tpot import TPOTRegressor
-from sklearn.ensemble import RandomForestRegressor
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, Input, Attention
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
-import logging
+import joblib
+from tensorflow.keras.models import load_model
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.preprocessing import MinMaxScaler
 
-# 🔥 1️⃣ ตั้งค่าระบบ Log
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-logger = logging.getLogger()
+# ✅ โหลดโมเดลที่ฝึกไว้แล้ว
+model_1 = load_model('model_1.keras')
+model_2 = load_model('model_2.keras')
+model_3 = load_model('model_3.keras')
 
-# 🚀 2️⃣ โหลดข้อมูล
-logger.info("📥 กำลังโหลดข้อมูล...")
-stock_df = pd.read_csv("Thai_stock.csv")
-news_df = pd.read_csv("Thai_News_WithSentiment_Cleaned_Filter.csv")
-logger.info("✅ โหลดข้อมูลสำเร็จ!")
+df = pd.read_csv('../merged_stock_sentiment_financial.csv')
+# ✅ โหลด Scaler ที่เคยใช้สเกลข้อมูล
+scaler_features = joblib.load('./LSTM_model/scaler_features.pkl')
+scaler_target = joblib.load('./LSTM_model/scaler_target.pkl')
 
-# 🔥 3️⃣ Clean Data
-stock_df["Date"] = pd.to_datetime(stock_df["Date"], errors="coerce")
-news_df["date"] = pd.to_datetime(news_df["date"], errors="coerce")
+feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment','Total Revenue','QoQ Growth (%)', 
+                   'YoY Growth (%)', 'Net Profit', 'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 
+                   'Gross Margin (%)', 'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ',
+                   'P/BV Ratio ', 'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
+                   'Bollinger_High', 'Bollinger_Low']
 
-stock_df.dropna(subset=["Date"], inplace=True)
-news_df.dropna(subset=["date"], inplace=True)
 
-stock_df["Market Cap"].fillna(stock_df["Market Cap"].median(), inplace=True)
+sorted_dates = df['Date'].unique()
+train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเขตที่ 6 ปี
 
-news_df["sentiment"] = pd.to_numeric(news_df["sentiment"], errors="coerce").fillna(0)
-news_df["confidence"] = pd.to_numeric(news_df["confidence"], errors="coerce").fillna(0)
+# ข้อมูล train, test
+train_df = df[df['Date'] <= train_cutoff].copy()
+test_df = df[df['Date'] > train_cutoff].copy()
 
-# 🔥 4️⃣ รวมข้อมูล
-merged_df = stock_df.merge(news_df, left_on="Date", right_on="date", how="left")
-merged_df["Sentiment Weighted"] = merged_df["sentiment"] * merged_df["confidence"]
+train_df.to_csv('train_df.csv', index=False)
+test_df.to_csv('test_df.csv', index=False)
+print("Train cutoff:", train_cutoff)
+print("First date in train set:", train_df['Date'].min())
+print("Last date in train set:", train_df['Date'].max())
 
-# 🔥 5️⃣ Feature Engineering
-merged_df["Log Return"] = np.log(merged_df["Close"] / merged_df["Close"].shift(1))
-merged_df["RSI"] = 100 - (100 / (1 + merged_df["Close"].pct_change().rolling(14).mean()))
-merged_df["MACD"] = merged_df["Close"].ewm(span=12, adjust=False).mean() - merged_df["Close"].ewm(span=26, adjust=False).mean()
+# ✅ ทำนายผลลัพธ์จากแต่ละโมเดล
+y_pred_1 = model_1.predict(test_features_scaled).flatten()
+y_pred_2 = model_2.predict(test_features_scaled).flatten()
+y_pred_3 = model_3.predict(test_features_scaled).flatten()
 
-# 🔥 6️⃣ Feature Selection & Scaling
-features = ["Close", "Volume", "Market Cap", "Sentiment Weighted", "RSI", "MACD"]
-target = "Log Return"
-merged_df.fillna(0, inplace=True)
-scaler = StandardScaler()
-merged_df[features] = scaler.fit_transform(merged_df[features])
+# ✅ รวมผลลัพธ์เป็นฟีเจอร์ของ XGBoost
+X_test_xgb = np.column_stack((y_pred_1, y_pred_2, y_pred_3))
 
-# 🔥 7️⃣ เตรียมข้อมูลสำหรับ Training
-sequence_length = 10
-X, y = [], []
-for i in range(sequence_length, len(merged_df)):
-    X.append(merged_df[features].iloc[i-sequence_length:i].values)
-    y.append(merged_df[target].iloc[i])
+# ✅ โหลดโมเดล XGBoost ที่เคยฝึกไว้
+xgb_model = joblib.load('xgb_meta_learner.pkl')
 
-X = np.array(X)
-y = np.array(y)
+# ✅ ทำนายผลลัพธ์สุดท้ายด้วย XGBoost
+y_pred_xgb = xgb_model.predict(X_test_xgb)
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# ✅ ย้อนกลับค่าที่ทำนายกลับไปสเกลเดิม
+y_pred_final = scaler_target.inverse_transform(y_pred_xgb.reshape(-1, 1))
+y_test_final = scaler_target.inverse_transform(test_targets.reshape(-1, 1))
 
-# 🔥 8️⃣ โมเดล LSTM + Attention Mechanism
-def build_lstm():
-    inputs = Input(shape=(sequence_length, len(features)))
-    x = Bidirectional(LSTM(64, return_sequences=True, activation='tanh'))(inputs)
-    x = Dropout(0.2)(x)
-    x = Bidirectional(LSTM(32, return_sequences=True, activation='tanh'))(x)
-    attention = Attention()([x, x])
-    x = tf.keras.layers.Flatten()(attention)
-    x = Dense(1)(x)
-    model = tf.keras.Model(inputs, x)
-    model.compile(optimizer="adam", loss="mse")
-    return model
+# ✅ ประเมินผลลัพธ์
+mae = mean_absolute_error(y_test_final, y_pred_final)
+mse = mean_squared_error(y_test_final, y_pred_final)
+r2 = r2_score(y_test_final, y_pred_final)
 
-lstm_model = build_lstm()
-lstm_model.fit(X_train, y_train, epochs=25, batch_size=32, validation_data=(X_test, y_test), verbose=1)
-X_train_lstm = lstm_model.predict(X_train)
-X_test_lstm = lstm_model.predict(X_test)
-
-# 🔥 9️⃣ ใช้ AutoML (H2O & TPOT)
-logger.info("⚡ กำลังรัน H2O AutoML...")
-h2o.init()
-h2o_train = h2o.H2OFrame(pd.DataFrame(X_train_lstm))
-h2o_train["y"] = h2o.H2OFrame(pd.DataFrame(y_train))  # ✅ แปลง y_train เป็น H2OFrame
-
-aml = H2OAutoML(max_models=10, seed=42)
-aml.train(y="y", training_frame=h2o_train)
-best_h2o_model = aml.leader
-
-logger.info("⚡ กำลังรัน TPOT AutoML...")
-tpot = TPOTRegressor(generations=5, population_size=20, verbosity=2, random_state=42)
-tpot.fit(X_train_lstm, y_train)
-
-# 🔥 11️⃣ Stacking Model (H2O + TPOT + XGBoost)
-y_pred_h2o = best_h2o_model.predict(h2o.H2OFrame(pd.DataFrame(X_test_lstm))).as_data_frame().values.flatten()
-y_pred_tpot = tpot.predict(X_test_lstm)
-
-# 🔥 12️⃣ แสดงผลลัพธ์
-plt.figure(figsize=(10,5))
-plt.plot(y_test, label="Actual Log Return")
-plt.plot(y_pred_h2o, label="Predicted Log Return (H2O)", linestyle="dashed")
-plt.plot(y_pred_tpot, label="Predicted Log Return (TPOT)", linestyle="dotted")
-plt.legend()
-plt.show()
-
-logger.info(f"🎯 Final RMSE (H2O): {np.sqrt(np.mean((y_test - y_pred_h2o) ** 2)):.5f}")
-logger.info(f"🎯 Final RMSE (TPOT): {np.sqrt(np.mean((y_test - y_pred_tpot) ** 2)):.5f}")
+print(f"✅ MAE: {mae:.4f}")
+print(f"✅ MSE: {mse:.4f}")
+print(f"✅ R2 Score: {r2:.4f}")
