@@ -11,6 +11,7 @@ import joblib
 import ta
 import logging
 from tensorflow.keras.losses import MeanSquaredError
+from tensorflow.keras.regularizers import l2
 
 
 def create_sequences_for_ticker(features, ticker_ids, targets, seq_length=10):
@@ -42,7 +43,7 @@ def plot_training_history(history):
     plt.legend()
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig('training_history.png') 
 
 def plot_predictions(y_true, y_pred, ticker):
     plt.figure(figsize=(10, 6))
@@ -131,6 +132,7 @@ num_tickers = len(ticker_encoder.classes_)
 sorted_dates = df['Date'].unique()
 train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]  # ขอบเขตที่ 6 ปี
 
+
 # ข้อมูล train, test
 train_df = df[df['Date'] <= train_cutoff].copy()
 test_df = df[df['Date'] > train_cutoff].copy()
@@ -174,9 +176,7 @@ test_targets_scaled = scaler_target.transform(test_targets_price)  # ใช้ t
 joblib.dump(scaler_features, 'scaler_features.pkl')  # บันทึก scaler ฟีเจอร์
 joblib.dump(scaler_target, 'scaler_target.pkl')     # บันทึก scaler เป้าหมาย
 
-# ✅ บันทึกไฟล์ .npy
-np.save('train_features.npy', train_features_scaled)
-np.save('train_targets.npy', train_targets_scaled)
+# ✅ บันทึก test set สำหรับใช้งานภายหลัง
 np.save('test_features.npy', test_features_scaled)
 np.save('test_targets.npy', test_targets_scaled)
 
@@ -233,10 +233,11 @@ ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, na
 
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-x = SimpleRNN(64, return_sequences=True, activation='relu')(merged)
-x = Dropout(0.2)(x)
-x = SimpleRNN(32, activation='relu')(x)
-x = Dropout(0.2)(x)
+# เพิ่ม Regularization และ Dropout
+x = SimpleRNN(64, return_sequences=True, activation='relu', kernel_regularizer=l2(0.01))(merged)  # เพิ่ม L2 regularization
+x = Dropout(0.3)(x)  # เพิ่มค่า Dropout
+x = SimpleRNN(32, activation='relu', kernel_regularizer=l2(0.01))(x)  # เพิ่ม L2 regularization
+x = Dropout(0.3)(x)  # เพิ่มค่า Dropout
 output = Dense(1)(x)
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
