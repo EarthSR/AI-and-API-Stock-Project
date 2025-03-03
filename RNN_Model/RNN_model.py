@@ -12,6 +12,7 @@ import ta
 import logging
 from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras.regularizers import l2
+from tensorflow.keras.layers import BatchNormalization, Attention
 
 
 def create_sequences_for_ticker(features, ticker_ids, targets, seq_length=10):
@@ -66,6 +67,14 @@ def plot_residuals(y_true, y_pred, ticker):
     plt.xlabel('Sample')
     plt.ylabel('Residual')
     plt.show()
+
+# --- ฟังก์ชันคำนวณ MAPE แบบปลอดภัย ---
+def safe_mape(y_true, y_pred):
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    mask = y_true != 0
+    if np.sum(mask) == 0:
+        return np.inf
+    return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
 
 # โหลดข้อมูล
 df = pd.read_csv('../merged_stock_sentiment_financial.csv')
@@ -234,26 +243,39 @@ ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, na
 
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-# ชั้น 1: SimpleRNN 128 หน่วย, return_sequences=True, ใช้ L2 regularization และ Dropout 0.3
-x = SimpleRNN(128, return_sequences=True, activation='relu', kernel_regularizer=l2(0.01))(merged)
-x = Dropout(0.3)(x)
-# ชั้น 2: SimpleRNN 96 หน่วย, return_sequences=True
-x = SimpleRNN(96, return_sequences=True, activation='relu', kernel_regularizer=l2(0.01))(x)
-x = Dropout(0.3)(x)
-# ชั้น 3: SimpleRNN 64 หน่วย, ไม่คืน sequence
-x = SimpleRNN(64, activation='relu', kernel_regularizer=l2(0.01))(x)
-x = Dropout(0.3)(x)
+# ชั้น 1: SimpleRNN 256 หน่วย + BatchNormalization + Dropout 0.2
+x = SimpleRNN(256, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.01))(merged)
+x = BatchNormalization()(x)
+x = Dropout(0.2)(x)
+
+# ชั้น 2: SimpleRNN 128 หน่วย
+x = SimpleRNN(128, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.01))(x)
+x = BatchNormalization()(x)
+x = Dropout(0.2)(x)
+
+# ชั้น 3: SimpleRNN 64 หน่วย + Attention Layer
+x = SimpleRNN(64, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.01))(x)
+x = Attention()([x, x])  # เพิ่ม Attention Mechanism
+x = BatchNormalization()(x)
+x = Dropout(0.2)(x)
+
+# ชั้น 4: SimpleRNN 32 หน่วย
+x = SimpleRNN(32, activation='tanh', kernel_regularizer=l2(0.01))(x)
+x = Dropout(0.2)(x)
+
 # ชั้น Dense ซ่อน
-x = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(x)
+x = Dense(16, activation='relu', kernel_regularizer=l2(0.01))(x)
+
 # ชั้น Output
 output = Dense(1)(x)
 
+# สร้างโมเดล
 model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0002),
               loss=MeanSquaredError(),
               metrics=['mae'])
-model.summary()
 
+model.summary()
 # ฝึกโมเดล
 early_stopping = EarlyStopping(monitor='val_loss', patience=200, restore_best_weights=True)
 checkpoint = ModelCheckpoint('best_price_rnn_model.keras', monitor='val_loss', save_best_only=True, mode='min')
