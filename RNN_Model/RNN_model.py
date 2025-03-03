@@ -234,17 +234,24 @@ ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, na
 
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-# เพิ่มจำนวนหน่วยใน RNN, Dropout และ L2 Regularization
-x = SimpleRNN(128, return_sequences=True, activation='relu', kernel_regularizer=l2(0.01))(merged)  # ใช้หน่วย 128
-x = Dropout(0.4)(x)  # เพิ่ม Dropout เป็น 0.4
-x = SimpleRNN(64, activation='relu', kernel_regularizer=l2(0.01))(x)  # ใช้หน่วย 64
-x = Dropout(0.4)(x)  # เพิ่ม Dropout เป็น 0.4
+# ชั้น 1: SimpleRNN 128 หน่วย, return_sequences=True, ใช้ L2 regularization และ Dropout 0.3
+x = SimpleRNN(128, return_sequences=True, activation='relu', kernel_regularizer=l2(0.01))(merged)
+x = Dropout(0.3)(x)
+# ชั้น 2: SimpleRNN 96 หน่วย, return_sequences=True
+x = SimpleRNN(96, return_sequences=True, activation='relu', kernel_regularizer=l2(0.01))(x)
+x = Dropout(0.3)(x)
+# ชั้น 3: SimpleRNN 64 หน่วย, ไม่คืน sequence
+x = SimpleRNN(64, activation='relu', kernel_regularizer=l2(0.01))(x)
+x = Dropout(0.3)(x)
+# ชั้น Dense ซ่อน
+x = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(x)
+# ชั้น Output
 output = Dense(1)(x)
 
 model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
-
-# แสดงสรุปโมเดล
+model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+              loss=MeanSquaredError(),
+              metrics=['mae'])
 model.summary()
 
 # ฝึกโมเดล
@@ -279,45 +286,29 @@ logging.info("บันทึกโมเดล SimpleRNN ราคาหุ้�
 
 
 def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
-    """
-    ฟังก์ชันนี้จะทำการทำนายแบบ walk-forward สำหรับแต่ละ ticker
-    พร้อมทั้งรีเทรนโมเดลเล็กน้อย (online learning) และเก็บผลลัพธ์สำหรับการคำนวณ metrics
-    โดยเพิ่มการตรวจเช็คทิศทาง (Up/Down) ของการเปลี่ยนแปลงด้วย
-    """
     all_predictions = []
-
     tickers = df['Ticker'].unique()
     for ticker in tickers:
         print(f"\nProcessing Ticker: {ticker}")
         ticker_id = ticker_encoder.transform([ticker])[0]
         df_ticker = df[df['Ticker'] == ticker].sort_values('Date').reset_index(drop=True)
-
         if len(df_ticker) < seq_length + 1:
             print(f"Not enough data for ticker {ticker}, skipping...")
             continue
-
-        # Loop ผ่านข้อมูลทีละ sequence (target เป็นวันถัดไป)
         for i in range(len(df_ticker) - seq_length):
             historical_data = df_ticker.iloc[i:i+seq_length]
-            target_data = df_ticker.iloc[i+seq_length]  # target สำหรับพยากรณ์
+            target_data = df_ticker.iloc[i+seq_length]
             features = historical_data[feature_columns].values
             ticker_ids = historical_data['Ticker_ID'].values
-
-            # สเกลฟีเจอร์และจัดรูปแบบข้อมูลให้เป็น 3D input
             features_scaled = scaler_features.transform(features)
             X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
             X_ticker = ticker_ids.reshape(1, seq_length)
-
-            # พยากรณ์ Change (%)
             pred = model.predict([X_features, X_ticker], verbose=0)
-            pred_change_pct = scaler_target.inverse_transform(pred.reshape(-1, 1))[0][0]
+            pred_change_pct = scaler_target.inverse_transform(pred.reshape(-1,1))[0][0]
             actual_change_pct = target_data['Change (%)']
             future_date = target_data['Date']
-            
-            # ตรวจเช็คทิศทางของการเปลี่ยนแปลง
             predicted_direction = "Up" if pred_change_pct >= 0 else "Down"
             actual_direction = "Up" if actual_change_pct >= 0 else "Down"
-
             all_predictions.append({
                 'Ticker': ticker,
                 'Date': future_date,
@@ -326,18 +317,11 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
                 'Predicted Direction': predicted_direction,
                 'Actual Direction': actual_direction
             })
-
-            # รีเทรนโมเดลด้วยข้อมูลจริง (online learning)
             new_target_scaled = scaler_target.transform([[actual_change_pct]])
             model.fit([X_features, X_ticker], new_target_scaled, epochs=3, batch_size=4, verbose=0)
-
             if i % 100 == 0:
                 print(f"  Processing: {i}/{len(df_ticker)-seq_length}")
-
-    # สร้าง DataFrame จากผลการทำนาย
     predictions_df = pd.DataFrame(all_predictions)
-
-    # คำนวณ Metrics สำหรับแต่ละ ticker
     metrics_dict = {}
     for ticker, group in predictions_df.groupby('Ticker'):
         actuals = group['Actual Change (%)'].values
@@ -345,11 +329,9 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
         mae = mean_absolute_error(actuals, preds)
         mse = mean_squared_error(actuals, preds)
         rmse = np.sqrt(mse)
-        mape = mean_absolute_percentage_error(actuals, preds)
+        mape = safe_mape(actuals, preds)
         r2 = r2_score(actuals, preds)
-        # คำนวณ directional accuracy โดยเปรียบเทียบทิศทางที่ทำนายกับทิศทางจริง
         direction_accuracy = np.mean((group['Predicted Direction'] == group['Actual Direction']).astype(int))
-        
         metrics_dict[ticker] = {
             'MAE': mae,
             'MSE': mse,
@@ -363,14 +345,10 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
             'Predicted Directions': group['Predicted Direction'].tolist(),
             'Actual Directions': group['Actual Direction'].tolist()
         }
-
-    # บันทึกผลการทำนายลง CSV
     predictions_df.to_csv('predictions_change_pct.csv', index=False)
     print("\n✅ Saved deduplicated predictions for all tickers to 'predictions_change_pct.csv'")
-
     return predictions_df, metrics_dict
 
-# ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
 predictions_df, results_per_ticker = walk_forward_validation(
     model=load_model('./price_prediction_SimpleRNN_model.keras'),
     df=test_df,
@@ -389,19 +367,16 @@ for ticker, metrics in results_per_ticker.items():
     print(f"MAPE: {metrics['MAPE']:.4f}")
     print(f"R2 Score: {metrics['R2 Score']:.4f}")
 
-# บันทึกเมตริกส์ลงไฟล์ CSV สำหรับการวิเคราะห์เพิ่มเติม
-selected_columns = ['MAE', 'MSE', 'RMSE', 'MAPE', 'R2 Score'] 
+selected_columns = ['MAE', 'MSE', 'RMSE', 'MAPE', 'R2 Score']
 metrics_df = pd.DataFrame.from_dict(results_per_ticker, orient='index')
 filtered_metrics_df = metrics_df[selected_columns]
 metrics_df.to_csv('metrics_per_ticker.csv', index=True)
 print("\nSaved metrics per ticker to 'metrics_per_ticker.csv'")
 
-# รวบรวม Actual และ Prediction ของทุก ticker ลง CSV
 all_data = []
 for ticker, data in results_per_ticker.items():
     for date_val, actual_val, pred_val in zip(data['Dates'], data['Actuals'], data['Predictions']):
         all_data.append([ticker, date_val, actual_val, pred_val])
-
 prediction_df = pd.DataFrame(all_data, columns=['Ticker', 'Date', 'Actual', 'Predicted'])
 prediction_df.to_csv('all_predictions_per_day.csv', index=False)
 print("Saved actual and predicted prices to 'all_predictions_per_day.csv'")
