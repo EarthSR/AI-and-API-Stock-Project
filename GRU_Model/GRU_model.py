@@ -314,15 +314,13 @@ logging.info("เริ่มฝึกโมเดลสำหรับราค
 
 history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
-    epochs=1000,
+    epochs=500,
     batch_size=32,
     verbose=1,
     shuffle=False,
     callbacks=[early_stopping, checkpoint, reduce_lr]
 )
 
-# แสดงกราฟการฝึก
-plot_training_history(history)
 
 model.save('price_prediction_GRU_model_embedding.keras')
 logging.info("บันทึกโมเดลราคาหุ้นรวมเรียบร้อยแล้ว")
