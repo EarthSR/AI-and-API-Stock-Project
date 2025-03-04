@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder, RobustScaler
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import Input, SimpleRNN, Dense, Dropout, Embedding, concatenate
+from tensorflow.keras.layers import Input, SimpleRNN, Dense, Dropout, Embedding, concatenate,Bidirectional
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
@@ -234,47 +234,49 @@ X_test_ticker = np.concatenate(X_test_ticker_list, axis=0)
 y_test = np.concatenate(y_test_list, axis=0)
 
 
-# สร้างโมเดล RNN (SimpleRNN) ที่ปรับปรุง
+
+# Input layer
 features_input = Input(shape=(seq_length, len(feature_columns)), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
+# Embedding layer for tickers
 embedding_dim = 32
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
+# Merge inputs
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-# ชั้น 1: SimpleRNN 256 หน่วย + BatchNormalization + Dropout 0.2
-x = SimpleRNN(256, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.01))(merged)
+# Layer 1: Bidirectional SimpleRNN 256 units + BatchNormalization + Dropout
+x = Bidirectional(SimpleRNN(256, return_sequences=True, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(merged)
 x = BatchNormalization()(x)
-x = Dropout(0.2)(x)
+x = Dropout(0.3)(x)
 
-# ชั้น 2: SimpleRNN 128 หน่วย
-x = SimpleRNN(128, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.01))(x)
+# Layer 2: Bidirectional SimpleRNN 128 units + BatchNormalization + Dropout
+x = Bidirectional(SimpleRNN(128, return_sequences=True, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(x)
 x = BatchNormalization()(x)
-x = Dropout(0.2)(x)
+x = Dropout(0.3)(x)
 
-# ชั้น 3: SimpleRNN 64 หน่วย + Attention Layer
-x = SimpleRNN(64, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.01))(x)
-x = Attention()([x, x])  # เพิ่ม Attention Mechanism
+# Layer 3: Bidirectional SimpleRNN 64 units + Attention + BatchNormalization
+x = Bidirectional(SimpleRNN(64, return_sequences=True, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(x)
+x = Attention()([x, x])  # ใช้ Attention
 x = BatchNormalization()(x)
-x = Dropout(0.2)(x)
+x = Dropout(0.3)(x)
 
-# ชั้น 4: SimpleRNN 32 หน่วย
-x = SimpleRNN(32, activation='tanh', kernel_regularizer=l2(0.01))(x)
-x = Dropout(0.2)(x)
+# Layer 4: Bidirectional SimpleRNN 32 units
+x = Bidirectional(SimpleRNN(32, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(x)
+x = Dropout(0.3)(x)
 
-# ชั้น Dense ซ่อน
-x = Dense(16, activation='relu', kernel_regularizer=l2(0.01))(x)
-
-# ชั้น Output
+# Fully connected layers
+x = Dense(16, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
 output = Dense(1)(x)
 
-# สร้างโมเดล
+# Define Model
 model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0002),
-              loss=MeanSquaredError(),
+model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=0.0001, weight_decay=1e-4),
+              loss=tf.keras.losses.MeanSquaredError(),
               metrics=['mae'])
 
+# Model summary
 model.summary()
 # ฝึกโมเดล
 early_stopping = EarlyStopping(monitor='val_loss', patience=200, restore_best_weights=True)

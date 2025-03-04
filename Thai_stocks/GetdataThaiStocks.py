@@ -34,10 +34,16 @@ for ticker in tickers:
     all_dates = pd.date_range(start=start_date, end=end_date, freq='D')  # ทุกวัน
     ticker_data = ticker_data.reindex(all_dates)
 
+        # 🔹 ใช้ค่า **วันก่อนหน้า** แทน NaN ก่อนเติม 0
+    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']] = (
+    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']]
+    .fillna(method='ffill')
+    .rolling(window=3, min_periods=1).mean()  # ใช้ค่าเฉลี่ย 3 วันก่อนหน้า
+    )
+
     # เติมค่าที่ขาด
     ticker_data['Ticker'] = ticker.replace('.BK', '')  # คงค่า Ticker ในวันที่เพิ่ม
     ticker_data['Market Cap'] = market_cap  # คงค่า Market Cap
-    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']] = ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']].fillna(0)
 
     data_list.append(ticker_data)
 

@@ -4,25 +4,27 @@ import pandas as pd
 # กำหนดรายชื่อหุ้นอเมริกา
 tickers = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
 
-# กำหนดวันที่เริ่มต้นและวันที่สิ้นสุด
+# กำหนดวันที่เริ่มต้นและสิ้นสุด
 start_date = '2018-01-01'
 end_date = '2025-02-28'
 
-# ดึงข้อมูลราคาหุ้นจากวันที่เริ่มต้นถึงวันที่สิ้นสุด
+# ดึงข้อมูลราคาหุ้นจาก yfinance
 data = yf.download(tickers, start=start_date, end=end_date, group_by='ticker')
 
 # สร้าง DataFrame สำหรับแต่ละหุ้น
 data_list = []
 
 for ticker in tickers:
-    # ดึงข้อมูลราคาหุ้น และใช้ .copy() เพื่อป้องกัน SettingWithCopyWarning
+    # ดึงข้อมูลราคาหุ้น และใช้ .copy() ป้องกัน SettingWithCopyWarning
     ticker_data = data[ticker].copy()
     ticker_data['Ticker'] = ticker  # กำหนดค่า Ticker
     
     # ดึงข้อมูล Market Cap
     stock = yf.Ticker(ticker)
     try:
-        market_cap = stock.info.get('marketCap', 'N/A')
+        market_cap = stock.info.get('marketCap', None)
+        if market_cap is None:
+            market_cap = 'N/A'
     except Exception:
         market_cap = 'N/A'
     
@@ -33,11 +35,17 @@ for ticker in tickers:
     all_dates = pd.date_range(start=start_date, end=end_date, freq='D')  # ทุกวัน
     ticker_data = ticker_data.reindex(all_dates)
 
-    # เติมค่าที่ขาด
-    ticker_data['Ticker'] = ticker  # คงค่า Ticker ในวันที่เพิ่ม
-    ticker_data['Market Cap'] = market_cap  # คงค่า Market Cap
-    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']] = ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']].fillna(0)
+    # 🔹 ใช้ค่า **วันก่อนหน้า** แทน NaN ก่อนเติม 0
+    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']] = (
+        ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']]
+        .fillna(method='ffill')
+        .rolling(window=3, min_periods=1).mean()  # ใช้ค่าเฉลี่ย 3 วันก่อนหน้า
+    )
 
+
+    ticker_data['Ticker'] = ticker  # คงค่า Ticker
+    ticker_data['Market Cap'] = market_cap  # คงค่า Market Cap
+    
     data_list.append(ticker_data)
 
 # รวมข้อมูลทั้งหมดเป็น DataFrame เดียว
