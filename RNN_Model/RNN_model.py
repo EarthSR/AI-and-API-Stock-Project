@@ -233,6 +233,9 @@ X_test = np.concatenate(X_test_list, axis=0)
 X_test_ticker = np.concatenate(X_test_ticker_list, axis=0)
 y_test = np.concatenate(y_test_list, axis=0)
 
+from tensorflow.keras.layers import SimpleRNN, Dense, Dropout, Embedding, BatchNormalization, Input, Attention, concatenate
+from tensorflow.keras.models import Model
+import tensorflow as tf
 
 
 # Input layer
@@ -240,9 +243,11 @@ features_input = Input(shape=(seq_length, len(feature_columns)), name='features_
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
 # Embedding layer for tickers
+# Embedding layer for tickers
 embedding_dim = 32
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
+# Merge inputs
 # Merge inputs
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
@@ -271,19 +276,22 @@ x = Dense(16, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0
 output = Dense(1)(x)
 
 # Define Model
+# Define Model
 model = Model(inputs=[features_input, ticker_input], outputs=output)
 model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=0.0001, weight_decay=1e-4),
               loss=tf.keras.losses.MeanSquaredError(),
               metrics=['mae'])
 
 # Model summary
+# Model summary
 model.summary()
-# ฝึกโมเดล
+
 early_stopping = EarlyStopping(monitor='val_loss', patience=200, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_price_rnn_model.keras', monitor='val_loss', save_best_only=True, mode='min')
+checkpoint = ModelCheckpoint('best_price_bidirectional_rnn_model.keras', monitor='val_loss', save_best_only=True, mode='min')
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.0001)
 
-logging.info("เริ่มฝึกโมเดล RNN สำหรับราคาหุ้น")
+# เริ่มการฝึกโมเดล
+logging.info("เริ่มฝึกโมเดล Bidirectional RNN + Attention สำหรับราคาหุ้น")
 
 history = model.fit(
     [X_train, X_train_ticker], y_train,
@@ -305,8 +313,9 @@ y_pred_scaled = model.predict([X_test, X_test_ticker])
 y_pred = scaler_target.inverse_transform(y_pred_scaled)
 y_test_original = scaler_target.inverse_transform(y_test)
 
-model.save('price_prediction_SimpleRNN_model.keras')
-logging.info("บันทึกโมเดล SimpleRNN ราคาหุ้นรวมเรียบร้อยแล้ว")
+# บันทึกโมเดล
+model.save('price_prediction_BidirectionalRNN_Attention_model.keras')
+logging.info("บันทึกโมเดล Bidirectional RNN + Attention ราคาหุ้นรวมเรียบร้อยแล้ว")
 
 
 def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
@@ -374,7 +383,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
     return predictions_df, metrics_dict
 
 predictions_df, results_per_ticker = walk_forward_validation(
-    model=load_model('./price_prediction_SimpleRNN_model.keras'),
+    model=load_model('./price_prediction_BidirectionalRNN_Attention_model.keras'),
     df=test_df,
     feature_columns=feature_columns,
     scaler_features=scaler_features,

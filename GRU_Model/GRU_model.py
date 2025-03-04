@@ -262,29 +262,49 @@ else:
 
 num_feature = train_features_scaled.shape[1]  # จำนวน features ทางเทคนิค
 
-# สร้างโมเดล GRU + Embedding
+from tensorflow.keras.layers import Input, Embedding, GRU, Dense, Dropout, BatchNormalization, Masking, Bidirectional, concatenate
+from tensorflow.keras.models import Model
+from tensorflow.keras.losses import MeanSquaredError
+
+# กำหนดพารามิเตอร์ของโมเดล
+embedding_dim = 32  # ขนาดของ embedding vector
+gru_units = 64  # จำนวนหน่วย GRU
+dropout_rate = 0.2  # อัตราการ Dropout
+
+# Input layer
 features_input = Input(shape=(seq_length, num_feature), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
-print(f"Shape of X_price_train: {X_price_train.shape}")
-print(f"Shape of X_ticker_train: {X_ticker_train.shape}")
-
-
-embedding_dim = 32
+# Embedding Layer สำหรับ ticker
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
+# รวมข้อมูล Feature และ Ticker Embedding
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-x = GRU(64, return_sequences=True)(merged)
-x = Dropout(0.2)(x)
-x = GRU(32)(x)
-x = Dropout(0.2)(x)
-output = Dense(1)(x)
+# Masking Layer (ป้องกันปัญหาค่าศูนย์ที่เกิดจาก Padding)
+masked = Masking(mask_value=0.0)(merged)
 
+# GRU Layers
+x = Bidirectional(GRU(gru_units, return_sequences=True, activation='relu'))(masked)
+x = BatchNormalization()(x)
+x = Dropout(dropout_rate)(x)
+
+x = Bidirectional(GRU(gru_units // 2, activation='relu'))(x)
+x = BatchNormalization()(x)
+x = Dropout(dropout_rate)(x)
+
+# Fully Connected Output Layer
+output = Dense(1, activation='linear')(x)
+
+# สร้างโมเดล
 model = Model(inputs=[features_input, ticker_input], outputs=output)
+
+# คอมไพล์โมเดล
 model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
 
+# แสดงโครงสร้างของโมเดล
 model.summary()
+
 
 early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 checkpoint = ModelCheckpoint('best_price_model.keras', monitor='val_loss', save_best_only=True, mode='min')
@@ -294,7 +314,7 @@ logging.info("เริ่มฝึกโมเดลสำหรับราค
 
 history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
-    epochs=2000,
+    epochs=1000,
     batch_size=32,
     verbose=1,
     shuffle=False,
