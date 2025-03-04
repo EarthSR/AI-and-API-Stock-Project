@@ -142,8 +142,17 @@ def clean_data_based_on_dates(df):
         df.loc[df['Date'] != df['Quarter Date'], col] = None  # ลบข้อมูลในคอลัมน์ที่ไม่ตรงกัน
     return df
 
+
 # เรียกใช้งานฟังก์ชัน Clean
 merged_df = clean_data_based_on_dates(merged_df)
+
+# financial_columns = ['QoQ Growth (%)', 'Total Revenue', 'YoY Growth (%)', 'Net Profit', 
+#         'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 'Gross Margin (%)', 
+#         'Net Profit Margin (%)', 'Debt to Equity (x)', 'P/E Ratio (x)', 'P/BV Ratio (x)', 
+#         'Dividend Yield (%)',
+#         'Debt to Equity ', 'P/E Ratio ', 'P/BV Ratio ']
+# # ลบแถวที่ Close == 0 และไม่มีข้อมูลงบการเงินเลย (ทุกค่าใน financial_columns เป็น NaN)
+# merged_df = merged_df[~((merged_df['Close'] == 0) & (merged_df[financial_columns].isna().all(axis=1)))]
 
 # บันทึกข้อมูลที่รวมแล้วลงไฟล์ CSV
 merged_df.to_csv("merged_stock_sentiment_financial.csv", index=False)
