@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder, RobustScaler
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import Input, SimpleRNN, Dense, Dropout, Embedding, concatenate
+from tensorflow.keras.layers import Input, SimpleRNN, Dense, Dropout, Embedding, concatenate,Bidirectional
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
@@ -237,37 +237,52 @@ from tensorflow.keras.layers import SimpleRNN, Dense, Dropout, Embedding, BatchN
 from tensorflow.keras.models import Model
 import tensorflow as tf
 
+
 # Input layer
 features_input = Input(shape=(seq_length, len(feature_columns)), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
 # Embedding layer for tickers
+# Embedding layer for tickers
 embedding_dim = 32
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
 # Merge inputs
+# Merge inputs
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-x = SimpleRNN(64, return_sequences=True, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01))(merged)
+# Layer 1: Bidirectional SimpleRNN 256 units + BatchNormalization + Dropout
+x = Bidirectional(SimpleRNN(256, return_sequences=True, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(merged)
 x = BatchNormalization()(x)
-x = Dropout(0.1)(x)
+x = Dropout(0.3)(x)
 
-x = SimpleRNN(32, return_sequences=True, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
+# Layer 2: Bidirectional SimpleRNN 128 units + BatchNormalization + Dropout
+x = Bidirectional(SimpleRNN(128, return_sequences=True, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(x)
 x = BatchNormalization()(x)
-x = Dropout(0.1)(x)
+x = Dropout(0.3)(x)
 
-x = SimpleRNN(16, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
-x = Dropout(0.1)(x)
+# Layer 3: Bidirectional SimpleRNN 64 units + Attention + BatchNormalization
+x = Bidirectional(SimpleRNN(64, return_sequences=True, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(x)
+x = Attention()([x, x])  # ใช้ Attention
+x = BatchNormalization()(x)
+x = Dropout(0.3)(x)
+
+# Layer 4: Bidirectional SimpleRNN 32 units
+x = Bidirectional(SimpleRNN(32, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(x)
+x = Dropout(0.3)(x)
+
 # Fully connected layers
 x = Dense(16, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
 output = Dense(1)(x)
 
 # Define Model
+# Define Model
 model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=0.0001, weight_decay=1e-4),
               loss=tf.keras.losses.MeanSquaredError(),
               metrics=['mae'])
 
+# Model summary
 # Model summary
 model.summary()
 
