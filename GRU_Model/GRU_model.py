@@ -13,6 +13,10 @@ import ta
 import logging
 from sklearn.preprocessing import RobustScaler
 from tensorflow.keras.losses import MeanSquaredError
+import tensorflow as tf
+import tensorflow.keras.backend as K
+from tensorflow.keras.models import load_model
+
 
 # # ตั้งค่า logging
 logging.basicConfig(level=logging.INFO, filename='training.log', filemode='a',
@@ -72,6 +76,20 @@ def plot_residuals(y_true, y_pred, ticker):
     plt.tight_layout()
     plt.savefig(f'residuals_{ticker}.png')  # บันทึกกราฟแยกแต่ละหุ้น
     plt.close()
+
+import tensorflow as tf
+import tensorflow.keras.backend as K
+
+# ✅ ลงทะเบียน Loss Function ให้ TensorFlow รู้จัก
+def cosine_similarity_loss(y_true, y_pred):
+    y_true = K.l2_normalize(y_true, axis=-1)
+    y_pred = K.l2_normalize(y_pred, axis=-1)
+    return 1 - K.sum(y_true * y_pred, axis=-1)
+
+# ✅ เพิ่ม Loss Function เข้าไปใน Custom Objects
+tf.keras.utils.get_custom_objects()["cosine_similarity_loss"] = cosine_similarity_loss
+
+
 
 # ตรวจสอบ GPU
 physical_devices = tf.config.list_physical_devices('GPU')
@@ -260,32 +278,51 @@ if len(X_test_list) > 0:
 else:
     X_price_test, X_ticker_test, y_price_test = np.array([]), np.array([]), np.array([])
 
-num_feature = train_features_scaled.shape[1]  # จำนวน features ทางเทคนิค
 
-from tensorflow.keras.layers import Input, Embedding, GRU, Dense, Dropout, BatchNormalization, Masking, Bidirectional, concatenate
+import tensorflow as tf
+from tensorflow.keras.layers import Input, Embedding, GRU, Dense, Dropout, BatchNormalization, Masking, Bidirectional, Conv1D, Flatten, concatenate
 from tensorflow.keras.models import Model
-from tensorflow.keras.losses import MeanSquaredError
+from tensorflow.keras.optimizers.schedules import ExponentialDecay
+import tensorflow.keras.backend as K
+from sklearn.preprocessing import RobustScaler
 
-# กำหนดพารามิเตอร์ของโมเดล
-embedding_dim = 32  # ขนาดของ embedding vector
-gru_units = 64  # จำนวนหน่วย GRU
-dropout_rate = 0.2  # อัตราการ Dropout
+# ✅ ฟังก์ชัน Loss ใหม่ (Cosine Similarity Loss)
+def cosine_similarity_loss(y_true, y_pred):
+    y_true = K.l2_normalize(y_true, axis=-1)
+    y_pred = K.l2_normalize(y_pred, axis=-1)
+    return 1 - K.sum(y_true * y_pred, axis=-1)
 
-# Input layer
+# ✅ กำหนดพารามิเตอร์ของโมเดล
+embedding_dim = 32  
+gru_units = 64  
+dropout_rate = 0.2  
+initial_learning_rate = 0.001  
+
+# ✅ Learning Rate Scheduler
+lr_schedule = ExponentialDecay(initial_learning_rate, decay_steps=1000, decay_rate=0.9, staircase=True)
+optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+
+# ✅ Input layer
+num_feature = len(feature_columns)  # จำนวน features
 features_input = Input(shape=(seq_length, num_feature), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
-# Embedding Layer สำหรับ ticker
+# ✅ Embedding Layer สำหรับ ticker
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
-# รวมข้อมูล Feature และ Ticker Embedding
+# ✅ รวมข้อมูล Feature และ Ticker Embedding
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-# Masking Layer (ป้องกันปัญหาค่าศูนย์ที่เกิดจาก Padding)
+# ✅ Masking Layer (ป้องกัน Padding)
 masked = Masking(mask_value=0.0)(merged)
 
-# GRU Layers
-x = Bidirectional(GRU(gru_units, return_sequences=True, activation='relu'))(masked)
+# ✅ Conv1D Layer (ดึง Pattern จาก Time Series)
+x = Conv1D(filters=64, kernel_size=3, activation='relu', padding='same')(masked)
+x = BatchNormalization()(x)
+x = Dropout(dropout_rate)(x)
+
+# ✅ Bi-GRU Layer (ให้โมเดลเข้าใจบริบทดีขึ้น)
+x = Bidirectional(GRU(gru_units, return_sequences=True, activation='relu'))(x)
 x = BatchNormalization()(x)
 x = Dropout(dropout_rate)(x)
 
@@ -293,17 +330,28 @@ x = Bidirectional(GRU(gru_units // 2, activation='relu'))(x)
 x = BatchNormalization()(x)
 x = Dropout(dropout_rate)(x)
 
-# Fully Connected Output Layer
+# ✅ Flatten ก่อนเข้า Dense
+x = Flatten()(x)
+
+# ✅ Fully Connected Layers
+x = Dense(128, activation='relu')(x)
+x = Dropout(0.2)(x)
+
+x = Dense(64, activation='relu')(x)
+x = Dropout(0.2)(x)
+
+# ✅ Output Layer
 output = Dense(1, activation='linear')(x)
 
-# สร้างโมเดล
+# ✅ สร้างโมเดล
 model = Model(inputs=[features_input, ticker_input], outputs=output)
 
-# คอมไพล์โมเดล
-model.compile(optimizer='adam', loss=MeanSquaredError(), metrics=['mae'])
+# ✅ คอมไพล์โมเดลโดยใช้ Cosine Similarity Loss
+model.compile(optimizer=optimizer, loss=cosine_similarity_loss, metrics=['mae'])
 
-# แสดงโครงสร้างของโมเดล
+# ✅ แสดงโครงสร้างของโมเดล
 model.summary()
+
 
 
 early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
@@ -311,10 +359,9 @@ checkpoint = ModelCheckpoint('best_price_model.keras', monitor='val_loss', save_
 reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.0001)
 
 logging.info("เริ่มฝึกโมเดลสำหรับราคาหุ้นรวม (ใช้ Embedding สำหรับ Ticker)")
-
 history = model.fit(
     [X_price_train, X_ticker_train], y_price_train,
-    epochs=500,
+    epochs=1000,
     batch_size=32,
     verbose=1,
     shuffle=False,
@@ -420,7 +467,7 @@ def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_
 
 # ประเมินผลและพยากรณ์แยกตามแต่ละหุ้นโดยใช้ Walk-Forward Validation
 predictions_df, results_per_ticker = walk_forward_validation(
-    model=load_model('./price_prediction_GRU_model_embedding.keras'),
+    model = load_model('price_prediction_GRU_model_embedding.keras', custom_objects={"cosine_similarity_loss": cosine_similarity_loss}),
     df=test_df,
     feature_columns=feature_columns,
     scaler_features=scaler_features,

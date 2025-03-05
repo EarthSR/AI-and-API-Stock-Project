@@ -13,6 +13,7 @@ import logging
 from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.layers import BatchNormalization, Attention
+from tensorflow.keras.layers import MultiHeadAttention, LayerNormalization
 
 
 def create_sequences_for_ticker(features, ticker_ids, targets, seq_length=10):
@@ -75,6 +76,7 @@ def safe_mape(y_true, y_pred):
     if np.sum(mask) == 0:
         return np.inf
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
+
 
 # โหลดข้อมูล
 df = pd.read_csv('../merged_stock_sentiment_financial.csv')
@@ -233,66 +235,58 @@ X_test = np.concatenate(X_test_list, axis=0)
 X_test_ticker = np.concatenate(X_test_ticker_list, axis=0)
 y_test = np.concatenate(y_test_list, axis=0)
 
-from tensorflow.keras.layers import SimpleRNN, Dense, Dropout, Embedding, BatchNormalization, Input, Attention, concatenate
-from tensorflow.keras.models import Model
-import tensorflow as tf
-
+from tensorflow.keras.layers import Bidirectional
 
 # Input layer
 features_input = Input(shape=(seq_length, len(feature_columns)), name='features_input')
 ticker_input = Input(shape=(seq_length,), name='ticker_input')
 
 # Embedding layer for tickers
-# Embedding layer for tickers
 embedding_dim = 32
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
 # Merge inputs
-# Merge inputs
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 
 # Layer 1: Bidirectional SimpleRNN 256 units + BatchNormalization + Dropout
-x = Bidirectional(SimpleRNN(256, return_sequences=True, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(merged)
+x = Bidirectional(SimpleRNN(256, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.01)))(merged)
 x = BatchNormalization()(x)
 x = Dropout(0.3)(x)
 
 # Layer 2: Bidirectional SimpleRNN 128 units + BatchNormalization + Dropout
-x = Bidirectional(SimpleRNN(128, return_sequences=True, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(x)
+x = Bidirectional(SimpleRNN(128, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.01)))(x)
 x = BatchNormalization()(x)
 x = Dropout(0.3)(x)
 
-# Layer 3: Bidirectional SimpleRNN 64 units + Attention + BatchNormalization
-x = Bidirectional(SimpleRNN(64, return_sequences=True, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(x)
-x = Attention()([x, x])  # ใช้ Attention
-x = BatchNormalization()(x)
+# Layer 3: Bidirectional SimpleRNN 64 units + Multi-Head Attention + LayerNormalization
+x = Bidirectional(SimpleRNN(64, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.01)))(x)
+x = MultiHeadAttention(num_heads=4, key_dim=64)(x, x)  # ใช้ Multi-Head Attention
+x = LayerNormalization()(x)  # ปรับค่าของ Attention ให้อยู่ในช่วงปกติ
 x = Dropout(0.3)(x)
 
 # Layer 4: Bidirectional SimpleRNN 32 units
-x = Bidirectional(SimpleRNN(32, activation='tanh', kernel_regularizer=tf.keras.regularizers.l2(0.01)))(x)
+x = Bidirectional(SimpleRNN(32, activation='tanh', kernel_regularizer=l2(0.01)))(x)
 x = Dropout(0.3)(x)
 
 # Fully connected layers
-x = Dense(16, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
+x = Dense(16, activation='relu', kernel_regularizer=l2(0.01))(x)
 output = Dense(1)(x)
 
 # Define Model
-# Define Model
 model = Model(inputs=[features_input, ticker_input], outputs=output)
-model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=0.0001, weight_decay=1e-4),
+model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=0.00005, weight_decay=1e-5),
               loss=tf.keras.losses.MeanSquaredError(),
               metrics=['mae'])
 
 # Model summary
-# Model summary
 model.summary()
 
-early_stopping = EarlyStopping(monitor='val_loss', patience=200, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_price_bidirectional_rnn_model.keras', monitor='val_loss', save_best_only=True, mode='min')
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.0001)
+# กำหนด Callback เพื่อลด Overfitting
+early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+checkpoint = ModelCheckpoint('best_price_rnn_model.keras', monitor='val_loss', save_best_only=True, mode='min')
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001)
 
 # เริ่มการฝึกโมเดล
-logging.info("เริ่มฝึกโมเดล Bidirectional RNN + Attention สำหรับราคาหุ้น")
-
 history = model.fit(
     [X_train, X_train_ticker], y_train,
     epochs=1000,
@@ -306,16 +300,8 @@ history = model.fit(
 # แสดงกราฟการฝึก
 plot_training_history(history)
 
-# ทำนายค่าจากโมเดล
-y_pred_scaled = model.predict([X_test, X_test_ticker])
-
-# ย้อนกลับค่าที่ทำนาย
-y_pred = scaler_target.inverse_transform(y_pred_scaled)
-y_test_original = scaler_target.inverse_transform(y_test)
-
 # บันทึกโมเดล
-model.save('price_prediction_BidirectionalRNN_Attention_model.keras')
-logging.info("บันทึกโมเดล Bidirectional RNN + Attention ราคาหุ้นรวมเรียบร้อยแล้ว")
+model.save('price_prediction_RNN_Attention_model.keras')
 
 
 def walk_forward_validation(model, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10):
