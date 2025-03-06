@@ -17,7 +17,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
 # ✅ URL ของข่าว
 base_url = 'https://www.investing.com/news/stock-market-news'
-output_filename = "D:/Stock_Project/AI-and-API-Stock-Project/Investing_Folder/USA_News.csv"
+output_filename = "D:/Stock_Project/AI-and-API-Stock-Project/Investing_Folder/investing_news.csv"
 
 # ✅ Lock สำหรับการใช้ Chrome instance
 driver_lock = threading.Lock()
@@ -115,7 +115,7 @@ def save_to_csv(data, filename, write_header=False):
     print(f"💾 บันทึกข่าว {len(data)} ข่าวลง CSV (mode={mode})")
 
 def clean_csv(filename):
-    """ลบข่าวที่ไม่ใช่ของเมื่อวานออกจาก CSV"""
+    """ลบข่าวเก่ากว่า 1 มีนาคม 2025 ออกจาก CSV และ Clean ข่าวซ้ำ พร้อมเรียงลำดับ"""
     if not os.path.exists(filename):
         print("⚠️ ไม่มีไฟล์ CSV ให้ clean")
         return
@@ -127,26 +127,29 @@ def clean_csv(filename):
 
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
 
-    # ✅ คำนวณจำนวนข่าวทั้งหมดก่อน clean
-    total_before_clean = len(df)
+    # ✅ ตั้งค่าให้ลบเฉพาะข่าวที่เก่ากว่า 1 มีนาคม 2025
+    cutoff_date = datetime(2025, 3, 1).date()
+    df_valid_news = df[df['date'].dt.date >= cutoff_date]  # ✅ ข่าวตั้งแต่ 1 มีนาคมขึ้นไป
+    df_old_news = df[df['date'].dt.date < cutoff_date]  # ✅ ข่าวที่เก่ากว่า 1 มีนาคม
 
-    # ✅ แบ่งข่าวเป็น 3 กลุ่ม
-    df_yesterday = df[df['date'].dt.date == yesterday]  # ข่าวของเมื่อวาน
-    df_old_news = df[df['date'].dt.date < yesterday]    # ข่าวที่เก่ากว่าเมื่อวาน
-    df_today_news = df[df['date'].dt.date > yesterday]  # ข่าวของวันนี้
+    # ✅ ลบข่าวซ้ำ โดยพิจารณาจาก 'title' และ 'date'
+    df_valid_news = df_valid_news.drop_duplicates(subset=['title', 'date'], keep='first')
 
-    # ✅ จำนวนข่าวที่ถูกลบ
-    deleted_news = len(df_old_news) + len(df_today_news)
+    # ✅ เรียงลำดับข่าวจากใหม่ไปเก่า
+    df_valid_news = df_valid_news.sort_values(by='date', ascending=False)
 
     # ✅ จำนวนข่าวที่เหลือ
-    total_after_clean = len(df_yesterday)
+    total_after_clean = len(df_valid_news)
 
-    df_yesterday.to_csv(filename, index=False)
+    # ✅ บันทึกไฟล์ CSV ใหม่
+    df_valid_news.to_csv(filename, index=False)
 
     print(f"\n🔍 **Clean CSV Summary** 🔍")
-    print(f"📊 ข่าวทั้งหมดก่อน Clean: {total_before_clean} ข่าว")
-    print(f"🗑️ ข่าวที่ถูกลบ (เก่า + วันนี้): {deleted_news} ข่าว")
-    print(f"✅ ข่าวที่เหลือ (ของ {yesterday}): {total_after_clean} ข่าว")
+    print(f"📊 ข่าวทั้งหมดก่อน Clean: {len(df)} ข่าว")
+    print(f"🗑️ ข่าวที่ถูกลบ (เก่ากว่า {cutoff_date}): {len(df_old_news)} ข่าว")
+    print(f"🧹 ข่าวซ้ำที่ถูกลบ: {len(df) - len(df_valid_news) - len(df_old_news)} ข่าว")
+    print(f"✅ ข่าวที่เหลือ (ของ {cutoff_date} ขึ้นไป): {total_after_clean} ข่าว")
+    print(f"✅ ข่าวถูกจัดเรียงลำดับจากใหม่ไปเก่า!")
 
 def main():
     if os.path.exists(output_filename):
@@ -158,12 +161,13 @@ def main():
     is_first_save = True
     stop_scraping = False  # ✅ เพิ่ม flag ควบคุมการหยุดดึงข่าว
     total_articles = 0  # ✅ ตัวแปรเก็บจำนวนข่าวที่ดึงมาได้ทั้งหมด
+    cutoff_date = datetime(2025, 3, 1).date()  # ✅ ตั้งค่าขั้นต่ำเป็น 1 มีนาคม 2025
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
         futures = []
         for page in range(1, max_pages + 1):
             if stop_scraping:
-                break  # ✅ หยุดดึงข่าวเมื่อพบข่าวเก่ากว่าเมื่อวาน
+                break  # ✅ หยุดดึงข่าวเมื่อพบข่าวเก่ากว่า 1 มีนาคม 2025
 
             futures.append(executor.submit(scrape_page, page))
             
@@ -172,21 +176,32 @@ def main():
                     result = future.result()
                     all_news.extend(result)
 
-                    # ✅ เช็คว่าใน batch มีข่าวเก่ากว่าเมื่อวานหรือไม่
+                    # ✅ เช็คว่าใน batch มีข่าวเก่ากว่า 1 มีนาคม 2025 หรือไม่
                     for item in result:
                         try:
                             news_date = datetime.strptime(item['date'], "%Y-%m-%d %H:%M:%S").date()
-                            if news_date < yesterday:
-                                print(f"⏹️ พบข่าวเก่ากว่า {yesterday}, หยุดดึงข่าวทันที")
-                                save_to_csv(all_news, output_filename, write_header=is_first_save)
+                            if news_date < cutoff_date:
+                                print(f"⏹️ พบข่าวเก่ากว่า {cutoff_date}, หยุดดึงข่าวทันที")
+                                
+                                # ✅ ลบข่าวซ้ำก่อนบันทึกลง CSV
+                                df_all_news = pd.DataFrame(all_news)
+                                df_all_news = df_all_news.drop_duplicates(subset=['title', 'date'], keep='first')
+
+                                save_to_csv(df_all_news.to_dict(orient='records'), output_filename, write_header=is_first_save)
+                                
                                 stop_scraping = True
                                 break
 
                         except ValueError:
                             pass
 
-                save_to_csv(all_news, output_filename, write_header=is_first_save)
-                total_articles += len(all_news)
+                # ✅ ลบข่าวซ้ำก่อนบันทึก CSV
+                df_all_news = pd.DataFrame(all_news)
+                df_all_news = df_all_news.drop_duplicates(subset=['title', 'date'], keep='first')
+
+                save_to_csv(df_all_news.to_dict(orient='records'), output_filename, write_header=is_first_save)
+                
+                total_articles += len(df_all_news)
                 is_first_save = False
                 all_news = []
                 futures = []

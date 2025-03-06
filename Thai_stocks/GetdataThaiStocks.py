@@ -1,5 +1,11 @@
 import yfinance as yf
 import pandas as pd
+import datetime
+import sys
+import os
+
+# ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
+sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
 # กำหนดรายชื่อหุ้นไทย
 tickers = ['ADVANC.BK', 'INTUCH.BK', 'TRUE.BK', 'DITTO.BK', 'DIF.BK', 
@@ -7,7 +13,7 @@ tickers = ['ADVANC.BK', 'INTUCH.BK', 'TRUE.BK', 'DITTO.BK', 'DIF.BK',
 
 # กำหนดวันที่เริ่มต้นและวันที่สิ้นสุด
 start_date = '2018-01-01'
-end_date = '2025-02-28'
+end_date = datetime.datetime.today().strftime('%Y-%m-%d')  # ได้วันที่ปัจจุบันในรูปแบบ YYYY-MM-DD
 
 # ดึงข้อมูลราคาหุ้นจากวันที่เริ่มต้นถึงวันที่สิ้นสุด
 data = yf.download(tickers, start=start_date, end=end_date, group_by='ticker')
@@ -31,7 +37,7 @@ for ticker in tickers:
 
     # รีอินเด็กซ์ให้มีทุกวัน (รวมเสาร์-อาทิตย์)
     ticker_data.index = pd.to_datetime(ticker_data.index)  # แปลงเป็น datetime index
-    all_dates = pd.date_range(start=start_date, end=end_date, freq='D')  # ทุกวัน
+    all_dates = pd.date_range(start=start_date, end=end_date, freq='D')  # ใช้ end_date ที่อัปเดตอัตโนมัติ
     ticker_data = ticker_data.reindex(all_dates)
 
         # 🔹 ใช้ค่า **วันก่อนหน้า** แทน NaN ก่อนเติม 0
@@ -54,7 +60,7 @@ cleaned_data = pd.concat(data_list).reset_index().rename(columns={'index': 'Date
 cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume', 'Market Cap']]
 
 # บันทึกข้อมูลเป็นไฟล์ CSV
-cleaned_data.to_csv('stock_data_with_marketcap_thai.csv', index=False)
+cleaned_data.to_csv('D:\\Stock_Project\\AI-and-API-Stock-Project\\Finbert\\stock_data_with_marketcap_thai.csv', index=False)
 
 # แสดงตัวอย่างข้อมูล
 print(cleaned_data.head())

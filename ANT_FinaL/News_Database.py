@@ -1,9 +1,9 @@
-import os
 import pandas as pd
 import mysql.connector
 from datetime import datetime
 from dotenv import load_dotenv
 import sys
+import os
 
 # ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
@@ -58,12 +58,12 @@ try:
 
     # ✅ ใช้ `INSERT IGNORE` เพื่อลดปัญหาข่าวซ้ำ
     insert_query = """
-    INSERT IGNORE INTO News2 (Title, Content, PublishedDate, Sentiment, ConfidenceScore, URL, Source)
+    INSERT IGNORE INTO News (Title, Content, PublishedDate, Sentiment, ConfidenceScore, URL, Source)
     VALUES (%s, %s, %s, %s, %s, %s, %s)
     """
 
     # ✅ เช็คข่าวที่ยังไม่ได้บันทึกลงฐานข้อมูล
-    cursor.execute("SELECT URL FROM News2")
+    cursor.execute("SELECT URL FROM News")
     existing_urls = set(url[0] for url in cursor.fetchall())
 
     # ✅ คัดกรองข่าวที่ยังไม่ได้บันทึก (ข้ามข่าวที่ซ้ำ)

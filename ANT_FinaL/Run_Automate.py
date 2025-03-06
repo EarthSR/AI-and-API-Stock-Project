@@ -18,6 +18,10 @@ def run_all_scripts():
         ["Finbert/Finbert.py"],  # Step 4 - วิเคราะห์ Sentiment
         ["Finbert/calculate_weighted_sentiment.py"],  # Step 5 - ทำ daily sentiment
         ["ANT_FinaL/News_Database.py"],  # Step 6 - บันทึกลง Database
+        ["American_stocks/GetdataAmericanStock.py"],  # Step 7 - บันทึก USA Stock
+        ["Thai_stocks/GetdataThaiStocks.py"],  # Step 8 - บันทึก Thai Stock
+        ["combine.py"],  # Step 9 - รวมข้อมูลทำ AI
+        ["ANT_FinaL/Stock_Database.py"],  # Step 10 - บันทึกลง Stock ลง Database
     ]
 
     def is_script_exist(script_path):

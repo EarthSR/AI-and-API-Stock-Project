@@ -84,7 +84,14 @@ def calculate_weighted_sentiment(csv_file_path, output_folder="D:\\Stock_Project
 
     # ✅ บันทึกผลลัพธ์แยกตาม `Source`
     for source in sources:
-        file_name = "daily_sentiment_result_th.csv" if "Bangkokpost" in source else "daily_sentiment_result_us.csv"
+        source_lower = source.lower()
+        if "bangkokpost" in source_lower:
+            file_name = "daily_sentiment_result_th.csv"
+        elif "investing" in source_lower:
+            file_name = "daily_sentiment_result_us.csv"
+        else:
+            file_name = "daily_sentiment_result_other.csv"
+
         source_output_file = os.path.join(output_folder, file_name)
         save_to_csv(daily_sentiment_by_source[source], source_output_file)
 
