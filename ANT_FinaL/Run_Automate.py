@@ -28,8 +28,8 @@ def run_all_scripts():
         ["Finbert/Finbert.py"],  # Step 4 - วิเคราะห์ Sentiment
         ["Finbert/calculate_weighted_sentiment.py"],  # Step 5 - ทำ daily sentiment
         ["ANT_Final/News_Database.py"],  # Step 6 - บันทึกลง Database
-        ["ANT_Work/Financial_America_Quarter.py"],  # Step 7 - บันทึก Financial USA
-        ["ANT_Work/Financial_Thai_Quarter.py"],  # Step 8 - บันทึก Financial Thai
+        ["ANT_Final/Financial_America_Quarter.py"],  # Step 7 - บันทึก Financial USA
+        ["ANT_Final/Financial_Thai_Quarter.py"],  # Step 8 - บันทึก Financial Thai
         ["American_stocks/GetdataAmericanStock.py"],  # Step 9 - บันทึก USA Stock
         ["Thai_stocks/GetdataThaiStocks.py"],  # Step 10 - บันทึก Thai Stock
         ["combine.py"],  # Step 11 - รวมข้อมูลทำ AI

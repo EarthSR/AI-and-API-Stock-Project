@@ -158,7 +158,8 @@ def fetch_full_financial_data(stock):
         full_df = full_df[columns_to_keep]
 
         # ✅ แทนที่ "N/A" ด้วยค่าว่าง (null)
-        full_df = full_df.replace("N/A", "")
+        full_df = full_df.replace("N/A", "").infer_objects(copy=False)
+
 
         # ✅ แปลงชื่อคอลัมน์เป็นภาษาอังกฤษ
         full_df = translate_columns(full_df, column_translation)
