@@ -929,6 +929,45 @@ app.put(
   }
 );
 
+//ดึงข้อมูลโปรไฟล์
+app.get("/api/users/:userId/profile", verifyToken, (req, res) => {
+  const userId = req.params.userId;
+
+  // คำสั่ง SQL ดึงข้อมูลโปรไฟล์ของผู้ใช้
+  const getUserProfileSql = `
+    SELECT UserID, Username, Gender, Birthday, ProfileImageURL 
+    FROM User WHERE UserID = ?;
+  `;
+
+  pool.query(getUserProfileSql, [userId], (error, results) => {
+    if (error) {
+      console.error("Error retrieving user profile:", error);
+      return res.status(500).json({ error: "Database error while retrieving user profile" });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // ดึงข้อมูลผู้ใช้ที่พบ
+    const user = results[0];
+
+    // คำนวณอายุจากวันเกิด
+    const age = calculateAge(user.Birthday);
+
+    // ส่งข้อมูลโปรไฟล์กลับไป
+    res.json({
+      userId: user.UserID,
+      username: user.Username,
+      gender: user.Gender,
+      birthday: user.Birthday,
+      age: age,
+      profileImage: user.ProfileImageURL || "No image uploaded"
+    });
+  });
+});
+
+
 // Helper function: แปลงวันเกิดเป็น YYYY-MM-DD
 function formatDateForSQL(dateString) {
   const dateObj = new Date(dateString);
