@@ -13,6 +13,9 @@ from bs4 import BeautifulSoup
 from webdriver_manager.chrome import ChromeDriverManager
 from concurrent.futures import ThreadPoolExecutor
 
+# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+
 # 🔹 ตั้งค่าหมวดหมู่ข่าวที่ต้องการดึง
 NEWS_CATEGORIES = {
     "Business": "https://search.bangkokpost.com/search/result?publishedDate=&q=&category=news&sort=newest&rows=10&refinementFilter=AQhidXNpbmVzcwxjaGFubmVsYWxpYXMBAV4BJA%3D%3D",
@@ -22,8 +25,8 @@ NEWS_CATEGORIES = {
 }
 
 # 🔹 ไฟล์ CSV ที่ใช้เก็บข่าวดิบ และไฟล์ที่ใช้เก็บข่าวที่สะอาด
-RAW_CSV_FILE = "D:/Stock_Project/AI-and-API-Stock-Project/BangkokPost_Folder/Thai_News.csv"
-CLEAN_CSV_FILE = "D:/Stock_Project/AI-and-API-Stock-Project/BangkokPost_Folder/Thai_News_cleaned.csv"
+RAW_CSV_FILE = os.path.join(BASE_DIR, "BangkokPost_Folder", "Thai_News.csv")
+CLEAN_CSV_FILE = os.path.join(BASE_DIR, "BangkokPost_Folder", "Thai_News.csv")
 
 # 🔹 โหลดข่าวที่เคยบันทึกไว้
 def load_existing_titles():

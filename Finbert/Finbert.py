@@ -9,15 +9,23 @@ import sys
 # ✅ บังคับให้ stdout ใช้ UTF-8 และข้ามอีโมจิโดยอัตโนมัติ
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
+# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+
 # ✅ ตรวจสอบ GPU
-print("CUDA Available:", torch.cuda.is_available())
-print("CUDA Version:", torch.version.cuda)
-print("Device Name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU")
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    print("✅ CUDA Available:", torch.cuda.is_available())
+    print("✅ CUDA Version:", torch.version.cuda)
+    print("✅ Device Name:", torch.cuda.get_device_name(0))
+    device = torch.device("cuda")
+else:
+    print("⚠️ No GPU detected, using CPU instead.")
+    device = torch.device("cpu")
+
 print(f"Using device: {device}")
 
-PARTIAL_RESULTS_PATH = "D:\\Stock_Project\\AI-and-API-Stock-Project\\Finbert\\partial_results_gpu.csv"
-FINAL_RESULTS_PATH = "D:\\Stock_Project\\AI-and-API-Stock-Project\\Finbert\\news_with_sentiment_gpu.csv"
+PARTIAL_RESULTS_PATH = os.path.join(BASE_DIR, "Finbert", "partial_results_gpu.csv")
+FINAL_RESULTS_PATH = os.path.join(BASE_DIR, "Finbert", "news_with_sentiment_gpu.csv")
 
 def load_model():
     """ โหลดโมเดล FinBERT """
@@ -46,7 +54,12 @@ def main():
     )
 
     # ✅ โหลดข้อมูลข่าว
-    input_data = pd.read_csv("D:\\Stock_Project\\AI-and-API-Stock-Project\\news_data\\Final_News.csv")
+    input_file_path = os.path.join(BASE_DIR, "news_data", "Final_News.csv")
+
+    if not os.path.exists(input_file_path):
+        raise FileNotFoundError(f"❌ ไม่พบไฟล์: {input_file_path}")
+
+    input_data = pd.read_csv(input_file_path)
 
     # ✅ ตรวจสอบ Column
     required_columns = ['title', 'description', 'date', 'link', 'Source']
@@ -102,9 +115,14 @@ def main():
             print(f"✅ Saved partial results to {PARTIAL_RESULTS_PATH}.")
 
     # ✅ บันทึกผลลัพธ์สุดท้ายพร้อม Header
-    final_results = pd.read_csv(PARTIAL_RESULTS_PATH)
-    final_results.to_csv(FINAL_RESULTS_PATH, index=False, header=True)
-    print(f"✅ Final results saved to {FINAL_RESULTS_PATH}")
+    if os.path.exists(PARTIAL_RESULTS_PATH):
+        final_results = pd.read_csv(PARTIAL_RESULTS_PATH)
+        final_results.to_csv(FINAL_RESULTS_PATH, index=False, header=True)
+        print(f"✅ Final results saved to {FINAL_RESULTS_PATH}")
+    else:
+        print(f"⚠️ ไม่มีผลลัพธ์ให้บันทึกที่ {PARTIAL_RESULTS_PATH}")
+
+        print(f"✅ Final results saved to {FINAL_RESULTS_PATH}")
 
 # ✅ Main entry point
 if __name__ == '__main__':

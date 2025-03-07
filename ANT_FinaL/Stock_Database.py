@@ -12,12 +12,15 @@ sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 # ✅ โหลดตัวแปรจาก .env
 load_dotenv()
 
+# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+
 # ✅ กำหนดพาธของไฟล์ CSV
-MERGED_CSV_PATH = "D:\\Stock_Project\\AI-and-API-Stock-Project\\merged_stock_sentiment_financial.csv"
-MARKETCAP_THAI_CSV = "D:\\Stock_Project\\AI-and-API-Stock-Project\\Finbert\\stock_data_with_marketcap_thai.csv"
-MARKETCAP_USA_CSV = "D:\\Stock_Project\\AI-and-API-Stock-Project\\Finbert\\stock_data_with_marketcap_usa.csv"
-STOCK_CSV_PATH = "D:\\Stock_Project\\AI-and-API-Stock-Project\\Stock.csv"
-STOCK_DETAIL_CSV_PATH = "D:\\Stock_Project\\AI-and-API-Stock-Project\\StockDetail.csv"
+MERGED_CSV_PATH = os.path.join(BASE_DIR, "merged_stock_sentiment_financial.csv")
+MARKETCAP_THAI_CSV = os.path.join(BASE_DIR, "Finbert", "stock_data_with_marketcap_thai.csv")
+MARKETCAP_USA_CSV = os.path.join(BASE_DIR, "Finbert", "stock_data_with_marketcap_usa.csv")
+STOCK_CSV_PATH = os.path.join(BASE_DIR, "Stock.csv")
+STOCK_DETAIL_CSV_PATH = os.path.join(BASE_DIR, "StockDetail.csv")
 
 # ✅ **Dictionary ของ CompanyName และ Market**
 company_dict = {
@@ -96,8 +99,10 @@ stock_detail_data = df[[
     "Date", "StockSymbol", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice", "PERatio", "ROE", "DividendYield",
     "QoQGrowth", "YoYGrowth", "TotalRevenue", "NetProfit", "EPS", "GrossMargin", "NetProfitMargin", "DebtToEquity"
 ]]
-stock_detail_data["PredictionTrend"] = None
-stock_detail_data["PredictionClose"] = None
+stock_detail_data = stock_detail_data.copy()  # ✅ สร้าง Copy ป้องกัน Warning
+stock_detail_data.loc[:, "PredictionTrend"] = None
+stock_detail_data.loc[:, "PredictionClose"] = None
+
 
 # ✅ บันทึกไฟล์ CSV แยกกัน
 print(f"💾 กำลังบันทึกไฟล์ {STOCK_CSV_PATH} ...")

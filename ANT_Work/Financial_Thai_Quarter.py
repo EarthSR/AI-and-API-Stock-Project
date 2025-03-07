@@ -9,6 +9,14 @@ from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from webdriver_manager.chrome import ChromeDriverManager  # ใช้ WebDriverManager
 import re
+import sys
+import os
+
+# ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
+sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+
+# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
 
 # 🔹 ตั้งค่า Chrome options
 options = Options()
@@ -198,7 +206,7 @@ for stock in stocks:
 final_df = pd.concat(all_dfs, ignore_index=True)
 
 # ✅ บันทึกข้อมูลลง CSV
-final_df.to_csv("Financial_Thai_Quarter.csv", index=False, encoding="utf-8-sig")
+final_df.to_csv(os.path.join(BASE_DIR, "Finbert", "Financial_Thai_Quarter.csv"), index=False)
 print("✅ บันทึกข้อมูลลง 'Financial_Thai_Quarter.csv' สำเร็จ!")
 
 # ✅ ปิด WebDriver

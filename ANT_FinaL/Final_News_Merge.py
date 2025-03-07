@@ -3,6 +3,9 @@ import pandas as pd
 from datetime import datetime
 import sys
 
+# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+
 # ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
@@ -54,9 +57,9 @@ def delete_csv_files_in_folder(folder_path, exclude_filename):
             print(f"⚠️ ไม่สามารถลบไฟล์ {file}: {e}")
 
 # 🔹 ตั้งค่าโฟลเดอร์
-bangkokpost_folder = 'D:\\Stock_Project\\AI-and-API-Stock-Project\\BangkokPost_Folder'
-investing_folder = 'D:\\Stock_Project\\AI-and-API-Stock-Project\\Investing_Folder'
-news_data_folder = 'D:\\Stock_Project\\AI-and-API-Stock-Project\\news_data'
+bangkokpost_folder = os.path.join(BASE_DIR, "BangkokPost_Folder")
+investing_folder = os.path.join(BASE_DIR, "Investing_Folder")
+news_data_folder = os.path.join(BASE_DIR, "news_data")
 
 bangkokpost_output_file = os.path.join(news_data_folder, 'Thai_News.csv')
 investing_output_file = os.path.join(news_data_folder, 'USA_News.csv')

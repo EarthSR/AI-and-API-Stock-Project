@@ -17,6 +17,8 @@ import sys
 # ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
+# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
 
 # 🔹 ตั้งค่าหมวดหมู่ข่าวที่ต้องการดึง
 NEWS_CATEGORIES = {
@@ -27,8 +29,8 @@ NEWS_CATEGORIES = {
 }
 
 # 🔹 ไฟล์ CSV
-RAW_CSV_FILE = "D:/Stock_Project/AI-and-API-Stock-Project/BangkokPost_Folder/Thai_News.csv"
-CLEAN_CSV_FILE = "D:/Stock_Project/AI-and-API-Stock-Project/BangkokPost_Folder/Thai_News.csv"
+RAW_CSV_FILE = os.path.join(BASE_DIR, "BangkokPost_Folder", "Thai_News.csv")
+CLEAN_CSV_FILE = os.path.join(BASE_DIR, "BangkokPost_Folder", "Thai_News.csv")
 
 # 🔹 ตั้งค่าวันที่เมื่อวาน (เริ่มที่ 00:00:00)
 yesterday_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
