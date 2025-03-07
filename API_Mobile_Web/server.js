@@ -722,6 +722,188 @@ app.post("/api/google-signin", async (req, res) => {
   }
 });
 
+// ---- Search ---- //
+
+app.get("/api/search", (req, res) => {
+  const { query } = req.query;
+
+  if (!query) {
+    return res.status(400).json({ error: "Search query is required" });
+  }
+
+  // Trim the query และแปลงให้เป็นตัวพิมพ์เล็ก
+  const searchValue = `%${query.trim().toLowerCase()}%`;
+
+  // SQL query เพื่อค้นหาข้อมูลจาก Stock และ StockDetail
+  const searchSql = `
+    SELECT 
+        s.StockSymbol, 
+        s.Market, 
+        s.MarketCap, 
+        s.CompanyName, 
+        sd.Date, 
+        sd.ClosePrice
+    FROM Stock s
+    LEFT JOIN StockDetail sd ON s.StockSymbol = sd.StockSymbol
+    WHERE LOWER(s.StockSymbol) LIKE ? 
+       OR LOWER(s.CompanyName) LIKE ?
+    ORDER BY sd.Date DESC; 
+  `;
+
+  pool.query(searchSql, [searchValue, searchValue], (err, results) => {
+    if (err) {
+      console.error("Database error during search:", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ message: "No results found" });
+    }
+
+    // จัดกลุ่มข้อมูลโดย StockSymbol
+    const groupedResults = results.reduce((acc, stock) => {
+      const existingStock = acc.find((item) => item.StockSymbol === stock.StockSymbol);
+
+      if (existingStock) {
+        // ถ้ามีอยู่แล้ว เพิ่มข้อมูล ClosePrice เข้าไปในรายการราคา
+        existingStock.prices.push({
+          date: stock.Date,
+          close_price: stock.ClosePrice,
+        });
+      } else {
+        // ถ้ายังไม่มี ให้เพิ่ม StockSymbol และรายละเอียดหุ้น
+        acc.push({
+          StockSymbol: stock.StockSymbol,
+          Market: stock.Market,
+          MarketCap: stock.MarketCap,
+          CompanyName: stock.CompanyName,
+          prices: stock.Date
+            ? [
+                {
+                  date: stock.Date,
+                  close_price: stock.ClosePrice,
+                },
+              ]
+            : [], // ถ้าไม่มีราคาหุ้น ให้เป็น array ว่าง
+        });
+      }
+
+      return acc;
+    }, []);
+
+    res.json({ results: groupedResults });
+  });
+});
+
+
+// ---- Profile ---- //
+
+//แก้ไขโปรไฟล์
+app.put(
+  "/api/users/:userId/profile",
+  verifyToken,
+  upload.single("profileImage"),
+  (req, res) => {
+    const userId = req.params.userId;
+
+    // ดึงข้อมูลจาก request body
+    let { username, gender, birthday } = req.body;
+    const profileImage = req.file ? `/uploads/${req.file.filename}` : null;
+
+    // ตรวจสอบว่าค่าที่จำเป็นถูกส่งมาครบหรือไม่
+    if (!username || !gender || !birthday) {
+      return res
+        .status(400)
+        .json({ error: "Fields required: username, gender, and birthday" });
+    }
+
+    // ตรวจสอบรูปแบบวันเกิดให้ถูกต้อง
+    if (isNaN(Date.parse(birthday))) {
+      return res.status(400).json({ error: "Invalid birthday format (YYYY-MM-DD expected)" });
+    }
+
+    // แปลงรูปแบบวันเกิดให้เป็น YYYY-MM-DD
+    birthday = formatDateForSQL(birthday);
+
+    // คำนวณอายุจากวันเกิด
+    const age = calculateAge(birthday);
+
+    // เช็คว่า Username ถูกใช้โดยผู้ใช้อื่นหรือไม่
+    const checkUsernameSql = `SELECT UserID FROM User WHERE Username = ? AND UserID != ?`;
+
+    pool.query(checkUsernameSql, [username, userId], (checkError, checkResults) => {
+      if (checkError) {
+        console.error("Error checking username:", checkError);
+        return res.status(500).json({ error: "Database error while checking username" });
+      }
+
+      if (checkResults.length > 0) {
+        return res.status(400).json({ error: "Username is already in use" });
+      }
+
+      // อัปเดตโปรไฟล์ของผู้ใช้ในฐานข้อมูล
+      let updateProfileSql = `UPDATE User SET Username = ?, Gender = ?, Birthday = ?`;
+      const updateData = [username, gender, birthday];
+
+      // ถ้ามีการอัปโหลดรูปภาพให้เพิ่มเข้าไปใน SQL
+      if (profileImage) {
+        updateProfileSql += `, ProfileImageURL = ?`;
+        updateData.push(profileImage);
+      }
+
+      updateProfileSql += ` WHERE UserID = ?;`;
+      updateData.push(userId);
+
+      // ทำการอัปเดตข้อมูล
+      pool.query(updateProfileSql, updateData, (error, results) => {
+        if (error) {
+          console.error("Error updating profile:", error);
+          return res.status(500).json({ error: "Database error while updating user profile" });
+        }
+
+        if (results.affectedRows === 0) {
+          return res.status(404).json({ error: "User not found" });
+        }
+
+        // ส่งข้อมูลที่อัปเดตกลับไปพร้อมอายุที่คำนวณ
+        res.json({
+          message: "Profile updated successfully",
+          userProfile: {
+            userId,
+            username,
+            gender,
+            birthday,
+            age,
+            profileImage: profileImage || "No image uploaded"
+          }
+        });
+      });
+    });
+  }
+);
+
+// Helper function: แปลงวันเกิดเป็น YYYY-MM-DD
+function formatDateForSQL(dateString) {
+  const dateObj = new Date(dateString);
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0'); // Ensure 2 digits
+  const day = String(dateObj.getDate()).padStart(2, '0'); // Ensure 2 digits
+  return `${year}-${month}-${day}`;
+}
+
+// Helper function: คำนวณอายุจากวันเกิด
+function calculateAge(birthday) {
+  const birthDate = new Date(birthday);
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+    age--; // ลดอายุลง 1 ถ้ายังไม่ถึงวันเกิดปีนี้
+  }
+  return age;
+}
+
+
 
 
 
