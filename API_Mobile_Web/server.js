@@ -116,129 +116,150 @@ const upload = multer({ storage: storage });
   }
 
 //User-Register-Email
-  app.post("/api/register/email", async (req, res) => {
-    try {
-        const { email } = req.body;
-        if (!email) return res.status(400).json({ error: "กรุณากรอกอีเมล" });
+app.post("/api/register/email", async (req, res) => {
+  try {
+      const { email } = req.body;
 
-        pool.query("SELECT * FROM User WHERE Email = ?", [email], (err, results) => {
-            if (err) return res.status(500).json({ error: "Database error" });
+      if (!email) {
+          return res.status(400).json({ error: "กรุณากรอกอีเมล" });
+      }
 
-            if (results.length > 0) {
-                const user = results[0];
+      pool.query("SELECT * FROM User WHERE Email = ?", [email], (err, results) => {
+          if (err) {
+              console.error("Database error during email check:", err);
+              return res.status(500).json({ error: "Database error during email check" });
+          }
 
-                if (user.Status === "active" && user.Password) {
-                    return res.status(400).json({ error: "อีเมลนี้ถูกลงทะเบียนแล้ว" });
-                }
+          if (results.length > 0) {
+              const user = results[0];
 
-                if (user.Status === "deactivated") {
-                    pool.query("UPDATE User SET Status = 'active' WHERE Email = ?", [email]);
-                    return res.status(200).json({ message: "บัญชีของคุณถูกเปิดใช้งานอีกครั้ง" });
-                }
-            }
+              // ถ้า Email นี้เคยลงทะเบียนแล้วและเป็น Active
+              if (user.Status === "active" && user.Password) {
+                  return res.status(400).json({ error: "อีเมลนี้ถูกลงทะเบียนแล้ว" });
+              }
 
-            // สร้าง OTP และกำหนดเวลา Expiry
-            const otp = generateOtp();
-            const expiresAt = new Date(Date.now() + 3 * 60 * 1000); // OTP หมดอายุใน 3 นาที
-            const createdAt = new Date(Date.now());
+              // ถ้าเคยสมัครแต่เป็น deactivated ให้เปิดใช้งานอีกครั้ง
+              if (user.Status === "deactivated") {
+                  pool.query("UPDATE User SET Status = 'active' WHERE Email = ?", [email]);
+                  return res.status(200).json({ message: "บัญชีของคุณถูกเปิดใช้งานอีกครั้ง" });
+              }
+          }
 
-            // Insert ข้อมูลในตาราง User เป็น 'pending'
-            pool.query(
-                "INSERT INTO User (Email, Username, Password, Status) VALUES (?, '', '', 'pending') ON DUPLICATE KEY UPDATE Status = 'pending'",
-                [email],
-                (err) => {
-                    if (err) {
-                        console.error("Database error during User insertion or update:", err);
-                        return res.status(500).json({ error: "Database error during User insertion or update" });
-                    }
+          // **สร้าง OTP และกำหนดเวลา Expiry**
+          const otp = generateOtp();
+          const expiresAt = new Date(Date.now() + 3 * 60 * 1000); // OTP หมดอายุใน 3 นาที
+          const createdAt = new Date(Date.now());
 
-                    // ดึง UserID ใหม่จากฐานข้อมูล
-                    pool.query("SELECT UserID FROM User WHERE Email = ?", [email], (err, userResults) => {
-                        if (err) {
-                            console.error("Database error fetching UserID:", err);
-                            return res.status(500).json({ error: "Database error fetching UserID" });
-                        }
+          // **เพิ่มข้อมูล User ใหม่หากยังไม่มี**
+          pool.query(
+              "INSERT INTO User (Email, Username, Password, Status) VALUES (?, '', '', 'pending') ON DUPLICATE KEY UPDATE Status = 'pending'",
+              [email],
+              (err) => {
+                  if (err) {
+                      console.error("Database error during User insertion or update:", err);
+                      return res.status(500).json({ error: "Database error during User insertion or update" });
+                  }
 
-                        if (userResults.length === 0) {
-                            return res.status(404).json({ error: "UserID not found after insertion" });
-                        }
+                  // **บันทึก OTP เชื่อมกับ Email แทน UserID**
+                  pool.query(
+                      "INSERT INTO OTP (OTP_Code, Created_At, Expires_At, Email) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE OTP_Code = ?, Created_At = ?, Expires_At = ?",
+                      [otp, createdAt, expiresAt, email, otp, createdAt, expiresAt],
+                      (err) => {
+                          if (err) {
+                              console.error("Error during OTP insertion:", err);
+                              return res.status(500).json({ error: "Database error during OTP insertion" });
+                          }
 
-                        const userId = userResults[0].UserID; // ดึง UserID ที่แท้จริง
-
-                        pool.query("INSERT INTO OTP (OTP_Code, Created_At, Expires_At, UserID) VALUES (?, ?, ?, ?)", 
-                            [otp, createdAt, expiresAt, userId], 
-                            (err) => {
-                                if (err) {
-                                    console.error("Error during OTP insertion:", err);
-                                    return res.status(500).json({ error: "Database error during OTP insertion" });
-                                }
-
-                                console.log("OTP inserted successfully");
-                                sendOtpEmail(email, otp, (error) => {
-                                    if (error) return res.status(500).json({ error: "Error sending OTP email" });
-                                    res.status(200).json({ message: "OTP ถูกส่งไปยังอีเมลของคุณ" });
-                                });
-                            }
-                        );
-                    });
-                }
-            );
-        });
-    } catch (error) {
-        res.status(500).json({ error: "Internal server error" });
-    }
+                          console.log("OTP inserted successfully");
+                          sendOtpEmail(email, otp, (error) => {
+                              if (error) return res.status(500).json({ error: "Error sending OTP email" });
+                              res.status(200).json({ message: "OTP ถูกส่งไปยังอีเมลของคุณ" });
+                          });
+                      }
+                  );
+              }
+          );
+      });
+  } catch (error) {
+      console.error("Internal server error:", error);
+      res.status(500).json({ error: "Internal server error" });
+  }
 });
+
 
 //Verify-OTP
 app.post("/api/register/verify-otp", async (req, res) => {
   try {
-    const { userId, otp } = req.body;
+    const { email, otp } = req.body;
     
-    // ตรวจสอบว่า UserID กับ OTP ถูกส่งมาหรือไม่
-    if (!userId || !otp) return res.status(400).json({ error: "UserID หรือ OTP ไม่ถูกต้อง" });
+    // ตรวจสอบว่า Email กับ OTP ถูกส่งมาหรือไม่
+    if (!email || !otp) {
+      return res.status(400).json({ error: "Email หรือ OTP ไม่ถูกต้อง" });
+    }
 
-    // ค้นหา OTP ในฐานข้อมูลโดยใช้ UserID และ OTP
-    pool.query("SELECT * FROM OTP WHERE UserID = ? AND OTP_Code = ?", [userId, otp], (err, results) => {
+    // ค้นหา UserID จาก Email
+    pool.query("SELECT UserID FROM User WHERE Email = ?", [email], (err, userResults) => {
       if (err) return res.status(500).json({ error: "Database error" });
 
-      // ถ้าไม่พบ OTP ในฐานข้อมูล
-      if (results.length === 0) return res.status(400).json({ error: "OTP ไม่ถูกต้อง" });
+      if (userResults.length === 0) {
+        return res.status(404).json({ error: "ไม่พบ Email ในระบบ" });
+      }
 
-      // ตรวจสอบว่า OTP ยังไม่หมดอายุ
-      const { Expires_At } = results[0];
-      if (new Date() > new Date(Expires_At)) return res.status(400).json({ error: "OTP หมดอายุ" });
+      const userId = userResults[0].UserID;
 
-      // ถ้า OTP ถูกต้องและไม่หมดอายุ
-      res.status(200).json({ message: "OTP ถูกต้อง คุณสามารถตั้งรหัสผ่านได้" });
+      // ค้นหา OTP ในฐานข้อมูลโดยใช้ UserID และ OTP
+      pool.query("SELECT * FROM OTP WHERE UserID = ? AND OTP_Code = ?", [userId, otp], (err, otpResults) => {
+        if (err) return res.status(500).json({ error: "Database error" });
+
+        // ถ้าไม่พบ OTP ในฐานข้อมูล
+        if (otpResults.length === 0) {
+          return res.status(400).json({ error: "OTP ไม่ถูกต้อง" });
+        }
+
+        // ตรวจสอบว่า OTP ยังไม่หมดอายุ
+        const { Expires_At } = otpResults[0];
+        if (new Date() > new Date(Expires_At)) {
+          return res.status(400).json({ error: "OTP หมดอายุ" });
+        }
+
+        // ถ้า OTP ถูกต้องและไม่หมดอายุ
+        res.status(200).json({ message: "OTP ถูกต้อง คุณสามารถตั้งรหัสผ่านได้" });
+      });
     });
   } catch (error) {
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
+
 //User-Set-Password
 app.post("/api/register/set-password", async (req, res) => {
   try {
-    const { userId, password } = req.body;
-    
-    if (!userId || !password) {
-      return res.status(400).json({ error: "UserID และ Password ต้องถูกต้อง" });
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email และ Password ต้องถูกต้อง" });
     }
 
     const hash = await bcrypt.hash(password, 10);
 
     // อัปเดตข้อมูลรหัสผ่านในตาราง User
     pool.query(
-      "UPDATE User SET Password = ?, Status = 'active' WHERE UserID = ?",
-      [hash, userId],
-      (err) => {
+      "UPDATE User SET Password = ?, Status = 'active' WHERE Email = ?",
+      [hash, email],
+      (err, results) => {
         if (err) {
           console.error("Database error during User update:", err);
           return res.status(500).json({ error: "Database error during User update" });
         }
 
-        // ลบ OTP ที่เกี่ยวข้องกับ UserID
-        pool.query("DELETE FROM OTP WHERE UserID = ?", [userId], (err) => {
+        // ตรวจสอบว่ามีการอัปเดตรหัสผ่านสำเร็จหรือไม่
+        if (results.affectedRows === 0) {
+          return res.status(404).json({ error: "ไม่พบบัญชีที่ใช้ Email นี้" });
+        }
+
+        // **ลบ OTP ที่เกี่ยวข้องกับ Email**
+        pool.query("DELETE FROM OTP WHERE Email = ?", [email], (err) => {
           if (err) {
             console.error("Error during OTP deletion:", err);
             return res.status(500).json({ error: "Error during OTP deletion" });
@@ -254,39 +275,64 @@ app.post("/api/register/set-password", async (req, res) => {
   }
 });
 
+
 //Resend-OTP
 app.post("/api/resend-otp/register", async (req, res) => {
   try {
-    const { userId } = req.body; // ใช้ UserID แทน Email
-    
-    // ตรวจสอบว่า UserID ถูกส่งมาหรือไม่
-    if (!userId) return res.status(400).json({ error: "UserID ไม่ถูกต้อง" });
+    const { email } = req.body; // ใช้ Email แทน UserID
+
+    // ตรวจสอบว่า Email ถูกส่งมาหรือไม่
+    if (!email) return res.status(400).json({ error: "กรุณากรอกอีเมล" });
 
     const newOtp = generateOtp();
     const newExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // OTP หมดอายุใน 10 นาที
 
-    // ค้นหา UserID ในตาราง OTP และอัปเดต OTP ใหม่
-    pool.query(
-      "UPDATE OTP SET OTP_Code = ?, Expires_At = ? WHERE UserID = ?",
-      [newOtp, newExpiresAt, userId],
-      (err) => {
-        if (err) return res.status(500).json({ error: "Database error" });
+    // ค้นหา Email ในตาราง User เพื่อดึง UserID
+    pool.query("SELECT UserID FROM User WHERE Email = ?", [email], (err, userResults) => {
+      if (err) return res.status(500).json({ error: "Database error during user lookup" });
+      if (userResults.length === 0) return res.status(404).json({ error: "ไม่พบบัญชีที่ใช้ Email นี้" });
 
-        // ส่ง OTP ไปยังอีเมลของผู้ใช้
-        pool.query("SELECT Email FROM User WHERE UserID = ?", [userId], (err, userResults) => {
-          if (err) return res.status(500).json({ error: "Database error during user lookup" });
-          if (userResults.length === 0) return res.status(404).json({ error: "User not found" });
+      const userId = userResults[0].UserID; // ดึง UserID ที่แท้จริง
 
-          const email = userResults[0].Email;
+      // ค้นหา OTP ที่มีอยู่ ถ้ามีให้อัปเดต ถ้าไม่มีให้แทรกใหม่
+      pool.query("SELECT * FROM OTP WHERE UserID = ?", [userId], (err, otpResults) => {
+        if (err) return res.status(500).json({ error: "Database error during OTP check" });
 
-          sendOtpEmail(email, newOtp, (error) => {
-            if (error) return res.status(500).json({ error: "Error sending OTP email" });
-            res.status(200).json({ message: "OTP ถูกส่งใหม่แล้ว" });
-          });
-        });
-      }
-    );
+        if (otpResults.length > 0) {
+          // ถ้ามี OTP อยู่แล้ว อัปเดตข้อมูลใหม่
+          pool.query(
+            "UPDATE OTP SET OTP_Code = ?, Expires_At = ? WHERE UserID = ?",
+            [newOtp, newExpiresAt, userId],
+            (err) => {
+              if (err) return res.status(500).json({ error: "Database error during OTP update" });
+
+              // ส่ง OTP ไปยังอีเมลของผู้ใช้
+              sendOtpEmail(email, newOtp, (error) => {
+                if (error) return res.status(500).json({ error: "Error sending OTP email" });
+                res.status(200).json({ message: "OTP ถูกส่งใหม่แล้ว" });
+              });
+            }
+          );
+        } else {
+          // ถ้าไม่มี OTP อยู่ก่อน ให้แทรกใหม่
+          pool.query(
+            "INSERT INTO OTP (UserID, OTP_Code, Created_At, Expires_At) VALUES (?, ?, NOW(), ?)",
+            [userId, newOtp, newExpiresAt],
+            (err) => {
+              if (err) return res.status(500).json({ error: "Database error during OTP insertion" });
+
+              // ส่ง OTP ไปยังอีเมลของผู้ใช้
+              sendOtpEmail(email, newOtp, (error) => {
+                if (error) return res.status(500).json({ error: "Error sending OTP email" });
+                res.status(200).json({ message: "OTP ถูกส่งใหม่แล้ว" });
+              });
+            }
+          );
+        }
+      });
+    });
   } catch (error) {
+    console.error("Internal error:", error.message);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -296,9 +342,12 @@ app.post("/api/forgot-password", async (req, res) => {
   try {
     const { email } = req.body;
 
-    const userCheckSql =
-      "SELECT * FROM User WHERE Email = ? AND Password IS NOT NULL AND Status = 'active'";
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
 
+    // ตรวจสอบว่ามี Email นี้ในตาราง User และบัญชีต้องเป็น active
+    const userCheckSql = "SELECT UserID FROM User WHERE Email = ? AND Password IS NOT NULL AND Status = 'active'";
     pool.query(userCheckSql, [email], (err, userResults) => {
       if (err) return res.status(500).json({ error: "Database error during email check", details: err });
 
@@ -306,78 +355,40 @@ app.post("/api/forgot-password", async (req, res) => {
         return res.status(400).json({ error: "Email not found or inactive" });
       }
 
-      const userId = userResults[0].UserID;
+      const userId = userResults[0].UserID; // ดึง UserID จาก Email
 
+      // สร้าง OTP ใหม่
       const otp = generateOtp();
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000); 
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // OTP หมดอายุใน 10 นาที
 
-      const otpCheckSql = "SELECT * FROM OTP WHERE UserID = ?";
-      pool.query(otpCheckSql, [userId], (err, otpResults) => {
+      // ตรวจสอบว่า User มี OTP อยู่แล้วหรือไม่
+      pool.query("SELECT * FROM OTP WHERE UserID = ?", [userId], (err, otpResults) => {
         if (err) return res.status(500).json({ error: "Database error during OTP check", details: err });
 
         if (otpResults.length > 0) {
-          const updateOtpSql =
-            "UPDATE OTP SET OTP_Code = ?, Expires_At = ? WHERE UserID = ?";
+          // ถ้ามี OTP อยู่แล้ว ให้ทำการอัปเดต
+          const updateOtpSql = "UPDATE OTP SET OTP_Code = ?, Expires_At = ?, Created_At = NOW() WHERE UserID = ?";
           pool.query(updateOtpSql, [otp, expiresAt, userId], (err) => {
             if (err) return res.status(500).json({ error: "Database error during OTP update", details: err });
 
-            sendOtpEmail(userResults[0].Email, otp, (error) => {
+            sendOtpEmail(email, otp, (error) => {
               if (error) return res.status(500).json({ error: "Error sending OTP email" });
               res.status(200).json({ message: "OTP sent to email" });
             });
           });
         } else {
-          const saveOtpSql =
-            "INSERT INTO OTP (UserID, OTP_Code, Expires_At, Created_At) VALUES (?, ?, ?, ?)";
-          pool.query(saveOtpSql, [userId, otp, expiresAt, new Date()], (err) => {
-            if (err) {
-              return res.status(500).json({ error: "Database error during OTP save", details: err });
-            }
+          // ถ้ายังไม่มี OTP ให้เพิ่มเข้าไป
+          const saveOtpSql = "INSERT INTO OTP (UserID, OTP_Code, Expires_At, Created_At) VALUES (?, ?, ?, NOW())";
+          pool.query(saveOtpSql, [userId, otp, expiresAt], (err) => {
+            if (err) return res.status(500).json({ error: "Database error during OTP save", details: err });
 
-            sendOtpEmail(userResults[0].Email, otp, (error) => {
+            sendOtpEmail(email, otp, (error) => {
               if (error) return res.status(500).json({ error: "Error sending OTP email" });
               res.status(200).json({ message: "OTP sent to email" });
             });
           });
         }
       });
-    });
-  } catch (error) {
-    console.error(error.message);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-//Verify Reset OTP
-app.post("/api/verify-reset-otp", async (req, res) => {
-  try {
-    const { userId, otp } = req.body;
-
-    if (!userId || !otp) {
-      return res.status(400).json({ error: "UserID and OTP are required" });
-    }
-
-    // ค้นหา OTP ในตาราง OTP โดยใช้ UserID และ OTP ที่ส่งมา
-    const verifyOtpSql =
-      "SELECT OTP_Code, Expires_At FROM OTP WHERE UserID = ? AND OTP_Code = ?";
-    pool.query(verifyOtpSql, [userId, otp], (err, results) => {
-      if (err) return res.status(500).json({ error: "Database error" });
-
-      // ถ้าไม่พบ OTP ในฐานข้อมูล
-      if (results.length === 0) {
-        return res.status(400).json({ error: "Invalid OTP or UserID" });
-      }
-
-      const { Expires_At } = results[0];
-      const now = new Date();
-
-      // ตรวจสอบว่า OTP หมดอายุหรือไม่
-      if (now > new Date(Expires_At)) {
-        return res.status(400).json({ error: "OTP has expired" });
-      }
-
-      // ถ้า OTP ถูกต้องและยังไม่หมดอายุ
-      res.status(200).json({ message: "OTP is valid, you can set a new password" });
     });
   } catch (error) {
     console.error("Internal error:", error.message);
@@ -385,82 +396,157 @@ app.post("/api/verify-reset-otp", async (req, res) => {
   }
 });
 
+//Verify Reset OTP
+app.post("/api/verify-reset-otp", async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({ error: "Email และ OTP ต้องถูกต้อง" });
+    }
+
+    // ค้นหา UserID จาก Email ก่อน
+    pool.query("SELECT UserID FROM User WHERE Email = ?", [email], (err, userResults) => {
+      if (err) return res.status(500).json({ error: "Database error during user lookup" });
+      if (userResults.length === 0) return res.status(404).json({ error: "ไม่พบบัญชีที่ใช้ Email นี้" });
+
+      const userId = userResults[0].UserID;
+
+      // ค้นหา OTP ในตาราง OTP โดยใช้ UserID และ OTP ที่ส่งมา
+      pool.query(
+        "SELECT OTP_Code, Expires_At FROM OTP WHERE UserID = ? AND OTP_Code = ?",
+        [userId, otp],
+        (err, results) => {
+          if (err) return res.status(500).json({ error: "Database error during OTP verification" });
+
+          // ถ้าไม่พบ OTP ในฐานข้อมูล
+          if (results.length === 0) {
+            return res.status(400).json({ error: "OTP ไม่ถูกต้อง" });
+          }
+
+          const { Expires_At } = results[0];
+          const now = new Date();
+
+          // ตรวจสอบว่า OTP หมดอายุหรือไม่
+          if (now > new Date(Expires_At)) {
+            return res.status(400).json({ error: "OTP หมดอายุ" });
+          }
+
+          // ถ้า OTP ถูกต้องและยังไม่หมดอายุ
+          res.status(200).json({ message: "OTP ถูกต้อง คุณสามารถตั้งรหัสผ่านใหม่ได้" });
+        }
+      );
+    });
+  } catch (error) {
+    console.error("Internal error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
 // Reset Password
 app.post("/api/reset-password", async (req, res) => {
   try {
-    const { userId, newPassword } = req.body; // ใช้ userId แทน email
+    const { email, newPassword } = req.body;
+
+    if (!email || !newPassword) {
+      return res.status(400).json({ error: "Email และ Password ต้องถูกต้อง" });
+    }
+
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    // อัปเดตรหัสผ่านในตาราง User โดยใช้ UserID
-    pool.query(
-      "UPDATE User SET Password = ?, Status = 'active' WHERE UserID = ?",
-      [hashedPassword, userId],
-      (err) => {
-        if (err) {
-          console.error("Database error during password update:", err);
-          return res.status(500).json({ error: "Database error during password update" });
-        }
+    // ค้นหา UserID จาก Email ก่อน
+    pool.query("SELECT UserID FROM User WHERE Email = ?", [email], (err, userResults) => {
+      if (err) return res.status(500).json({ error: "Database error during user lookup" });
+      if (userResults.length === 0) return res.status(404).json({ error: "ไม่พบบัญชีที่ใช้ Email นี้" });
 
-        // ลบ OTP ที่เกี่ยวข้องกับ UserID จากตาราง OTP
-        pool.query("DELETE FROM OTP WHERE UserID = ?", [userId], (err) => {
+      const userId = userResults[0].UserID;
+
+      // อัปเดตรหัสผ่านในตาราง User
+      pool.query(
+        "UPDATE User SET Password = ?, Status = 'active' WHERE Email = ?",
+        [hashedPassword, email],
+        (err) => {
           if (err) {
-            console.error("Error during OTP deletion:", err);
-            return res.status(500).json({ error: "Error during OTP deletion" });
+            console.error("Database error during password update:", err);
+            return res.status(500).json({ error: "Database error during password update" });
           }
 
-          res.status(200).json({ message: "Password has been updated successfully" });
-        });
-      }
-    );
+          // ลบ OTP ที่เกี่ยวข้องกับ UserID จากตาราง OTP
+          pool.query("DELETE FROM OTP WHERE UserID = ?", [userId], (err) => {
+            if (err) {
+              console.error("Error during OTP deletion:", err);
+              return res.status(500).json({ error: "Error during OTP deletion" });
+            }
+
+            res.status(200).json({ message: "รหัสผ่านถูกตั้งใหม่เรียบร้อยแล้ว" });
+          });
+        }
+      );
+    });
   } catch (error) {
     console.error("Internal server error:", error.message);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
+
 // Resend OTP for Reset Password
 app.post("/api/resend-otp/reset-password", async (req, res) => {
   try {
-    const { userId } = req.body; // ใช้ UserID แทน email
-    if (!userId) {
-      return res.status(400).json({ error: "UserID is required" });
+    const { email } = req.body; 
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
     }
 
-    // ตรวจสอบว่ามี UserID นี้ในตาราง User
-    const userCheckSql = "SELECT * FROM User WHERE UserID = ?";
-    pool.query(userCheckSql, [userId], (err, userResults) => {
-      if (err) return res.status(500).json({ error: "Database error during User check" });
+    // ตรวจสอบว่ามี Email นี้ในตาราง User
+    const userCheckSql = "SELECT UserID FROM User WHERE Email = ?";
+    pool.query(userCheckSql, [email], (err, userResults) => {
+      if (err) return res.status(500).json({ error: "Database error during user lookup" });
       if (userResults.length === 0) return res.status(404).json({ error: "User not found" });
+
+      const userId = userResults[0].UserID; // ดึง UserID จาก Email
 
       // สร้าง OTP ใหม่
       const otp = generateOtp();
       const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // OTP หมดอายุใน 10 นาที
 
-      // อัปเดต OTP ในตาราง OTP โดยใช้ UserID
-      const updateOtpSql = "UPDATE OTP SET OTP_Code = ?, Expires_At = ? WHERE UserID = ?";
-      pool.query(updateOtpSql, [otp, expiresAt, userId], (err) => {
-        if (err) return res.status(500).json({ error: "Database error during OTP update" });
+      // ตรวจสอบว่า User มี OTP อยู่แล้วหรือไม่
+      pool.query("SELECT * FROM OTP WHERE UserID = ?", [userId], (err, otpResults) => {
+        if (err) return res.status(500).json({ error: "Database error during OTP lookup" });
 
-        // ส่ง OTP ไปยังอีเมลของผู้ใช้
-        pool.query("SELECT Email FROM User WHERE UserID = ?", [userId], (err, userResults) => {
-          if (err) return res.status(500).json({ error: "Database error during user lookup" });
-          if (userResults.length === 0) return res.status(404).json({ error: "User not found" });
+        if (otpResults.length > 0) {
+          // ถ้ามี OTP อยู่แล้ว ให้ทำการอัปเดต
+          const updateOtpSql = "UPDATE OTP SET OTP_Code = ?, Expires_At = ? WHERE UserID = ?";
+          pool.query(updateOtpSql, [otp, expiresAt, userId], (err) => {
+            if (err) return res.status(500).json({ error: "Database error during OTP update" });
 
-          const email = userResults[0].Email;
-
-          // ส่ง OTP ไปยังอีเมล
-          sendOtpEmail(email, otp, (error) => {
-            if (error) return res.status(500).json({ error: "Error sending OTP email" });
-            res.status(200).json({ message: "New OTP sent to email" });
+            sendOtpEmail(email, otp, (error) => {
+              if (error) return res.status(500).json({ error: "Error sending OTP email" });
+              res.status(200).json({ message: "New OTP sent to email" });
+            });
           });
-        });
+        } else {
+          // ถ้ายังไม่มี OTP ให้เพิ่มเข้าไป
+          const insertOtpSql = "INSERT INTO OTP (UserID, OTP_Code, Created_At, Expires_At) VALUES (?, ?, NOW(), ?)";
+          pool.query(insertOtpSql, [userId, otp, expiresAt], (err) => {
+            if (err) return res.status(500).json({ error: "Database error during OTP insert" });
+
+            sendOtpEmail(email, otp, (error) => {
+              if (error) return res.status(500).json({ error: "Error sending OTP email" });
+              res.status(200).json({ message: "New OTP sent to email" });
+            });
+          });
+        }
       });
     });
   } catch (error) {
-    console.error(error.message);
+    console.error("Internal error:", error.message);
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 //Login
 app.post("/api/login", async (req, res) => {
@@ -722,7 +808,253 @@ app.post("/api/google-signin", async (req, res) => {
   }
 });
 
+// ---- Search ---- //
 
+app.get("/api/search", (req, res) => {
+  const { query } = req.query;
+
+  if (!query) {
+    return res.status(400).json({ error: "Search query is required" });
+  }
+
+  // Trim the query และแปลงให้เป็นตัวพิมพ์เล็ก
+  const searchValue = `%${query.trim().toLowerCase()}%`;
+
+  // SQL query เพื่อค้นหาข้อมูลจาก Stock และ StockDetail
+  const searchSql = `
+    SELECT 
+        s.StockSymbol, 
+        s.Market, 
+        s.MarketCap, 
+        s.CompanyName, 
+        sd.Date, 
+        sd.ClosePrice
+    FROM Stock s
+    LEFT JOIN StockDetail sd ON s.StockSymbol = sd.StockSymbol
+    WHERE LOWER(s.StockSymbol) LIKE ? 
+       OR LOWER(s.CompanyName) LIKE ?
+    ORDER BY sd.Date DESC; 
+  `;
+
+  pool.query(searchSql, [searchValue, searchValue], (err, results) => {
+    if (err) {
+      console.error("Database error during search:", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ message: "No results found" });
+    }
+
+    // จัดกลุ่มข้อมูลโดย StockSymbol
+    const groupedResults = results.reduce((acc, stock) => {
+      const existingStock = acc.find((item) => item.StockSymbol === stock.StockSymbol);
+
+      if (existingStock) {
+        // ถ้ามีอยู่แล้ว เพิ่มข้อมูล ClosePrice เข้าไปในรายการราคา
+        existingStock.prices.push({
+          date: stock.Date,
+          close_price: stock.ClosePrice,
+        });
+      } else {
+        // ถ้ายังไม่มี ให้เพิ่ม StockSymbol และรายละเอียดหุ้น
+        acc.push({
+          StockSymbol: stock.StockSymbol,
+          Market: stock.Market,
+          MarketCap: stock.MarketCap,
+          CompanyName: stock.CompanyName,
+          prices: stock.Date
+            ? [
+                {
+                  date: stock.Date,
+                  close_price: stock.ClosePrice,
+                },
+              ]
+            : [], // ถ้าไม่มีราคาหุ้น ให้เป็น array ว่าง
+        });
+      }
+
+      return acc;
+    }, []);
+
+    res.json({ results: groupedResults });
+  });
+});
+
+
+// ---- Profile ---- //
+
+//แก้ไขโปรไฟล์
+app.put(
+  "/api/users/:userId/profile",
+  verifyToken,
+  upload.single("profileImage"),
+  (req, res) => {
+    const userId = req.params.userId;
+
+    // ดึงข้อมูลจาก request body
+    let { username, gender, birthday } = req.body;
+    const profileImage = req.file ? `/uploads/${req.file.filename}` : null;
+
+    // ตรวจสอบว่าค่าที่จำเป็นถูกส่งมาครบหรือไม่
+    if (!username || !gender || !birthday) {
+      return res
+        .status(400)
+        .json({ error: "Fields required: username, gender, and birthday" });
+    }
+
+    // ตรวจสอบรูปแบบวันเกิดให้ถูกต้อง
+    if (isNaN(Date.parse(birthday))) {
+      return res.status(400).json({ error: "Invalid birthday format (YYYY-MM-DD expected)" });
+    }
+
+    // แปลงรูปแบบวันเกิดให้เป็น YYYY-MM-DD
+    birthday = formatDateForSQL(birthday);
+
+    // คำนวณอายุจากวันเกิด
+    const age = calculateAge(birthday);
+
+    // เช็คว่า Username ถูกใช้โดยผู้ใช้อื่นหรือไม่
+    const checkUsernameSql = `SELECT UserID FROM User WHERE Username = ? AND UserID != ?`;
+
+    pool.query(checkUsernameSql, [username, userId], (checkError, checkResults) => {
+      if (checkError) {
+        console.error("Error checking username:", checkError);
+        return res.status(500).json({ error: "Database error while checking username" });
+      }
+
+      if (checkResults.length > 0) {
+        return res.status(400).json({ error: "Username is already in use" });
+      }
+
+      // อัปเดตโปรไฟล์ของผู้ใช้ในฐานข้อมูล
+      let updateProfileSql = `UPDATE User SET Username = ?, Gender = ?, Birthday = ?`;
+      const updateData = [username, gender, birthday];
+
+      // ถ้ามีการอัปโหลดรูปภาพให้เพิ่มเข้าไปใน SQL
+      if (profileImage) {
+        updateProfileSql += `, ProfileImageURL = ?`;
+        updateData.push(profileImage);
+      }
+
+      updateProfileSql += ` WHERE UserID = ?;`;
+      updateData.push(userId);
+
+      // ทำการอัปเดตข้อมูล
+      pool.query(updateProfileSql, updateData, (error, results) => {
+        if (error) {
+          console.error("Error updating profile:", error);
+          return res.status(500).json({ error: "Database error while updating user profile" });
+        }
+
+        if (results.affectedRows === 0) {
+          return res.status(404).json({ error: "User not found" });
+        }
+
+        // ส่งข้อมูลที่อัปเดตกลับไปพร้อมอายุที่คำนวณ
+        res.json({
+          message: "Profile updated successfully",
+          userProfile: {
+            userId,
+            username,
+            gender,
+            birthday,
+            age,
+            profileImage: profileImage || "No image uploaded"
+          }
+        });
+      });
+    });
+  }
+);
+
+//ดึงข้อมูลโปรไฟล์
+app.get("/api/users/:userId/profile", verifyToken, (req, res) => {
+  const userId = req.params.userId;
+
+  // คำสั่ง SQL ดึงข้อมูลโปรไฟล์ของผู้ใช้
+  const getUserProfileSql = `
+    SELECT UserID, Username, Gender, Birthday, ProfileImageURL 
+    FROM User WHERE UserID = ?;
+  `;
+
+  pool.query(getUserProfileSql, [userId], (error, results) => {
+    if (error) {
+      console.error("Error retrieving user profile:", error);
+      return res.status(500).json({ error: "Database error while retrieving user profile" });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // ดึงข้อมูลผู้ใช้ที่พบ
+    const user = results[0];
+
+    // คำนวณอายุจากวันเกิด
+    const age = calculateAge(user.Birthday);
+
+    // ส่งข้อมูลโปรไฟล์กลับไป
+    res.json({
+      userId: user.UserID,
+      username: user.Username,
+      gender: user.Gender,
+      birthday: user.Birthday,
+      age: age,
+      profileImage: user.ProfileImageURL || "No image uploaded"
+    });
+  });
+});
+
+
+// Helper function: แปลงวันเกิดเป็น YYYY-MM-DD
+function formatDateForSQL(dateString) {
+  const dateObj = new Date(dateString);
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0'); // Ensure 2 digits
+  const day = String(dateObj.getDate()).padStart(2, '0'); // Ensure 2 digits
+  return `${year}-${month}-${day}`;
+}
+
+// Helper function: คำนวณอายุจากวันเกิด
+function calculateAge(birthday) {
+  const birthDate = new Date(birthday);
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+    age--; // ลดอายุลง 1 ถ้ายังไม่ถึงวันเกิดปีนี้
+  }
+  return age;
+}
+
+// ----Noti---- //
+
+app.get("/api/news-notifications", verifyToken, (req, res) => {
+  const today = new Date().toISOString().split("T")[0]; // ดึงวันที่ปัจจุบัน (YYYY-MM-DD)
+  
+  const fetchNewsNotificationsSql = `
+    SELECT 
+      n.Title, 
+      n.PublishedDate
+    FROM News n
+    WHERE DATE(n.PublishedDate) = ?
+    ORDER BY n.PublishedDate DESC;
+  `;
+
+  pool.query(fetchNewsNotificationsSql, [today], (error, results) => {
+    if (error) {
+      console.error("Database error during fetching news notifications:", error);
+      return res.status(500).json({ error: "Error fetching news notifications" });
+    }
+
+    res.json({ 
+      message: "ข่าวสารประจำวันที่", 
+      date: today, 
+      news: results 
+    });
+  });
+});
 
 
 // Start the server
