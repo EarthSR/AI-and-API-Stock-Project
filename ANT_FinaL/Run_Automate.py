@@ -34,6 +34,7 @@ def run_all_scripts():
         ["Thai_stocks/GetdataThaiStocks.py"],  # Step 10 - บันทึก Thai Stock
         ["combine.py"],  # Step 11 - รวมข้อมูลทำ AI
         ["ANT_Final/Stock_Database.py"],  # Step 12 - บันทึกลง Stock ลง Database
+        ["ANT_Final/GDP_Database.py"],  # Step 13 - บันทึกลง GDP ลง Database
     ]
 
     def is_script_exist(script_path):

@@ -50,7 +50,13 @@ company_dict = {
 def load_marketcap_data(filepath):
     df = pd.read_csv(filepath)
     df = df.rename(columns={"Ticker": "StockSymbol", "Market Cap": "MarketCap"})
-    df = df[["StockSymbol", "Date", "MarketCap"]]
+    # ✅ คำนวณ Change (%) จาก Open และ Close
+    df["Change"] = df["Close"] - df["Open"]
+    df["Change (%)"] = (df["Change"] / df["Open"]) * 100
+
+    # ✅ เลือกเฉพาะคอลัมน์ที่จำเป็น
+    df = df[["StockSymbol", "Date", "MarketCap", "Change (%)"]]
+
     return df
 
 marketcap_thai_df = load_marketcap_data(MARKETCAP_THAI_CSV)
@@ -88,7 +94,9 @@ df["CompanyName"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknow
 df["Market"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown"))[1])
 
 # ✅ ผสม MarketCap ให้ตรงกับ StockSymbol และ Date
-df = df.merge(marketcap_df, on=["StockSymbol", "Date"], how="left")
+df = df.merge(marketcap_df[["StockSymbol", "Date", "MarketCap", "Change (%)"]], 
+              on=["StockSymbol", "Date"], how="left")
+
 
 # ✅ จัดการค่า NaN เพื่อให้สอดคล้องกับ Database
 df = df.where(pd.notna(df), None)  # แปลง NaN เป็น None เพื่อใช้กับ MySQL
@@ -97,8 +105,10 @@ df = df.where(pd.notna(df), None)  # แปลง NaN เป็น None เพ�
 stock__data = df[["StockSymbol", "Market", "MarketCap", "CompanyName"]].drop_duplicates(subset=["StockSymbol"], keep="last")
 stock_detail_data = df[[
     "Date", "StockSymbol", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice", "PERatio", "ROE", "DividendYield",
-    "QoQGrowth", "YoYGrowth", "TotalRevenue", "NetProfit", "EPS", "GrossMargin", "NetProfitMargin", "DebtToEquity"
+    "QoQGrowth", "YoYGrowth", "TotalRevenue", "NetProfit", "EPS", "GrossMargin", "NetProfitMargin", "DebtToEquity",
+    "Change (%)", "Volume"  # ✅ เพิ่ม Change (%) และ Volume
 ]]
+
 stock_detail_data = stock_detail_data.copy()  # ✅ สร้าง Copy ป้องกัน Warning
 stock_detail_data.loc[:, "PredictionTrend"] = None
 stock_detail_data.loc[:, "PredictionClose"] = None
@@ -137,23 +147,24 @@ try:
     ON DUPLICATE KEY UPDATE Market=VALUES(Market), MarketCap=VALUES(MarketCap), CompanyName=VALUES(CompanyName)
     """
 
-    stock_values = convert_nan_to_none(stock__data.values.tolist())
-    cursor.executemany(insert_stock_query, stock_values)
-    print(f"✅ บันทึกข้อมูลลง Stock: {len(stock_values)} รายการ")
+    # ✅ แปลงค่า Volume เป็น int ก่อนบันทึกลงฐานข้อมูล
+    stock_detail_data["Volume"] = stock_detail_data["Volume"].replace([np.inf, -np.inf], np.nan).fillna(0).astype(int)
 
     # ✅ **บันทึกข้อมูลลง StockDetail**
     insert_stock_detail_query = """
     INSERT INTO StockDetail (
         Date, StockSymbol, OpenPrice, HighPrice, LowPrice, ClosePrice, PERatio, ROE, DividendYield,
-        QoQGrowth, YoYGrowth, TotalRevenue, NetProfit, EPS, GrossMargin, NetProfitMargin, DebtToEquity, PredictionTrend, PredictionClose
+        QoQGrowth, YoYGrowth, TotalRevenue, NetProfit, EPS, GrossMargin, NetProfitMargin, DebtToEquity,
+        `Change (%)`, Volume, PredictionTrend, PredictionClose
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE 
         OpenPrice=VALUES(OpenPrice), HighPrice=VALUES(HighPrice), LowPrice=VALUES(LowPrice), 
         ClosePrice=VALUES(ClosePrice), PERatio=VALUES(PERatio), ROE=VALUES(ROE), DividendYield=VALUES(DividendYield),
         QoQGrowth=VALUES(QoQGrowth), YoYGrowth=VALUES(YoYGrowth), TotalRevenue=VALUES(TotalRevenue), 
         NetProfit=VALUES(NetProfit), EPS=VALUES(EPS), GrossMargin=VALUES(GrossMargin), 
         NetProfitMargin=VALUES(NetProfitMargin), DebtToEquity=VALUES(DebtToEquity),
+        `Change (%)`=VALUES(`Change (%)`), Volume=VALUES(Volume),
         PredictionTrend=VALUES(PredictionTrend), PredictionClose=VALUES(PredictionClose);
     """
     
