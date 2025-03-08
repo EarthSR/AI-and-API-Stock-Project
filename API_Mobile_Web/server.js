@@ -161,22 +161,42 @@ app.post("/api/register/email", async (req, res) => {
                   }
 
                   // **บันทึก OTP เชื่อมกับ Email แทน UserID**
-                  pool.query(
-                      "INSERT INTO OTP (OTP_Code, Created_At, Expires_At, Email) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE OTP_Code = ?, Created_At = ?, Expires_At = ?",
-                      [otp, createdAt, expiresAt, email, otp, createdAt, expiresAt],
-                      (err) => {
-                          if (err) {
-                              console.error("Error during OTP insertion:", err);
-                              return res.status(500).json({ error: "Database error during OTP insertion" });
-                          }
-
-                          console.log("OTP inserted successfully");
-                          sendOtpEmail(email, otp, (error) => {
-                              if (error) return res.status(500).json({ error: "Error sending OTP email" });
-                              res.status(200).json({ message: "OTP ถูกส่งไปยังอีเมลของคุณ" });
-                          });
+// ดึง UserID จาก Email ก่อน
+                pool.query(
+                  "SELECT UserID FROM User WHERE Email = ?",
+                  [email],
+                  (err, results) => {
+                      if (err) {
+                          console.error("Error fetching UserID:", err);
+                          return res.status(500).json({ error: "Database error fetching UserID" });
                       }
-                  );
+
+                      if (results.length === 0) {
+                          return res.status(404).json({ error: "User not found" });
+                      }
+
+                      const userId = results[0].UserID;
+
+                      // แทรก OTP โดยใช้ UserID แทน Email
+                      pool.query(
+                          "INSERT INTO OTP (OTP_Code, Created_At, Expires_At, UserID) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE OTP_Code = ?, Created_At = ?, Expires_At = ?",
+                          [otp, createdAt, expiresAt, userId, otp, createdAt, expiresAt],
+                          (err) => {
+                              if (err) {
+                                  console.error("Error during OTP insertion:", err);
+                                  return res.status(500).json({ error: "Database error during OTP insertion" });
+                              }
+
+                              console.log("OTP inserted successfully");
+                              sendOtpEmail(email, otp, (error) => {
+                                  if (error) return res.status(500).json({ error: "Error sending OTP email" });
+                                  res.status(200).json({ message: "OTP ถูกส่งไปยังอีเมลของคุณ" });
+                              });
+                          }
+                      );
+                  }
+                );
+
               }
           );
       });
@@ -232,7 +252,7 @@ app.post("/api/register/verify-otp", async (req, res) => {
 });
 
 
-//User-Set-Password
+// User-Set-Password
 app.post("/api/register/set-password", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -243,32 +263,45 @@ app.post("/api/register/set-password", async (req, res) => {
 
     const hash = await bcrypt.hash(password, 10);
 
-    // อัปเดตข้อมูลรหัสผ่านในตาราง User
-    pool.query(
-      "UPDATE User SET Password = ?, Status = 'active' WHERE Email = ?",
-      [hash, email],
-      (err, results) => {
-        if (err) {
-          console.error("Database error during User update:", err);
-          return res.status(500).json({ error: "Database error during User update" });
-        }
+    // ดึง UserID ก่อนอัปเดตรหัสผ่าน
+    pool.query("SELECT UserID FROM User WHERE Email = ?", [email], (err, results) => {
+      if (err) {
+        console.error("Error fetching UserID:", err);
+        return res.status(500).json({ error: "Database error fetching UserID" });
+      }
 
-        // ตรวจสอบว่ามีการอัปเดตรหัสผ่านสำเร็จหรือไม่
-        if (results.affectedRows === 0) {
-          return res.status(404).json({ error: "ไม่พบบัญชีที่ใช้ Email นี้" });
-        }
+      if (results.length === 0) {
+        return res.status(404).json({ error: "ไม่พบบัญชีที่ใช้ Email นี้" });
+      }
 
-        // **ลบ OTP ที่เกี่ยวข้องกับ Email**
-        pool.query("DELETE FROM OTP WHERE Email = ?", [email], (err) => {
+      const userId = results[0].UserID;
+
+      // อัปเดตรหัสผ่านในตาราง User
+      pool.query(
+        "UPDATE User SET Password = ?, Status = 'active' WHERE UserID = ?",
+        [hash, userId],
+        (err, results) => {
           if (err) {
-            console.error("Error during OTP deletion:", err);
-            return res.status(500).json({ error: "Error during OTP deletion" });
+            console.error("Database error during User update:", err);
+            return res.status(500).json({ error: "Database error during User update" });
           }
 
-          res.status(200).json({ message: "รหัสผ่านถูกตั้งเรียบร้อยแล้ว" });
-        });
-      }
-    );
+          if (results.affectedRows === 0) {
+            return res.status(404).json({ error: "ไม่สามารถอัปเดตรหัสผ่านได้" });
+          }
+
+          // ลบ OTP ที่เกี่ยวข้องกับ UserID
+          pool.query("DELETE FROM OTP WHERE UserID = ?", [userId], (err) => {
+            if (err) {
+              console.error("Error during OTP deletion:", err);
+              return res.status(500).json({ error: "Error during OTP deletion" });
+            }
+
+            res.status(200).json({ message: "รหัสผ่านถูกตั้งเรียบร้อยแล้ว" });
+          });
+        }
+      );
+    });
   } catch (error) {
     console.error("Internal server error:", error.message);
     res.status(500).json({ error: "Internal server error" });
