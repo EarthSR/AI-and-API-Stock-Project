@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import requests
 import mysql.connector
 from dotenv import load_dotenv
 import sys
@@ -10,41 +11,44 @@ sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 # ✅ โหลดตัวแปรจาก .env
 load_dotenv()
 
-# ✅ ตรวจสอบระดับของโฟลเดอร์
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-# ✅ กำหนดพาธของไฟล์ CSV
-GDP_USA_CSV = os.path.join(BASE_DIR, "GDP_USA.csv")
-GDP_THAI_CSV = os.path.join(BASE_DIR, "GDP_Thai.csv")
-
-# ✅ อ่านข้อมูล GDP
-
-def load_gdp_data(filepath):
-    df = pd.read_csv(filepath)
+# ✅ ฟังก์ชันดึงข้อมูล GDP จาก World Bank API
+def fetch_gdp_data(country_codes, start_year=2000, end_year=2023):
+    url = f"https://api.worldbank.org/v2/country/{';'.join(country_codes)}/indicator/NY.GDP.MKTP.CD?date={start_year}:{end_year}&format=json&per_page=500"
+    response = requests.get(url)
     
-    # ✅ แปลงชื่อคอลัมน์ปีจาก "2000 [YR2000]" -> "2000"
-    df.columns = [col.split(" [")[0] if " [YR" in col else col for col in df.columns]
+    if response.status_code != 200:
+        raise Exception("ไม่สามารถดึงข้อมูลจาก World Bank API ได้")
     
-    # ✅ แปลงข้อมูลจาก Wide Format เป็น Long Format
-    df = df.melt(id_vars=["Series Name", "Series Code", "Country Name", "Country Code"],
-                 var_name="Year", value_name="GDP_Value")
-    
-    # ✅ แปลง Year ให้เป็น int
-    df["Year"] = df["Year"].astype(int)
-    
-    return df
+    data = response.json()
+    if not data or len(data) < 2:
+        raise Exception("ไม่มีข้อมูล GDP ที่ดึงมาได้")
 
-# โหลดข้อมูลจากทั้ง 2 ไฟล์
-df_usa = load_gdp_data(GDP_USA_CSV)
-df_thai = load_gdp_data(GDP_THAI_CSV)
+    records = []
+    for entry in data[1]:  # ข้อมูล GDP อยู่ที่ index 1
+        if entry["value"] is not None:
+            records.append({
+                "Country": entry["country"]["value"],
+                "Country Code": entry["country"]["id"],
+                "Year": int(entry["date"]),
+                "GDP (current US$)": float(entry["value"])
+            })
 
-# ✅ รวมข้อมูลเข้าด้วยกัน
-df_gdp = pd.concat([df_usa, df_thai])
+    return pd.DataFrame(records)
 
-# ✅ แปลงค่า NaN เป็น None สำหรับฐานข้อมูล
+# ✅ ดึงข้อมูล GDP ของไทยและอเมริกา
+countries = ["THA", "USA"]
+df_gdp = fetch_gdp_data(countries, start_year=2000, end_year=2023)
+
+# ✅ แปลงค่า NaN เป็น None
 df_gdp = df_gdp.where(pd.notna(df_gdp), None)
 
-# ✅ เชื่อมต่อฐานข้อมูล
+# ✅ บันทึกข้อมูลลง CSV
+df_gdp.to_csv("GDP_AllData.csv", index=False)
+df_gdp[df_gdp["Country Code"] == "THA"].to_csv("GDP_TH.csv", index=False)
+df_gdp[df_gdp["Country Code"] == "USA"].to_csv("GDP_US.csv", index=False)
+print("✅ บันทึกข้อมูลลงไฟล์ CSV สำเร็จ: GDP_AllData.csv, GDP_TH.csv, GDP_US.csv")
+
+# ✅ เชื่อมต่อฐานข้อมูลและบันทึกข้อมูล
 try:
     print("🔗 กำลังเชื่อมต่อกับฐานข้อมูล ...")
     conn = mysql.connector.connect(
@@ -56,18 +60,22 @@ try:
     )
     cursor = conn.cursor()
     print("✅ เชื่อมต่อฐานข้อมูลสำเร็จ!")
-    
+
     # ✅ ตรวจสอบค่าที่มีอยู่ใน Database
-    cursor.execute("SELECT Country_Name, Year FROM GDP")
+    cursor.execute("SELECT Country, Year FROM GDP")
     existing_data = set(cursor.fetchall())
-    
+
     # ✅ กรองเฉพาะข้อมูลที่ยังไม่มีใน Database
-    new_data = [tuple(row) for row in df_gdp.values.tolist() if (row[2], row[4]) not in existing_data]
-    
+    new_data = [
+        (row["Country"], row["Country Code"], row["Year"], row["GDP (current US$)"])
+        for _, row in df_gdp.iterrows()
+        if (row["Country"], row["Year"]) not in existing_data
+    ]
+
     if new_data:
         insert_gdp_query = """
-        INSERT INTO GDP (Series_Name, Series_Code, Country_Name, Country_Code, Year, GDP_Value)
-        VALUES (%s, %s, %s, %s, %s, %s);
+        INSERT INTO GDP (Country, `Country Code`, Year, `GDP (current US$)`)
+        VALUES (%s, %s, %s, %s);
         """
         cursor.executemany(insert_gdp_query, new_data)
         print(f"✅ บันทึกข้อมูลลง GDP: {len(new_data)} รายการ")
