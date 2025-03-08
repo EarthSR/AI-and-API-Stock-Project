@@ -1089,6 +1089,300 @@ app.get("/api/news-notifications", verifyToken, (req, res) => {
   });
 });
 
+// ---- Favorites ---- //
+
+// API สำหรับเพิ่มบุ๊คมาร์ค
+app.post("/api/favorites", verifyToken, (req, res) => {
+  const { stock_symbol } = req.body; // ดึง StockSymbol จาก request body
+  const user_id = req.userId; // ดึง user_id จาก Token ที่ผ่านการตรวจสอบแล้ว
+
+  // ตรวจสอบว่ามี StockSymbol หรือไม่
+  if (!stock_symbol) {
+    return res.status(400).json({ error: "Stock symbol is required" });
+  }
+
+  // ตรวจสอบว่าผู้ใช้ติดตามหุ้นนี้ไปแล้วหรือยัง
+  const checkFollowSql = "SELECT * FROM FollowedStocks WHERE UserID = ? AND StockSymbol = ?";
+  pool.query(checkFollowSql, [user_id, stock_symbol], (err, results) => {
+    if (err) {
+      console.error("Database error during checking followed stock:", err);
+      return res.status(500).json({ error: "Database error during checking followed stock" });
+    }
+
+    if (results.length > 0) {
+      return res.status(400).json({ error: "You are already following this stock" });
+    }
+
+    // เพิ่มข้อมูลหุ้นที่ติดตามลงในตาราง FollowedStocks
+    const followStockSql = "INSERT INTO FollowedStocks (UserID, StockSymbol, FollowDate) VALUES (?, ?, NOW())";
+    pool.query(followStockSql, [user_id, stock_symbol], (err) => {
+      if (err) {
+        console.error("Database error during following stock:", err);
+        return res.status(500).json({ error: "Error following stock" });
+      }
+
+      res.status(201).json({ message: "Stock followed successfully" });
+    });
+  });
+});
+
+// API สำหรับเลิกติดตามหุ้น
+app.delete("/api/favorites", verifyToken, (req, res) => {
+  const { stock_symbol } = req.body; // ดึง StockSymbol จาก request body
+  const user_id = req.userId; // ดึง user_id จาก Token ที่ผ่านการตรวจสอบแล้ว
+
+  // ตรวจสอบว่ามี StockSymbol ที่ต้องการลบหรือไม่
+  if (!stock_symbol) {
+    return res.status(400).json({ error: "Stock symbol is required" });
+  }
+
+  // ลบข้อมูลหุ้นที่ติดตามจากฐานข้อมูล
+  const deleteFollowedStockSql = "DELETE FROM FollowedStocks WHERE UserID = ? AND StockSymbol = ?";
+  pool.query(deleteFollowedStockSql, [user_id, stock_symbol], (err, results) => {
+    if (err) {
+      console.error("Database error during unfollowing stock:", err);
+      return res.status(500).json({ error: "Error unfollowing stock" });
+    }
+
+    if (results.affectedRows === 0) {
+      return res.status(404).json({ message: "Stock not found in followed list or you are not authorized to remove" });
+    }
+
+    res.json({ message: "Stock unfollowed successfully" });
+  });
+});
+
+// API สำหรับดึงรายการหุ้นที่ผู้ใช้ติดตาม
+app.get("/api/favorites", verifyToken, (req, res) => {
+  const userId = req.userId; // ดึง userId จาก Token ที่ผ่านการตรวจสอบแล้ว
+
+  // ดึงรายการหุ้นที่ผู้ใช้ติดตามจากฐานข้อมูล
+  const fetchFavoritesSql = `
+    SELECT 
+      fs.StockSymbol, 
+      s.CompanyName,
+      sd.ClosePrice AS LastPrice,
+      sd.Date AS LastUpdated
+    FROM FollowedStocks fs
+    JOIN Stock s ON fs.StockSymbol = s.StockSymbol
+    LEFT JOIN StockDetail sd ON fs.StockSymbol = sd.StockSymbol
+    WHERE fs.UserID = ?
+    ORDER BY sd.Date DESC;
+  `;
+
+  pool.query(fetchFavoritesSql, [userId], (err, results) => {
+    if (err) {
+      console.error("Database error during fetching favorites:", err);
+      return res.status(500).json({ error: "Error fetching favorite stocks" });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ message: "No followed stocks found" });
+    }
+
+    res.json(results);
+  });
+});
+
+//Top 10 Stock
+app.get("/api/top-10-stocks", async (req, res) => {
+  try {
+    // ดึงวันที่ล่าสุดที่มีข้อมูล
+    const latestDateQuery = "SELECT MAX(Date) AS LatestDate FROM StockDetail";
+    pool.query(latestDateQuery, (dateErr, dateResults) => {
+      if (dateErr) {
+        console.error("Database error fetching latest date:", dateErr);
+        return res.status(500).json({ error: "Database error fetching latest date" });
+      }
+
+      const latestDate = dateResults[0].LatestDate;
+      if (!latestDate) {
+        return res.status(404).json({ error: "No stock data available" });
+      }
+
+      // คิวรี่หุ้นที่มีการเปลี่ยนแปลงสูงสุด 10 อันดับ พร้อมราคาปิด
+      const query = `
+        SELECT s.StockSymbol, sd.\`Change (%)\` AS ChangePercentage, sd.ClosePrice
+        FROM StockDetail sd
+        JOIN Stock s ON sd.StockSymbol = s.StockSymbol
+        WHERE sd.Date = ?
+        ORDER BY sd.\`Change (%)\` DESC
+        LIMIT 10;
+      `;
+
+      pool.query(query, [latestDate], (err, results) => {
+        if (err) {
+          console.error("Database error fetching top 10 stocks:", err);
+          return res.status(500).json({ error: "Database error fetching top 10 stocks" });
+        }
+
+        res.json({
+          date: latestDate,
+          topStocks: results.map(stock => ({
+            StockSymbol: stock.StockSymbol,
+            ChangePercentage: stock.ChangePercentage,
+            ClosePrice: stock.ClosePrice
+          }))
+        });
+      });
+    });
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Top 3 Trending Stocks
+app.get("/api/trending-stocks", async (req, res) => {
+  try {
+    // ดึงวันที่ล่าสุดที่มีข้อมูล
+    const latestDateQuery = "SELECT MAX(Date) AS LatestDate FROM StockDetail";
+    pool.query(latestDateQuery, (dateErr, dateResults) => {
+      if (dateErr) {
+        console.error("Database error fetching latest date:", dateErr);
+        return res.status(500).json({ error: "Database error fetching latest date" });
+      }
+
+      const latestDate = dateResults[0].LatestDate;
+      if (!latestDate) {
+        return res.status(404).json({ error: "No stock data available" });
+      }
+
+      // คิวรี่หุ้นที่มีการเปลี่ยนแปลงสูงสุด 3 อันดับแรก พร้อมดึงวันที่
+      const query = `
+        SELECT sd.Date, s.StockSymbol, s.CompanyName, s.Market, sd.\`Change (%)\` AS ChangePercentage, sd.ClosePrice
+        FROM StockDetail sd
+        JOIN Stock s ON sd.StockSymbol = s.StockSymbol
+        WHERE sd.Date = ?
+        ORDER BY sd.\`Change (%)\` DESC
+        LIMIT 3;
+      `;
+
+      pool.query(query, [latestDate], (err, results) => {
+        if (err) {
+          console.error("Database error fetching trending stocks:", err);
+          return res.status(500).json({ error: "Database error fetching trending stocks" });
+        }
+
+        res.json({
+          date: latestDate,
+          trendingStocks: results.map(stock => ({
+            Date: stock.Date,  // ✅ ดึงวันที่ที่ใช้จริง
+            StockSymbol: stock.StockSymbol,
+            CompanyName: stock.CompanyName,
+            Market: stock.Market,
+            ChangePercentage: stock.ChangePercentage,
+            ClosePrice: stock.ClosePrice
+          }))
+        });
+      });
+    });
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---- News ---- //
+
+app.get("/api/latest-news", async (req, res) => {
+  try {
+    // ดึงวันที่ล่าสุด
+    const latestDateQuery = "SELECT MAX(PublishedDate) AS LatestDate FROM News";
+    pool.query(latestDateQuery, (dateErr, dateResults) => {
+      if (dateErr) {
+        console.error("Database error fetching latest date:", dateErr);
+        return res.status(500).json({ error: "Database error fetching latest date" });
+      }
+
+      const latestDate = dateResults[0].LatestDate;
+      if (!latestDate) {
+        return res.status(404).json({ error: "No news data available" });
+      }
+
+      // ดึงข่าวล่าสุดจากตาราง News
+      const newsQuery = `
+        SELECT Title, Sentiment, PublishedDate 
+        FROM News 
+        WHERE PublishedDate = ?
+        ORDER BY PublishedDate DESC
+        LIMIT 10;
+      `;
+
+      pool.query(newsQuery, [latestDate], (err, results) => {
+        if (err) {
+          console.error("Database error fetching latest news:", err);
+          return res.status(500).json({ error: "Database error fetching latest news" });
+        }
+
+        res.json({
+          date: latestDate,
+          news: results.map(news => ({
+            Title: news.Title,
+            Sentiment: news.Sentiment,
+            PublishedDate: news.PublishedDate
+          }))
+        });
+      });
+    });
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+//Detail News
+app.get("/api/news-detail", async (req, res) => {
+  try {
+    const { id } = req.query; // ใช้ NewsID แทน Title
+    if (!id) {
+      return res.status(400).json({ error: "News ID is required" });
+    }
+
+    // คิวรี่ดึงรายละเอียดข่าวโดยใช้ NewsID
+    const newsDetailQuery = `
+      SELECT NewsID, Title, Sentiment, Source, PublishedDate, ConfidenceScore, Content, URL
+      FROM News
+      WHERE NewsID = ?
+      LIMIT 1;
+    `;
+
+    pool.query(newsDetailQuery, [id], (err, results) => {
+      if (err) {
+        console.error("Database error fetching news detail:", err);
+        return res.status(500).json({ error: "Database error fetching news detail" });
+      }
+
+      if (results.length === 0) {
+        return res.status(404).json({ error: "News not found" });
+      }
+
+      const news = results[0];
+
+      // แปลง ConfidenceScore เป็นเปอร์เซ็นต์
+      const confidencePercentage = `${(news.ConfidenceScore * 100).toFixed(0)}%`;
+
+      res.json({
+        NewsID: news.NewsID,
+        Title: news.Title,
+        Sentiment: news.Sentiment,
+        Source: news.Source,
+        PublishedDate: news.PublishedDate,
+        ConfidenceScore: confidencePercentage, // แสดงค่าเป็นเปอร์เซ็นต์
+        Content: news.Content,
+        URL: news.URL
+      });
+    });
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+
+
+
+
 
 // Start the server
 const PORT = process.env.PORT || 3000;
