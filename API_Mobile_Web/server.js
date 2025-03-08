@@ -251,8 +251,7 @@ app.post("/api/register/verify-otp", async (req, res) => {
   }
 });
 
-
-// User-Set-Password
+// User-Set-Password (อัปเดตใหม่)
 app.post("/api/register/set-password", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -276,9 +275,9 @@ app.post("/api/register/set-password", async (req, res) => {
 
       const userId = results[0].UserID;
 
-      // อัปเดตรหัสผ่านในตาราง User
+      // อัปเดตรหัสผ่านในตาราง User แต่ยังไม่เปลี่ยนเป็น 'active'
       pool.query(
-        "UPDATE User SET Password = ?, Status = 'active' WHERE UserID = ?",
+        "UPDATE User SET Password = ?, Status = 'pending' WHERE UserID = ?",
         [hash, userId],
         (err, results) => {
           if (err) {
@@ -297,7 +296,13 @@ app.post("/api/register/set-password", async (req, res) => {
               return res.status(500).json({ error: "Error during OTP deletion" });
             }
 
-            res.status(200).json({ message: "รหัสผ่านถูกตั้งเรียบร้อยแล้ว" });
+            // **สร้าง Token และส่งกลับ**
+            const token = jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: "7d" });
+
+            res.status(200).json({
+              message: "รหัสผ่านถูกตั้งเรียบร้อยแล้ว กรุณาตั้งค่าโปรไฟล์",
+              token: token
+            });
           });
         }
       );
@@ -712,11 +717,11 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// Set profile route (Profile setup or update)
+// Set Profile และ Login อัตโนมัติหลังจากตั้งโปรไฟล์เสร็จ
 app.post("/api/set-profile", verifyToken, upload.single('picture'), (req, res) => {
   const { newUsername, birthday } = req.body;
   const userId = req.userId; // รับ UserID จาก token
-  const picture = req.file ? `/uploads/${req.file.filename}` : null; 
+  const picture = req.file ? `/uploads/${req.file.filename}` : null;
 
   // ตรวจสอบว่า newUsername, picture, และ birthday ถูกส่งมาหรือไม่
   if (!newUsername || !picture || !birthday) {
@@ -727,17 +732,44 @@ app.post("/api/set-profile", verifyToken, upload.single('picture'), (req, res) =
   const birthdayParts = birthday.split('/');
   const formattedBirthday = `${birthdayParts[2]}-${birthdayParts[1]}-${birthdayParts[0]}`;
 
-    // อัปเดตโปรไฟล์ของผู้ใช้
-    const updateProfileQuery = "UPDATE User SET Username = ?, ProfileImageURL = ?, Birthday = ? WHERE UserID = ?";
-    pool.query(updateProfileQuery, [newUsername, picture, formattedBirthday, userId], (err) => {
+  // อัปเดตโปรไฟล์ของผู้ใช้ และเปลี่ยนสถานะเป็น Active
+  const updateProfileQuery = "UPDATE User SET Username = ?, ProfileImageURL = ?, Birthday = ?, Status = 'active' WHERE UserID = ?";
+  pool.query(updateProfileQuery, [newUsername, picture, formattedBirthday, userId], (err) => {
+    if (err) {
+      console.error("Error updating profile: ", err);
+      return res.status(500).json({ message: "Error updating profile" });
+    }
+
+    // ดึงข้อมูลผู้ใช้เพื่อนำไปสร้าง Token
+    pool.query("SELECT UserID, Email, Username, ProfileImageURL FROM User WHERE UserID = ?", [userId], (err, userResults) => {
       if (err) {
-        console.error("Error updating profile: ", err);
-        return res.status(500).json({ message: "Error updating profile" });
+        console.error("Database error fetching user data:", err);
+        return res.status(500).json({ message: "Error fetching user data" });
       }
 
-      return res.status(200).json({ message: "Profile set/updated successfully" });
+      if (userResults.length === 0) {
+        return res.status(404).json({ message: "User not found after profile update" });
+      }
+
+      const user = userResults[0];
+
+      // สร้าง JWT Token
+      const token = jwt.sign({ id: user.UserID }, JWT_SECRET, { expiresIn: "7d" });
+
+      return res.status(200).json({
+        message: "Profile set successfully. You are now logged in.",
+        token,
+        user: {
+          id: user.UserID,
+          email: user.Email,
+          username: user.Username,
+          profileImage: user.ProfileImageURL,
+        },
+      });
     });
+  });
 });
+
 
 // Login with Google * ยังไม่ได้เช็คบน Postman
 app.post("/api/google-signin", async (req, res) => {
