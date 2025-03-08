@@ -3,21 +3,19 @@ import numpy as np
 import tensorflow as tf
 import tensorflow.keras.backend as K
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import (
-    Input, GRU, Dense, Dropout, BatchNormalization,
-    Embedding, concatenate, Bidirectional, Masking,
-    Conv1D, Flatten, LSTM
-)
-from tensorflow.keras.losses import Loss
-from tensorflow.keras.saving import register_keras_serializable
+from tensorflow.keras.layers import Input, GRU, Dense, Dropout, BatchNormalization, Embedding, concatenate, Bidirectional, Layer, Masking, Conv1D, Flatten, Attention
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.losses import Huber, MeanSquaredError, BinaryCrossentropy
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from tensorflow.keras.optimizers.schedules import CosineDecay, ExponentialDecay
 from sklearn.preprocessing import RobustScaler, LabelEncoder
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score
 import ta
 import matplotlib.pyplot as plt
 import joblib
 import logging
+from tensorflow.keras.losses import Loss
+from tensorflow.keras.saving import register_keras_serializable
 
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -25,10 +23,9 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import tensorflow as tf
 print("TensorFlow running on:", tf.config.list_physical_devices())
 
-
-# --------------------------------------------------------------------
-# 1) ฟังก์ชันคำนวณ Metric
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# ฟังก์ชันคำนวณ Error
+# ------------------------------------------------------------------------------------
 def custom_mape(y_true, y_pred):
     """
     Mean Absolute Percentage Error (MAPE) แบบไม่ให้เกิด Infinity ถ้า y_true = 0
@@ -51,14 +48,43 @@ def smape(y_true, y_pred):
         return np.nan
     return np.mean(diff[nonzero_mask] / denominator[nonzero_mask]) * 100
 
-# --------------------------------------------------------------------
-# 2) ฟังก์ชันสร้าง Sequence (Multi-Task)
-# --------------------------------------------------------------------
+# **Focal Loss สำหรับ Direction**
+def focal_loss(alpha=0.5, gamma=1.5):
+    def focal_loss_fixed(y_true, y_pred):
+        epsilon = 1e-8
+        y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
+        pt = tf.where(K.equal(y_true, 1), y_pred, 1 - y_pred)
+        loss = -K.mean(alpha * K.pow(1. - pt, gamma) * K.log(pt))
+        return loss
+    return focal_loss_fixed
+
+# เปลี่ยน Optimizer เป็น AdamW
+from tensorflow.keras.optimizers import AdamW
+@register_keras_serializable()
+def focal_loss_fixed(y_true, y_pred, alpha=0.25, gamma=2.0):
+    """
+    Custom Focal Loss
+    """
+    epsilon = 1e-8
+    y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
+    pt = tf.where(K.equal(y_true, 1), y_pred, 1 - y_pred)
+    loss = -K.mean(alpha * K.pow(1. - pt, gamma) * K.log(pt))
+    return loss
+
+# ------------------------------------------------------------------------------------
+# ตั้งค่า Logging
+# ------------------------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO, filename='training.log', filemode='a',
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+# ------------------------------------------------------------------------------------
+# ฟังก์ชันสร้าง Sequence (ปรับให้รับ Target 2 ส่วน: price กับ direction)
+# ------------------------------------------------------------------------------------
 def create_sequences_for_ticker(features, ticker_ids, targets_price, targets_dir, seq_length=10):
     """
-    สร้าง Sequence สำหรับ Multi-Task:
-    คืนค่า 4 อย่าง: (X_features, X_tickers, Y_price, Y_dir)
-    โดยแต่ละ Sequence ยาว seq_length
+    คืนค่า 4 รายการ: 
+      X_features, X_tickers, Y_price, Y_dir
+    สำหรับแต่ละ Sequence ยาว seq_length
     """
     X_features, X_tickers = [], []
     Y_price, Y_dir = [], []
@@ -74,41 +100,130 @@ def create_sequences_for_ticker(features, ticker_ids, targets_price, targets_dir
         np.array(Y_dir),
     )
 
+# ------------------------------------------------------------------------------------
+# ฟังก์ชัน Plot History
+# ------------------------------------------------------------------------------------
 def plot_training_history(history):
-    plt.figure(figsize=(12, 6))
-    # Loss
+    """
+    แสดงกราฟ Loss รวม (จาก Multi-Output) และ Loss แยก, Metric ของแต่ละ Output
+    """
+    # โดยเริ่มต้น Keras จะรวม loss = weighted sum ของทั้ง 2 outputs
+    # ใน history.history จะมี key ต่าง ๆ เช่น
+    #   'loss', 'price_output_loss', 'direction_output_loss', 
+    #   'price_output_mae', 'direction_output_accuracy', 'val_loss', ...
+    keys = list(history.history.keys())
+    print("Keys in history:", keys)
+    
+    plt.figure(figsize=(14, 6))
+    
+    # Subplot 1: Total Loss
     plt.subplot(1, 2, 1)
     plt.plot(history.history['loss'], label='Train Total Loss')
     plt.plot(history.history['val_loss'], label='Val Total Loss')
-    plt.title('Total Loss (Multi-Task)')
+    plt.title('Total Loss')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
     plt.legend()
+    
+    # Subplot 2: Price Output Loss
+    # ถ้ามี price_output_loss ใน history
+    if 'price_output_loss' in history.history:
+        plt.figure()
+        plt.plot(history.history['price_output_loss'], label='Train Price Loss')
+        plt.plot(history.history['val_price_output_loss'], label='Val Price Loss')
+        plt.title('Price Output Loss')
+        plt.xlabel('Epochs')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig('training_price_loss.png')
+        plt.close()
 
-    # (ตัวอย่าง) plot "price_output_mae"
+    # Subplot 3: Direction Output Loss
+    if 'direction_output_loss' in history.history:
+        plt.figure()
+        plt.plot(history.history['direction_output_loss'], label='Train Dir Loss')
+        plt.plot(history.history['val_direction_output_loss'], label='Val Dir Loss')
+        plt.title('Direction Output Loss')
+        plt.xlabel('Epochs')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig('training_dir_loss.png')
+        plt.close()
+
+    # Subplot 4: Price Output MAE
     if 'price_output_mae' in history.history:
-        plt.subplot(1, 2, 2)
+        plt.figure()
         plt.plot(history.history['price_output_mae'], label='Train Price MAE')
         plt.plot(history.history['val_price_output_mae'], label='Val Price MAE')
         plt.title('Price Output MAE')
         plt.xlabel('Epochs')
         plt.ylabel('MAE')
         plt.legend()
+        plt.tight_layout()
+        plt.savefig('training_price_mae.png')
+        plt.close()
 
+    # Subplot 5: Direction Output Accuracy
+    if 'direction_output_accuracy' in history.history:
+        plt.figure()
+        plt.plot(history.history['direction_output_accuracy'], label='Train Dir Accuracy')
+        plt.plot(history.history['val_direction_output_accuracy'], label='Val Dir Accuracy')
+        plt.title('Direction Output Accuracy')
+        plt.xlabel('Epochs')
+        plt.ylabel('Accuracy')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig('training_dir_acc.png')
+        plt.close()
+
+    # บันทึกเฉพาะ subplot แรกสุด
     plt.tight_layout()
-    plt.savefig('training_history.png')
+    plt.savefig('training_total_loss.png')
     plt.close()
 
-logging.basicConfig(level=logging.INFO, filename='training.log', filemode='a',
-                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --------------------------------------------------------------------
-# 3) ตรวจสอบ GPU
-# --------------------------------------------------------------------
-physical_devices = tf.config.list_physical_devices('CPU')
+def plot_predictions(y_true, y_pred, ticker):
+    plt.figure(figsize=(10, 6))
+    plt.plot(y_true, label='Actual', color='blue')
+    plt.plot(y_pred, label='Predicted', color='red', alpha=0.7)
+    plt.title(f'True vs Predicted Prices for {ticker}')
+    plt.xlabel('Time')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f'predictions_{ticker}.png')
+    plt.close()
+
+def plot_residuals(y_true, y_pred, ticker):
+    residuals = np.array(y_true) - np.array(y_pred)
+    plt.figure(figsize=(10, 6))
+    plt.scatter(range(len(residuals)), residuals, alpha=0.5)
+    plt.hlines(y=0, xmin=0, xmax=len(residuals), colors='red')
+    plt.title(f'Residuals for {ticker}')
+    plt.xlabel('Sample')
+    plt.ylabel('Residual')
+    plt.tight_layout()
+    plt.savefig(f'residuals_{ticker}.png')
+    plt.close()
+
+# ------------------------------------------------------------------------------------
+# ฟังก์ชัน Loss แบบ Cosine Similarity (หากต้องการ)
+# ------------------------------------------------------------------------------------
+def cosine_similarity_loss(y_true, y_pred):
+    y_true = K.l2_normalize(y_true, axis=-1)
+    y_pred = K.l2_normalize(y_pred, axis=-1)
+    return 1 - K.sum(y_true * y_pred, axis=-1)
+
+# ลงทะเบียน Loss
+tf.keras.utils.get_custom_objects()["cosine_similarity_loss"] = cosine_similarity_loss
+
+# ตรวจสอบ GPU
+physical_devices = tf.config.list_physical_devices('GPU')
 if len(physical_devices) > 0:
+    tf.config.set_visible_devices(physical_devices[0], 'GPU')
     try:
-        tf.config.set_visible_devices(physical_devices[0], 'GPU')
         tf.config.experimental.set_memory_growth(physical_devices[0], True)
         logging.info(f"Memory growth enabled for GPU: {physical_devices[0]}")
         print("Memory growth enabled for GPU:", physical_devices[0])
@@ -119,19 +234,22 @@ else:
     logging.info("GPU not found, using CPU")
     print("GPU not found, using CPU")
 
-# --------------------------------------------------------------------
-# 4) โหลดข้อมูล & เตรียมฟีเจอร์
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# 1) โหลดและเตรียมข้อมูล
+# ------------------------------------------------------------------------------------
 df = pd.read_csv('../merged_stock_sentiment_financial.csv')
 
+# แปลง Sentiment
 df['Sentiment'] = df['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
 
+# สร้างฟีเจอร์เพิ่มเติม
 df['Change'] = df['Close'] - df['Open']
 df['Change (%)'] = df['Close'].pct_change() * 100
 upper_bound = df["Change (%)"].quantile(0.99)
 lower_bound = df["Change (%)"].quantile(0.01)
 df["Change (%)"] = np.clip(df["Change (%)"], lower_bound, upper_bound)
 
+import ta
 df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
 df['RSI'].fillna(method='ffill', inplace=True)
 df['RSI'].fillna(0, inplace=True)
@@ -143,52 +261,77 @@ df['SMA_50'] = df['Close'].rolling(window=50).mean()
 df['SMA_200'] = df['Close'].rolling(window=200).mean()
 df['MACD'] = df['EMA_12'] - df['EMA_26']
 df['MACD_Signal'] = df['MACD'].rolling(window=9).mean()
+
 bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
 df['Bollinger_High'] = bollinger.bollinger_hband()
-df['Bollinger_Low']  = bollinger.bollinger_lband()
+df['Bollinger_Low'] = bollinger.bollinger_lband()
+
+# ATR (Average True Range)
+atr = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=14)
+df['ATR'] = atr.average_true_range()
+
+# Keltner Channels
+keltner = ta.volatility.KeltnerChannel(high=df['High'], low=df['Low'], close=df['Close'], window=20, window_atr=10)
+df['Keltner_High'] = keltner.keltner_channel_hband()
+df['Keltner_Low'] = keltner.keltner_channel_lband()
+df['Keltner_Middle'] = keltner.keltner_channel_mband()
+
+# Chaikin Volatility
+window_cv = 10
+df['High_Low_Diff'] = df['High'] - df['Low']
+df['High_Low_EMA'] = df['High_Low_Diff'].ewm(span=window_cv, adjust=False).mean()
+df['Chaikin_Vol'] = df['High_Low_EMA'].pct_change(periods=window_cv) * 100
+
+# Donchian Channels
+window_dc = 20
+df['Donchian_High'] = df['High'].rolling(window=window_dc).max()
+df['Donchian_Low'] = df['Low'].rolling(window=window_dc).min()
+
+# Parabolic SAR
+psar = ta.trend.PSARIndicator(high=df['High'], low=df['Low'], close=df['Close'], step=0.02, max_step=0.2)
+df['PSAR'] = psar.psar()
 
 financial_columns = [
-    'Total Revenue','QoQ Growth (%)','YoY Growth (%)','Net Profit',
-    'Earnings Per Share (EPS)','ROA (%)','ROE (%)','Gross Margin (%)',
-    'Net Profit Margin (%)','Debt to Equity ','P/E Ratio ','P/BV Ratio ',
-    'Dividend Yield (%)'
+    'Total Revenue', 'QoQ Growth (%)',
+    'Earnings Per Share (EPS)','ROE (%)',
+    'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ', 
+    'P/BV Ratio ', 'Dividend Yield (%)'
 ]
-df_financial = df[['Date','Ticker'] + financial_columns].drop_duplicates()
+df_financial = df[['Date', 'Ticker'] + financial_columns].drop_duplicates()
 df_financial[financial_columns] = df_financial[financial_columns].where(df_financial[financial_columns].ne(0)).bfill()
 
-stock_columns = [
-    'RSI','EMA_10','EMA_20','MACD','MACD_Signal',
-    'Bollinger_High','Bollinger_Low','SMA_50','SMA_200'
-]
+stock_columns = ['RSI','EMA_12','EMA_26','MACD','MACD_Signal','Bollinger_High',
+                 'Bollinger_Low','ATR','Keltner_High','Keltner_Low','Keltner_Middle',
+                 'Chaikin_Vol','Donchian_High','Donchian_Low','PSAR','SMA_50','SMA_200']
+
 df[stock_columns] = df[stock_columns].fillna(method='ffill')
 df.fillna(0, inplace=True)
 
 feature_columns = [
     'Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment',
-    'Total Revenue','QoQ Growth (%)', 'YoY Growth (%)', 'Net Profit', 
-    'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 'Gross Margin (%)', 
-    'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ', 'P/BV Ratio ', 
-    'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
+    'Total Revenue', 'QoQ Growth (%)',
+    'Earnings Per Share (EPS)','ROE (%)',
+    'ATR','Keltner_High','Keltner_Low','Keltner_Middle','Chaikin_Vol','Donchian_High','Donchian_Low','PSAR',
+    'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ', 
+    'P/BV Ratio ', 'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
     'Bollinger_High', 'Bollinger_Low','SMA_50', 'SMA_200'
 ]
 
-# --------------------------------------------------------------------
-# 4.1) สร้าง Direction และ TargetPrice
-# --------------------------------------------------------------------
+# สร้าง Direction = 1 ถ้าพรุ่งนี้ราคาสูงขึ้น, 0 ถ้าลงหรือนิ่ง
 df['Direction'] = (df['Close'].shift(-1) > df['Close']).astype(int)
-df['TargetPrice'] = df['Close'].shift(-1)
-df.dropna(subset=['Direction','TargetPrice'], inplace=True)
 
-# --------------------------------------------------------------------
-# 4.2) LabelEncoder Ticker
-# --------------------------------------------------------------------
+# สร้าง TargetPrice = ราคาปิดวันถัดไป
+df['TargetPrice'] = df['Close'].shift(-1)
+
+# ลบแถวที่มี NaN ใน Target
+df.dropna(subset=['Direction', 'TargetPrice'], inplace=True)
+
+# Label Encode Ticker
 ticker_encoder = LabelEncoder()
 df['Ticker_ID'] = ticker_encoder.fit_transform(df['Ticker'])
 num_tickers = len(ticker_encoder.classes_)
 
-# --------------------------------------------------------------------
-# 5) แบ่ง Train/Test ตามวันที่
-# --------------------------------------------------------------------
+# แยก Train / Test
 sorted_dates = df['Date'].unique()
 train_cutoff = sorted_dates[int(len(sorted_dates) * 6 / 7)]
 train_df = df[df['Date'] <= train_cutoff].copy()
@@ -196,284 +339,208 @@ test_df  = df[df['Date'] > train_cutoff].copy()
 
 train_df.to_csv('train_df.csv', index=False)
 test_df.to_csv('test_df.csv', index=False)
-
 print("Train cutoff:", train_cutoff)
 print("First date in train set:", train_df['Date'].min())
 print("Last date in train set:", train_df['Date'].max())
 
+# ------------------------------------------------------------------------------------
+# 2) เตรียม Target ทั้ง 2: price กับ direction
+# ------------------------------------------------------------------------------------
+train_features = train_df[feature_columns].values
+test_features  = test_df[feature_columns].values
+
+train_ticker_id = train_df['Ticker_ID'].values
+test_ticker_id  = test_df['Ticker_ID'].values
+
+train_price = train_df['TargetPrice'].values.reshape(-1, 1)
+test_price  = test_df['TargetPrice'].values.reshape(-1, 1)
+
+train_dir = train_df['Direction'].values  # 1D
+test_dir  = test_df['Direction'].values   # 1D
+
+# สเกล Feature
+scaler_features = RobustScaler()
+train_features_scaled = scaler_features.fit_transform(train_features)
+test_features_scaled  = scaler_features.transform(test_features)
+
+# สเกล Price
+scaler_target = RobustScaler()
+train_price_scaled = scaler_target.fit_transform(train_price)
+test_price_scaled  = scaler_target.transform(test_price)
+
+joblib.dump(scaler_features, 'scaler_features.pkl')
+joblib.dump(scaler_target, 'scaler_target.pkl')
+
+np.save('test_features.npy', test_features_scaled)
+np.save('test_price.npy', test_price_scaled)
+print("✅ บันทึก test_features.npy และ test_price.npy สำเร็จ!")
+
 seq_length = 10
 
-# --------------------------------------------------------------------
-# 6) Scaler แยกต่อ Ticker (Feature + Price)
-# --------------------------------------------------------------------
-scaler_features_dict = {}
-scaler_price_dict = {}
-
-train_dict = {}
-test_dict  = {}
-
-for t_id in range(num_tickers):
-    df_train_ticker = train_df[train_df['Ticker_ID'] == t_id].copy()
-    if len(df_train_ticker) <= seq_length:
-        continue
-
-    price_train = df_train_ticker['TargetPrice'].values.reshape(-1,1)
-    f_train = df_train_ticker[feature_columns].values
-
-    min_len = min(len(f_train), len(price_train))
-    f_train = f_train[:min_len]
-    price_train = price_train[:min_len]
-    df_train_ticker = df_train_ticker.iloc[:min_len]
-
-    sc_f = RobustScaler(quantile_range=(5,95))
-    sc_p = RobustScaler(quantile_range=(5,95))
-    sc_f.fit(f_train)
-    sc_p.fit(price_train)
-
-    scaler_features_dict[t_id] = sc_f
-    scaler_price_dict[t_id] = sc_p
-    train_dict[t_id] = df_train_ticker.copy()
-
-for t_id in range(num_tickers):
-    df_test_ticker = test_df[test_df['Ticker_ID'] == t_id].copy()
-    if len(df_test_ticker) <= seq_length:
-        continue
-    test_dict[t_id] = df_test_ticker.copy()
-
-# --------------------------------------------------------------------
-# 7) สร้าง Sequence Multi-Task (Price + Direction)
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# 3) สร้าง Sequence (ต่อ Ticker) สำหรับ Multi-Task (Price + Direction)
+# ------------------------------------------------------------------------------------
 X_train_list, X_train_ticker_list = [], []
-y_train_price_list, y_train_dir_list = [], []
+y_price_train_list, y_dir_train_list = [], []
 
 X_test_list, X_test_ticker_list = [], []
-y_test_price_list, y_test_dir_list = [], []
+y_price_test_list, y_dir_test_list = [], []
 
 for t_id in range(num_tickers):
-    if t_id not in train_dict:
-        continue
+    df_train_ticker = train_df[train_df['Ticker_ID'] == t_id]
+    if len(df_train_ticker) > seq_length:
+        idx_train = df_train_ticker.index
+        mask_train = np.isin(train_df.index, idx_train)
+        
+        f_t = train_features_scaled[mask_train]
+        t_t = train_ticker_id[mask_train]
+        p_t = train_price_scaled[mask_train]
+        d_t = train_dir[mask_train]
+        
+        (Xf, Xt, Yp, Yd) = create_sequences_for_ticker(
+            f_t, t_t, p_t, d_t, seq_length
+        )
+        X_train_list.append(Xf)
+        X_train_ticker_list.append(Xt)
+        y_price_train_list.append(Yp)
+        y_dir_train_list.append(Yd)
 
-    df_train_ticker = train_dict[t_id]
-    if len(df_train_ticker) < seq_length:
-        continue
+    df_test_ticker = test_df[test_df['Ticker_ID'] == t_id]
+    if len(df_test_ticker) > seq_length:
+        idx_test = df_test_ticker.index
+        mask_test = np.isin(test_df.index, idx_test)
 
-    sc_f = scaler_features_dict[t_id]
-    sc_p = scaler_price_dict[t_id]
+        f_s = test_features_scaled[mask_test]
+        t_s = test_ticker_id[mask_test]
+        p_s = test_price_scaled[mask_test]
+        d_s = test_dir[mask_test]
 
-    f_train = df_train_ticker[feature_columns].values
-    p_train = df_train_ticker['TargetPrice'].values.reshape(-1,1)
-    d_train = df_train_ticker['Direction'].values  # 0/1
+        (Xs, Xts, Yps, Yds) = create_sequences_for_ticker(
+            f_s, t_s, p_s, d_s, seq_length
+        )
+        X_test_list.append(Xs)
+        X_test_ticker_list.append(Xts)
+        y_price_test_list.append(Yps)
+        y_dir_test_list.append(Yds)
 
-    min_len = min(len(f_train), len(p_train), len(d_train))
-    f_train = f_train[:min_len]
-    p_train = p_train[:min_len]
-    d_train = d_train[:min_len]
-
-    f_train_scaled = sc_f.transform(f_train)
-    p_train_scaled = sc_p.transform(p_train)
-
-    ticker_ids = df_train_ticker['Ticker_ID'].values[:min_len]
-
-    Xf, Xt, Yp, Yd = create_sequences_for_ticker(
-        f_train_scaled, ticker_ids, p_train_scaled, d_train, seq_length
-    )
-    X_train_list.append(Xf)
-    X_train_ticker_list.append(Xt)
-    y_train_price_list.append(Yp)
-    y_train_dir_list.append(Yd)
-
-    # ------------ Test ส่วน -------------
-    if t_id not in test_dict:
-        continue
-
-    df_test_ticker = test_dict[t_id]
-    if len(df_test_ticker) < seq_length:
-        continue
-
-    f_test = df_test_ticker[feature_columns].values
-    p_test = df_test_ticker['TargetPrice'].values.reshape(-1,1)
-    d_test = df_test_ticker['Direction'].values
-
-    min_len_test = min(len(f_test), len(p_test), len(d_test))
-    f_test = f_test[:min_len_test]
-    p_test = p_test[:min_len_test]
-    d_test = d_test[:min_len_test]
-
-    f_test_scaled = sc_f.transform(f_test)
-    p_test_scaled = sc_p.transform(p_test)
-
-    ticker_ids_test = df_test_ticker['Ticker_ID'].values[:min_len_test]
-
-    Xs, Xts, Yps, Yds = create_sequences_for_ticker(
-        f_test_scaled, ticker_ids_test, p_test_scaled, d_test, seq_length
-    )
-    X_test_list.append(Xs)
-    X_test_ticker_list.append(Xts)
-    y_test_price_list.append(Yps)
-    y_test_dir_list.append(Yds)
-
-if X_train_list:
-    X_train_features  = np.concatenate(X_train_list, axis=0)
-    X_train_tickers   = np.concatenate(X_train_ticker_list, axis=0)
-    y_train_price = np.concatenate(y_train_price_list, axis=0)
-    y_train_dir   = np.concatenate(y_train_dir_list, axis=0)
+# รวมเป็นอาเรย์ใหญ่
+if len(X_train_list) > 0:
+    X_price_train = np.concatenate(X_train_list, axis=0)
+    X_ticker_train = np.concatenate(X_train_ticker_list, axis=0)
+    y_price_train = np.concatenate(y_price_train_list, axis=0)
+    y_dir_train   = np.concatenate(y_dir_train_list, axis=0)
 else:
-    X_train_features, X_train_tickers, y_train_price, y_train_dir = (np.array([]),)*4
+    X_price_train, X_ticker_train, y_price_train, y_dir_train = (np.array([]),)*4
 
-if X_test_list:
-    X_test_features   = np.concatenate(X_test_list, axis=0)
-    X_test_tickers    = np.concatenate(X_test_ticker_list, axis=0)
-    y_test_price  = np.concatenate(y_test_price_list, axis=0)
-    y_test_dir    = np.concatenate(y_test_dir_list, axis=0)
+if len(X_test_list) > 0:
+    X_price_test = np.concatenate(X_test_list, axis=0)
+    X_ticker_test = np.concatenate(X_test_ticker_list, axis=0)
+    y_price_test = np.concatenate(y_price_test_list, axis=0)
+    y_dir_test   = np.concatenate(y_dir_test_list, axis=0)
 else:
-    X_test_features, X_test_tickers, y_test_price, y_test_dir = (np.array([]),)*4
+    X_price_test, X_ticker_test, y_price_test, y_dir_test = (np.array([]),)*4
 
-print("Train shapes:")
-print("X_train_features:", X_train_features.shape)
-print("X_train_tickers :", X_train_tickers.shape)
-print("y_train_price   :", y_train_price.shape)
-print("y_train_dir     :", y_train_dir.shape)
+print("X_price_train shape :", X_price_train.shape)
+print("X_ticker_train shape:", X_ticker_train.shape)
+print("y_price_train shape :", y_price_train.shape)
+print("y_dir_train shape   :", y_dir_train.shape)
 
-print("Test shapes:")
-print("X_test_features :", X_test_features.shape)
-print("X_test_tickers  :", X_test_tickers.shape)
-print("y_test_price    :", y_test_price.shape)
-print("y_test_dir      :", y_test_dir.shape)
+num_feature = train_features_scaled.shape[1]
+# ลดขนาด GRU และเพิ่ม Attention Layer
+features_input = Input(shape=(seq_length, num_feature), name='features_input')
+ticker_input   = Input(shape=(seq_length,), name='ticker_input')
 
-# --------------------------------------------------------------------
-# 8) สร้างสถาปัตยกรรมโมเดล Multi-Task (แยก Head: Price / Direction)
-# --------------------------------------------------------------------
-from tensorflow.keras.layers import LayerNormalization
+from tensorflow.keras.layers import MultiHeadAttention, Conv1D, LayerNormalization
 
-from tensorflow.keras.layers import MultiHeadAttention, LayerNormalization, Add
+# -------------------------- Embedding Layer --------------------------
+from tensorflow.keras.layers import Add, MultiHeadAttention, Conv1D, LayerNormalization, Activation
+from tensorflow.keras.activations import swish
 
-def build_multi_task_model_v2(
-    num_tickers,
-    seq_length=10,
-    num_feature=30,
-    embedding_dim=32,
-    lstm_units=128,
-    dropout_rate=0.3
-):
-    features_input = Input(shape=(seq_length, num_feature), name='features_input')
-    ticker_input   = Input(shape=(seq_length,), name='ticker_input')
+# -------------------------- Embedding Layer --------------------------
+from tensorflow.keras.layers import Add, MultiHeadAttention, Conv1D, LayerNormalization, Dense
 
-    ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
+from tensorflow.keras.layers import Conv1D, Dense, Add, LayerNormalization, Dropout
+from tensorflow.keras.optimizers.schedules import CosineDecay
+from tensorflow_addons.optimizers import RectifiedAdam, Lookahead
 
-    x = concatenate([features_input, ticker_embedding], axis=-1)
-    x = Masking(mask_value=0.0)(x)
+# -------------------------- Embedding Layer --------------------------
+from tensorflow.keras.layers import MultiHeadAttention, LayerNormalization, Conv1D
 
-    # ใช้ Multi-Head Attention
-    attn_out = MultiHeadAttention(num_heads=4, key_dim=32)(x, x)
-    x = Add()([x, attn_out])  # Residual Connection
-    x = LayerNormalization()(x)
+from tensorflow.keras.layers import MultiHeadAttention, LayerNormalization, Dense, Conv1D, Add
 
-    # Bi-GRU Layers
-    x = Bidirectional(GRU(lstm_units, return_sequences=True, activation='relu'))(x)
-    x = LayerNormalization()(x)
-    x = Dropout(dropout_rate)(x)
+# ------------------- Embedding Layer -------------------
+embedding_dim = 32
+ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
-    x = Bidirectional(GRU(lstm_units, return_sequences=False, activation='relu'))(x)
-    x = LayerNormalization()(x)
-    x = Dropout(dropout_rate)(x)
+# รวม Features + Embedding
+merged = concatenate([features_input, ticker_embedding], axis=-1)
 
-    x = Dense(128, activation='relu')(x)
-    x = Dropout(0.2)(x)
+# ✅ CNN Layer ลด Noise
+x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(merged)
+x = BatchNormalization()(x)
 
-    # Price Branch
-    price_branch = Dense(64, activation='relu')(x)
-    price_branch = Dropout(0.2)(price_branch)
-    price_output = Dense(1, activation='linear', name='price_output')(price_branch)
+# ✅ GRU Layers
+x = Bidirectional(GRU(64, return_sequences=True))(x)
+x = Dropout(0.3)(x)
+x = Bidirectional(GRU(32, return_sequences=True))(x)
+x = Dropout(0.3)(x)
+x = Bidirectional(GRU(16, return_sequences=True))(x)
+x = Dropout(0.3)(x)
 
-    # Direction Branch
-    direction_branch = Dense(64, activation='relu')(x)
-    direction_branch = Dropout(0.2)(direction_branch)
-    direction_output = Dense(1, activation='sigmoid', name='direction_output')(direction_branch)
+# ✅ Multi-Head Attention (Residual Connection)
+attention_output = MultiHeadAttention(num_heads=4, key_dim=32)(x, x)
+attention_output = Dense(x.shape[-1], activation='relu')(attention_output)  # ✅ ปรับขนาดให้ตรง GRU
+x = Add()([x, attention_output])  # ✅ Residual Connection ที่ถูกต้อง
+x = LayerNormalization()(x)
 
-    model = Model(inputs=[features_input, ticker_input], outputs=[price_output, direction_output])
-    return model
+# Fully Connected
+x = Flatten()(x)
+x = Dense(128, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)  # ✅ Regularization
+x = Dropout(0.3)(x)
 
+# Output Layers
+price_output = Dense(1, name='price_output')(x)
+direction_output = Dense(1, activation='sigmoid', name='direction_output')(x)
 
-# --------------------------------------------------------------------
-# 9) Compile โมเดล (Huber + BinaryCrossentropy)
-# --------------------------------------------------------------------
-model_multi = build_multi_task_model_v2(
-    num_tickers=num_tickers,
-    seq_length=seq_length,
-    num_feature=len(feature_columns),
-    embedding_dim=32,
-    lstm_units=128,
-    dropout_rate=0.3
-)
+# ------------------- สร้างโมเดล -------------------
+model_multi = Model(inputs=[features_input, ticker_input], outputs=[price_output, direction_output])
 
-losses = {
-    'price_output': tf.keras.losses.Huber(delta=0.5),  # ปรับให้ต่ำลงเพื่อให้โมเดลอ่อนไหวต่อ outliers น้อยลง
-    'direction_output': tf.keras.losses.BinaryCrossentropy()
-}
+# ------------------- Optimizer -------------------
 
-loss_weights = {
-    'price_output': 0.8,
-    'direction_output': 0.2
-}
-@register_keras_serializable()
-def focal_loss_fixed(y_true, y_pred, alpha=0.25, gamma=2.0):
-    """
-    Custom Focal Loss
-    """
-    epsilon = 1e-8
-    y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
-    pt = tf.where(K.equal(y_true, 1), y_pred, 1 - y_pred)
-    loss = -K.mean(alpha * K.pow(1. - pt, gamma) * K.log(pt))
-    return loss
-
-from tensorflow.keras.optimizers import AdamW
+# ✅ ใช้ Exponential Decay (เสถียรกว่า CosineDecay)
+lr_schedule = ExponentialDecay(initial_learning_rate=3e-4, decay_steps=5000, decay_rate=0.9)
+optimizer = AdamW(learning_rate=lr_schedule, weight_decay=1e-5)
 model_multi.compile(
-    optimizer=AdamW(learning_rate=0.0003, weight_decay=1e-4),
-    loss=losses,
-    loss_weights=loss_weights,
-    metrics={
-      'price_output': ['mae'],
-      'direction_output': ['accuracy']
-    }
+    optimizer=optimizer,
+    loss={'price_output': tf.keras.losses.MeanSquaredLogarithmicError(), 'direction_output': focal_loss(alpha=0.5, gamma=1.5)},
+    loss_weights={'price_output': 0.7, 'direction_output': 0.3},
+    metrics={'price_output': ['mae'], 'direction_output': ['accuracy']}
 )
-
 
 model_multi.summary()
 
-# --------------------------------------------------------------------
-# 10) Train Model พร้อม Callback
-# --------------------------------------------------------------------
-early_stopping = EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
-checkpoint = ModelCheckpoint(
-    'best_multi_task_model.keras', 
-    monitor='val_loss', 
-    save_best_only=True, 
-    mode='min'
-)
-
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-5, verbose=1)
+# ------------------- Training -------------------
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+checkpoint = ModelCheckpoint('best_multi_task_model.keras', monitor='val_loss', save_best_only=True, mode='min')
 
 history = model_multi.fit(
-    [X_train_features, X_train_tickers],
-    {
-      'price_output': y_train_price,
-      'direction_output': y_train_dir
-    },
+    [X_price_train, X_ticker_train],
+    {'price_output': y_price_train, 'direction_output': y_dir_train},
     epochs=100,
-    batch_size=32,
-    shuffle=False,
+    batch_size=16,  # ✅ ลด Batch Size
     validation_split=0.1,
-    callbacks=[early_stopping, checkpoint, reduce_lr]
+    shuffle=False,
+    callbacks=[early_stopping, checkpoint]
 )
 
-plot_training_history(history)
+plot_training_history(history)  # ✅ เรียกฟังก์ชัน plot เดิมได้เลย
 
-# เซฟโมเดล (หากต้องการเซฟไฟล์สุดท้ายด้วย)
-model_multi.save('multi_task_GRU_model_embedding.keras')
+model_multi.save('multi_task_price_dir_model.keras')
+logging.info("บันทึกโมเดล Multi-Task (รุ่นปรับปรุง) เรียบร้อยแล้ว")
 
-# --------------------------------------------------------------------
-# 11) Walk-Forward Validation (Multi-Task)
-# --------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# 5) ฟังก์ชัน Walk-Forward Validation (Multi-Task) + Online Learning
+# ------------------------------------------------------------------------------------
 def walk_forward_validation_multi_task(
     model, df, feature_columns, scaler_features, scaler_target, 
     ticker_encoder, seq_length=10, retrain_frequency=1
@@ -608,39 +675,52 @@ def walk_forward_validation_multi_task(
     
     return predictions_df, metrics_dict
 
-# --------------------------------------------------------------------
-# 12) เรียกใช้งาน Walk-Forward Validation
-# --------------------------------------------------------------------
-# โหลดโมเดลที่ดีที่สุดจาก checkpoint (best_multi_task_model.h5)
-best_multi_model = tf.keras.models.load_model('best_multi_task_model.keras')
+# ------------------------------------------------------------------------------------
+# 6) เรียกใช้งาน Walk-Forward Validation สำหรับ Multi-Task
+# ------------------------------------------------------------------------------------
+best_multi_model = load_model("best_multi_task_model.keras", custom_objects={"focal_loss_fixed": focal_loss_fixed})
 
 
 predictions_df, results_per_ticker = walk_forward_validation_multi_task(
-    model=best_multi_model,
-    df=test_df,
-    feature_columns=feature_columns,
-    scaler_features=scaler_features_dict,   # เปลี่ยนให้ตรงกับพารามิเตอร์ของฟังก์ชัน
-    scaler_target=scaler_price_dict,        # เปลี่ยนให้ตรงกับพารามิเตอร์ของฟังก์ชัน
-    ticker_encoder=ticker_encoder,
-    seq_length=seq_length,
-    retrain_frequency=20
+    model = best_multi_model,
+    df = test_df,
+    feature_columns = feature_columns,
+    scaler_features = scaler_features,
+    scaler_target = scaler_target,
+    ticker_encoder = ticker_encoder,
+    seq_length = seq_length,
+    retrain_frequency=1
 )
 
-
-# แสดง Metrics แยก Ticker
+# แสดงผล Metrics
 for ticker, metrics in results_per_ticker.items():
     print(f"\nMetrics for {ticker}:")
-    print(f"  MAE   : {metrics['MAE']:.4f}")
-    print(f"  MSE   : {metrics['MSE']:.4f}")
-    print(f"  RMSE  : {metrics['RMSE']:.4f}")
-    print(f"  MAPE  : {metrics['MAPE']:.4f}")
-    print(f"  SMAPE : {metrics['SMAPE']:.4f}")
-    print(f"  R2    : {metrics['R2 Score']:.4f}")
-    print(f"  Direction Accuracy : {metrics['Direction Accuracy']:.4f}")
+    print(f"  MAE:  {metrics['MAE']:.4f}")
+    print(f"  MSE:  {metrics['MSE']:.4f}")
+    print(f"  RMSE: {metrics['RMSE']:.4f}")
+    print(f"  MAPE: {metrics['MAPE']:.4f}")
+    print(f"  SMAPE:{metrics['SMAPE']:.4f}")
+    print(f"  R2 Score: {metrics['R2 Score']:.4f}")
+    print(f"  Direction Accuracy: {metrics['Direction Accuracy']:.4f}")
 
-# --------------------------------------------------------------------
-# 13) เซฟ Metrics ลงไฟล์
-# --------------------------------------------------------------------
+# เซฟ Metrics ราย Ticker ลง CSV
+selected_columns = [
+    'MAE','MSE','RMSE','MAPE','SMAPE','R2 Score','Direction Accuracy'
+]
 metrics_df = pd.DataFrame.from_dict(results_per_ticker, orient='index')
 metrics_df.to_csv('metrics_per_ticker_multi_task.csv', index=True)
 print("\nSaved metrics per ticker to 'metrics_per_ticker_multi_task.csv'")
+
+# เซฟข้อมูล Actual vs Predicted รวม
+all_data = []
+for ticker, data in results_per_ticker.items():
+    for date_val, actual_p, pred_p, actual_d, pred_d in zip(
+        data['Dates'], data['Actual Prices'], data['Predicted Prices'], 
+        data['Actual Dirs'], data['Predicted Dirs']
+    ):
+        all_data.append([ticker, date_val, actual_p, pred_p, actual_d, pred_d])
+prediction_df = pd.DataFrame(all_data, columns=[
+    'Ticker','Date','Actual_Price','Predicted_Price','Actual_Dir','Predicted_Dir'
+])
+prediction_df.to_csv('all_predictions_per_day_multi_task.csv', index=False)
+print("Saved actual and predicted (price & direction) to 'all_predictions_per_day_multi_task.csv'")
