@@ -17,8 +17,6 @@ import sys
 # ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
-# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
 
 # 🔹 ตั้งค่าหมวดหมู่ข่าวที่ต้องการดึง
 NEWS_CATEGORIES = {
@@ -29,8 +27,8 @@ NEWS_CATEGORIES = {
 }
 
 # 🔹 ไฟล์ CSV
-RAW_CSV_FILE = os.path.join(BASE_DIR, "BangkokPost_Folder", "Thai_News.csv")
-CLEAN_CSV_FILE = os.path.join(BASE_DIR, "BangkokPost_Folder", "Thai_News.csv")
+RAW_CSV_FILE = "D:/Stock_Project/AI-and-API-Stock-Project/BangkokPost_Folder/Thai_News.csv"
+CLEAN_CSV_FILE = "D:/Stock_Project/AI-and-API-Stock-Project/BangkokPost_Folder/Thai_News.csv"
 
 # 🔹 ตั้งค่าวันที่เมื่อวาน (เริ่มที่ 00:00:00)
 yesterday_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
@@ -87,28 +85,34 @@ def fetch_news_content(real_link):
 
 # 🔹 ✅ เพิ่ม Debug เช็คจำนวนข่าวที่ดึงมา
 def scrape_all_news():
-    print(" [START] เริ่มต้นดึงข่าว...")
+    global yesterday_start
+    current_fake_today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    stop_date = datetime(2025, 3, 1, 0, 0, 0)  # ✅ ให้หยุดเมื่อถึง "วันนี้" = 2 มีนาคม 2025
 
-    all_news_data = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(scrape_news_from_category, name, url): name for name, url in NEWS_CATEGORIES.items()}
-        for future in futures:
-            result = future.result()
-            all_news_data.extend(result)
+    while current_fake_today >= stop_date:  # ✅ เปลี่ยนจาก ">" เป็น ">=" เพื่อให้ดึงข่าวของวันที่ 1 มีนาคม 2025 ด้วย
+        print(f" [START] หลอกระบบว่า 'วันนี้' คือ {current_fake_today.strftime('%Y-%m-%d')}")
 
-    # ✅ เช็คว่ามีข่าวจริงไหม
-    print(f"📊 ดึงข่าวทั้งหมดได้ {len(all_news_data)} ข่าว")
+        yesterday_start = current_fake_today - timedelta(days=1)
 
-    # 🔹 บันทึกทับไฟล์เก่า
-    if len(all_news_data) > 0:
-        df = pd.DataFrame(all_news_data)
-        df.to_csv(RAW_CSV_FILE, index=False, encoding='utf-8')
-        print(f"[SAVED] ข่าวทั้งหมด {len(all_news_data)} ข่าวถูกบันทึกเรียบร้อย!")
-    else:
-        print("⚠️ ไม่มีข่าวให้บันทึก! ตรวจสอบว่าเว็บโหลดถูกต้องหรือไม่")
+        all_news_data = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(scrape_news_from_category, name, url): name for name, url in NEWS_CATEGORIES.items()}
+            for future in futures:
+                result = future.result()
+                all_news_data.extend(result)
 
-    # 🔹 ทำความสะอาดข้อมูล
-    clean_and_process_data()
+        print(f"📊 ดึงข่าวทั้งหมดได้ {len(all_news_data)} ข่าว")
+
+        if len(all_news_data) > 0:
+            df = pd.DataFrame(all_news_data)
+            df.to_csv(RAW_CSV_FILE, mode='a', index=False, encoding='utf-8', header=not os.path.exists(RAW_CSV_FILE))
+            print(f"[SAVED] ข่าวทั้งหมด {len(all_news_data)} ข่าวถูกบันทึกเรียบร้อย!")
+        else:
+            print("⚠️ ไม่มีข่าวให้บันทึก! ตรวจสอบว่าเว็บโหลดถูกต้องหรือไม่")
+
+        clean_and_process_data()
+
+        current_fake_today -= timedelta(days=1)  # ✅ ลดวันที่ลง 1 วันเพื่อทำซ้ำ
 
 # 🔹 ดึงข่าวจากแต่ละหมวด
 def scrape_news_from_category(category_name, url):
@@ -164,7 +168,6 @@ def scrape_news_from_category(category_name, url):
     print(f"📌 ดึงข่าวจาก {category_name} ได้ {len(news_data)} ข่าว")  # ✅ Debug จำนวนข่าวที่ดึงมา
     return news_data
 
-# 🔹 ✅ เช็คปัญหาก่อนบันทึก CSV
 def clean_and_process_data():
     if not os.path.exists(RAW_CSV_FILE):
         print("⚠️ ไม่มีไฟล์ CSV ให้ clean")
@@ -174,13 +177,22 @@ def clean_and_process_data():
     print(f"📊 ตรวจสอบข่าวที่โหลดมา: {len(df)} ข่าว")  # ✅ Debug ก่อน clean
 
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
-    df = df[(df['date'] >= yesterday_start) & (df['date'] < (yesterday_start + timedelta(days=1)))]
+
+    # 🔹 ลบเฉพาะข่าวที่เก่ากว่า 01/03/2025
+    cutoff_date = datetime(2025, 3, 1, 0, 0, 0)
+    df = df[df['date'] >= cutoff_date]
+
+    # 🔹 ลบข่าวซ้ำ โดยพิจารณาจาก 'title' และ 'date'
+    df = df.drop_duplicates(subset=['title', 'date'], keep='first')
+
+    # 🔹 เรียงลำดับข่าวจากใหม่ไปเก่า
+    df = df.sort_values(by='date', ascending=False)
 
     if len(df) > 0:
         df.to_csv(CLEAN_CSV_FILE, index=False, encoding='utf-8')
-        print(f"✅ [CLEANED] เหลือเฉพาะข่าวของเมื่อวาน {yesterday_start.strftime('%Y-%m-%d')}")
+        print(f"✅ [CLEANED] ลบข่าวซ้ำและเรียงลำดับข่าวจากใหม่ไปเก่า!")
     else:
-        print("⚠️ ไม่มีข่าวของเมื่อวานให้บันทึก!")
+        print("⚠️ ไม่มีข่าวที่อยู่ในช่วงเวลาที่ต้องการให้บันทึก!")
 
 # 🔹 เรียกใช้งานฟังก์ชันหลัก
 if __name__ == "__main__":

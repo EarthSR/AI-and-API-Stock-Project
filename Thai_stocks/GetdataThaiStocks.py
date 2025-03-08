@@ -1,5 +1,14 @@
 import yfinance as yf
 import pandas as pd
+import datetime
+import sys
+import os
+
+# ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
+sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+
+# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
 
 # กำหนดรายชื่อหุ้นไทย
 tickers = ['ADVANC.BK', 'INTUCH.BK', 'TRUE.BK', 'DITTO.BK', 'DIF.BK', 
@@ -7,10 +16,16 @@ tickers = ['ADVANC.BK', 'INTUCH.BK', 'TRUE.BK', 'DITTO.BK', 'DIF.BK',
 
 # กำหนดวันที่เริ่มต้นและวันที่สิ้นสุด
 start_date = '2018-01-01'
-end_date = '2025-02-28'
+end_date = datetime.datetime.today().strftime('%Y-%m-%d')  # ได้วันที่ปัจจุบันในรูปแบบ YYYY-MM-DD
 
 # ดึงข้อมูลราคาหุ้นจากวันที่เริ่มต้นถึงวันที่สิ้นสุด
-data = yf.download(tickers, start=start_date, end=end_date, group_by='ticker')
+try:
+    data = yf.download(tickers, start=start_date, end=end_date, group_by='ticker')
+    if data.empty:
+        raise ValueError("❌ ไม่สามารถดึงข้อมูลจาก yfinance ได้")
+except Exception as e:
+    print(f"❌ Error: {e}")
+    sys.exit(1)  # ❌ หยุดการทำงานทันที
 
 # สร้าง DataFrame สำหรับแต่ละหุ้น
 data_list = []
@@ -22,23 +37,36 @@ for ticker in tickers:
 
     # ดึงข้อมูล Market Cap
     stock = yf.Ticker(ticker)
-    try:
-        market_cap = stock.info.get('marketCap', 'N/A')
-    except Exception:
-        market_cap = 'N/A'
+    max_retries = 3
+    retry_count = 0
+
+    while retry_count < max_retries:
+        try:
+            stock_info = stock.info  # ✅ ดึง `info` ไว้ในตัวแปรเพื่อลด API call
+            market_cap = stock_info.get('marketCap', 'N/A')  # ✅ ใช้ค่าเริ่มต้นเป็น 'N/A'
+            break  # ✅ ถ้าดึงได้สำเร็จ ให้ออกจาก loop ทันที
+        except Exception as e:
+            retry_count += 1
+            print(f"⚠️ ไม่สามารถดึง Market Cap ของ {ticker}: {e} (ลองใหม่ {retry_count}/{max_retries})")
+            if retry_count == max_retries:
+                market_cap = 'N/A'  # ✅ ถ้าลองครบแล้วยังไม่ได้ ใช้ค่า 'N/A'
     
     ticker_data['Market Cap'] = market_cap  # กำหนด Market Cap
 
     # รีอินเด็กซ์ให้มีทุกวัน (รวมเสาร์-อาทิตย์)
     ticker_data.index = pd.to_datetime(ticker_data.index)  # แปลงเป็น datetime index
-    all_dates = pd.date_range(start=start_date, end=end_date, freq='D')  # ทุกวัน
+    all_dates = pd.date_range(start=start_date, end=end_date, freq='D')  # ใช้ end_date ที่อัปเดตอัตโนมัติ
     ticker_data = ticker_data.reindex(all_dates)
 
         # 🔹 ใช้ค่า **วันก่อนหน้า** แทน NaN ก่อนเติม 0
+    if ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']].isnull().sum().sum() > 0:
+        print(f"⚠️ พบค่า NaN ในข้อมูลของ {ticker}, ใช้ค่าเฉลี่ยย้อนหลังเติมแทน")
+
     ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']] = (
-    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']]
-    .fillna(method='ffill')
-    .rolling(window=3, min_periods=1).mean()  # ใช้ค่าเฉลี่ย 3 วันก่อนหน้า
+        ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']]
+        .ffill()
+        .rolling(window=3, min_periods=1).mean()
+        .fillna(0)  # ✅ ถ้า ffill() ยังมีค่า NaN ให้เติม 0
     )
 
     # เติมค่าที่ขาด
@@ -54,7 +82,7 @@ cleaned_data = pd.concat(data_list).reset_index().rename(columns={'index': 'Date
 cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume', 'Market Cap']]
 
 # บันทึกข้อมูลเป็นไฟล์ CSV
-cleaned_data.to_csv('stock_data_with_marketcap_thai.csv', index=False)
+cleaned_data.to_csv(os.path.join(BASE_DIR, "Finbert", "stock_data_with_marketcap_thai.csv"), index=False)
 
 # แสดงตัวอย่างข้อมูล
 print(cleaned_data.head())

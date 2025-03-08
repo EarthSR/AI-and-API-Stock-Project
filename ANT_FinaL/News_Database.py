@@ -1,19 +1,21 @@
-import os
 import pandas as pd
 import mysql.connector
 from datetime import datetime
 from dotenv import load_dotenv
 import sys
+import os
 
 # ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
+# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
 
 # ✅ โหลดตัวแปรจาก .env
 load_dotenv()
 
 # 🔹 ตั้งค่าพาธไฟล์ CSV
-CSV_FILE_PATH = "D:\\Stock_Project\\AI-and-API-Stock-Project\\Finbert\\news_with_sentiment_gpu.csv"
+CSV_FILE_PATH = os.path.join(BASE_DIR, "Finbert", "news_with_sentiment_gpu.csv")
 
 # 🔹 โหลดข้อมูลจาก news_with_sentiment_gpu.csv
 print("📥 กำลังโหลดไฟล์ news_with_sentiment_gpu.csv ...")
@@ -58,16 +60,19 @@ try:
 
     # ✅ ใช้ `INSERT IGNORE` เพื่อลดปัญหาข่าวซ้ำ
     insert_query = """
-    INSERT IGNORE INTO News2 (Title, Content, PublishedDate, Sentiment, ConfidenceScore, URL, Source)
+    INSERT IGNORE INTO News (Title, Content, PublishedDate, Sentiment, ConfidenceScore, URL, Source)
     VALUES (%s, %s, %s, %s, %s, %s, %s)
     """
 
     # ✅ เช็คข่าวที่ยังไม่ได้บันทึกลงฐานข้อมูล
-    cursor.execute("SELECT URL FROM News2")
+    cursor.execute("SELECT URL FROM News")
     existing_urls = set(url[0] for url in cursor.fetchall())
+    df_new = df_new[~df_new["URL"].isin(existing_urls)]
 
     # ✅ คัดกรองข่าวที่ยังไม่ได้บันทึก (ข้ามข่าวที่ซ้ำ)
-    df_new = df_new[~df_new["URL"].isin(existing_urls)]
+    df_new["URL_Cleaned"] = df_new["URL"].str.replace("https://", "").str.replace("http://", "")
+    df_new = df_new[~df_new["URL_Cleaned"].isin(existing_urls)]
+    df_new.drop(columns=["URL_Cleaned"], inplace=True)  # ✅ ลบคอลัมน์ที่ใช้ชั่วคราวออก
     print(f"🚀 ข่าวใหม่ที่ยังไม่เคยบันทึก: {len(df_new)} รายการ")
 
     # ✅ เตรียมข้อมูลสำหรับเพิ่มลง Database

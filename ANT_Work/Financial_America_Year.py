@@ -38,7 +38,6 @@ def clean_year(value):
 # ฟังก์ชันสำหรับแปลงชื่อคอลัมน์จากภาษาไทยเป็นภาษาอังกฤษ
 column_translation = {
     "รายได้รวม": "Total Revenue",
-    "การเติบโตต่อไตรมาส (%)": "QoQ Growth (%)",
     "การเติบโตเทียบปีก่อนหน้า (%)": "YoY Growth (%)",
     "กำไรสุทธิ": "Net Profit",
     "กำไรต่อหุ้น (EPS)": "Earnings Per Share (EPS)",
@@ -88,6 +87,14 @@ def fetch_full_financial_data(stock):
         )
         print("✅ หน้าโหลดเสร็จแล้ว!")
 
+        # ✅ คลิกปุ่มเปลี่ยนจาก "ไตรมาส" เป็น "ปี"
+        print("🔄 กำลังคลิกปุ่มเปลี่ยนเป็น 'ปี' ...")
+        toggle_button = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, '//div[@data-alias="btn_growth_summary_year"]'))
+        )
+        driver.execute_script("arguments[0].click();", toggle_button)
+        print("✅ คลิกเปลี่ยนเป็น 'ปี' สำเร็จ!")
+
         # ✅ รอให้ข้อมูลปีโหลด
         print("⏳ รอให้ข้อมูลปีโหลด...")
         time.sleep(3)
@@ -110,13 +117,13 @@ def fetch_full_financial_data(stock):
         # 🔹 ดึงข้อมูลจากแต่ละตาราง
         for table in tables:
             rows = table.find_all("tr")
-            quarters = [th.text.strip() for th in rows[0].find_all("th")[1:] if "Q" in th.text]
-            values_dict = {quarter: [] for quarter in quarters}
+            years = [th.text.strip() for th in rows[0].find_all("th")[1:] if "256" in th.text]
+            values_dict = {year: [] for year in years}
 
             for row in rows[1:]:
                 cols = row.find_all("td")
                 metric_name = cols[0].text.strip()
-                for year, col in zip(quarters, cols[1:]):
+                for year, col in zip(years, cols[1:]):
                     value = col.text.strip().replace(",", "")
                     try:
                         values_dict[year].append(float(value))  # แปลงเป็น float ถ้าเป็นตัวเลข
@@ -126,24 +133,11 @@ def fetch_full_financial_data(stock):
             # ✅ สร้าง DataFrame
             df = pd.DataFrame(values_dict, index=[row.find("td").text.strip() for row in rows[1:]]).T
             df.insert(0, "Stock", stock)
-            # ✅ แปลง Quarter ให้เป็น "4Q2024" แทน "4Q2567"
-            df.insert(1, "Quarter", df.index.map(lambda x: x[:2] + clean_year(x[2:])))
-
-            # ✅ ดึงค่า 'Year' ออกจาก 'Quarter'
-            df["Year"] = df["Quarter"].apply(lambda x: int(x[2:]))
-
-            # ✅ สร้างตัวเลขลำดับของ Quarter เพื่อช่วยเรียงให้ถูกต้อง
-            quarter_map = {"4Q": 4, "3Q": 3, "2Q": 2, "1Q": 1}
-            df["Quarter_Order"] = df["Quarter"].apply(lambda x: quarter_map[x[:2]])
-            
-            # ✅ เรียงลำดับข้อมูลตาม Year ก่อน แล้วตามลำดับ Quarter
-            df = df.sort_values(by=["Year", "Quarter_Order"], ascending=[False, False])
-
-            # ✅ ลบคอลัมน์ที่ใช้ช่วยเรียง
-            df = df.drop(columns=["Year", "Quarter_Order"])
+            df.insert(1, "Year", df.index)
+            df.reset_index(drop=True, inplace=True)
 
             # แปลงปีเป็น ค.ศ.
-            df['Quarter'] = df['Quarter'].apply(clean_year)
+            df['Year'] = df['Year'].apply(clean_year)
             all_data.append(df)
 
         # ✅ รวมทุกตารางเข้าด้วยกัน
@@ -160,20 +154,20 @@ def fetch_full_financial_data(stock):
             if "EV / EBITDA" in col:
                 break
 
-        columns_to_keep = ['Stock', 'Quarter'] + columns_to_keep[2:]  # กรองให้ไม่เพิ่ม 'Year' ซ้ำ
+        columns_to_keep = ['Stock', 'Year'] + columns_to_keep[2:]  # กรองให้ไม่เพิ่ม 'Year' ซ้ำ
         full_df = full_df[columns_to_keep]
 
         # ✅ แทนที่ "N/A" ด้วยค่าว่าง (null)
-        full_df = full_df.replace("N/A", "")
+        full_df = full_df.replace("N/A", "").infer_objects(copy=False)
 
         # ✅ แปลงชื่อคอลัมน์เป็นภาษาอังกฤษ
         full_df = translate_columns(full_df, column_translation)
 
         # ✅ เรียงปีจากใหม่ไปเก่า
-        full_df = full_df.sort_values(by="Quarter", ascending=False)
+        full_df = full_df.sort_values(by="Year", ascending=False)
 
-        # ✅ จัดเรียงคอลัมน์ให้ Stock & Quarter อยู่ข้างหน้า
-        columns_order = ["Stock", "Quarter"] + [col for col in full_df.columns if col not in ["Stock", "Quarter"]]
+        # ✅ จัดเรียงคอลัมน์ให้ Stock & Year อยู่ข้างหน้า
+        columns_order = ["Stock", "Year"] + [col for col in full_df.columns if col not in ["Stock", "Year"]]
         full_df = full_df[columns_order]
 
         print("✅ ข้อมูลทั้งหมดรวมกันสำเร็จ!")
@@ -197,8 +191,8 @@ for stock in stocks:
 final_df = pd.concat(all_dfs, ignore_index=True)
 
 # ✅ บันทึกข้อมูลลง CSV
-final_df.to_csv("Financial_America_Quarter.csv", index=False, encoding="utf-8-sig")
-print("✅ บันทึกข้อมูลลง 'Financial_America_Quarter.csv' สำเร็จ!")
+final_df.to_csv("Financial_America_Year.csv", index=False, encoding="utf-8-sig")
+print("✅ บันทึกข้อมูลลง 'Financial_America_Year.csv' สำเร็จ!")
 
 # ✅ ปิด WebDriver
 driver.quit()

@@ -9,8 +9,11 @@ import concurrent.futures
 import threading
 import os
 
-base_url = 'https://www.investing.com/news/stock-market-news'
-output_filename = 'D:\\Stock_Project\\AI-and-API-Stock-Project\\Investing_Folder\\investing_news.csv'
+base_url = "https://www.investing.com/news/stock-market-news"
+output_filename = os.path.join(BASE_DIR, "Investing_Folder", "investing_news.csv")
+
+# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
 
 # Lock สำหรับการใช้ Chrome instance
 driver_lock = threading.Lock()

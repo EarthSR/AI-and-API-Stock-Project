@@ -9,6 +9,14 @@ from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from webdriver_manager.chrome import ChromeDriverManager  # ใช้ WebDriverManager
 import re
+import sys
+import os
+
+# ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
+sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+
+# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
 
 # 🔹 ตั้งค่า Chrome options
 options = Options()
@@ -35,9 +43,10 @@ def clean_year(value):
                 return str(year - 543)  # แปลงจาก พ.ศ. เป็น ค.ศ.
     return value
 
-# ฟังก์ชันแปลงชื่อคอลัมน์จากภาษาไทยเป็นภาษาอังกฤษ
+# ฟังก์ชันสำหรับแปลงชื่อคอลัมน์จากภาษาไทยเป็นภาษาอังกฤษ
 column_translation = {
     "รายได้รวม": "Total Revenue",
+    "การเติบโตต่อไตรมาส (%)": "QoQ Growth (%)",
     "การเติบโตเทียบปีก่อนหน้า (%)": "YoY Growth (%)",
     "กำไรสุทธิ": "Net Profit",
     "กำไรต่อหุ้น (EPS)": "Earnings Per Share (EPS)",
@@ -50,7 +59,7 @@ column_translation = {
     "กระแสเงินสดจากการดำเนินงาน": "Operating Cash Flow",
     "กระแสเงินสดจากการลงทุน": "Investing Cash Flow",
     "กระแสเงินสดจากกิจกรรมทางการเงิน": "Financing Cash Flow",
-    "กำไรต่อหุ้น (บาท)": "EPS (THB)",
+    "กำไรต่อหุ้น (ดอลลาร์สหรัฐฯ)": "EPS (USD)",
     "ROA (%)": "ROA (%)",
     "ROE (%)": "ROE (%)",
     "อัตรากำไรขั้นต้น (%)": "Gross Margin (%)",
@@ -58,11 +67,11 @@ column_translation = {
     "อัตรากำไรสุทธิ (%)": "Net Profit Margin (%)",
     "หนี้สิน/ทุน (เท่า)": "Debt to Equity (x)",
     "วงจรเงินสด (วัน)": "Cash Cycle (Days)",
-    "ราคาล่าสุด (บาท)": "Last Price (THB)",
-    "มูลค่าหลักทรัพย์ตามราคาตลาด (ล้านบาท)": "Market Cap (Million THB)",
+    "ราคาล่าสุด (ดอลลาร์สหรัฐฯ)": "Last Price (USD)",
+    "มูลค่าหลักทรัพย์ตามราคาตลาด (ล้านดอลลาร์สหรัฐฯ)": "Market Cap (Million USD)",
     "P/E (เท่า)": "P/E Ratio (x)",
     "P/BV (เท่า)": "P/BV Ratio (x)",
-    "มูลค่าหุ้นทางบัญชีต่อหุ้น (บาท)": "Book Value Per Share (THB)",
+    "มูลค่าหุ้นทางบัญชีต่อหุ้น (ดอลลาร์สหรัฐฯ)": "Book Value Per Share (USD)",
     "อัตราส่วนเงินปันผลตอบแทน(%)": "Dividend Yield (%)",
     "EV / EBITDA": "EV / EBITDA"
 }
@@ -74,7 +83,7 @@ def translate_columns(df, translation_dict):
 
 # ฟังก์ชันดึงข้อมูลงบการเงินทั้งหมด
 def fetch_full_financial_data(stock):
-    url = f"https://www.finnomena.com/stock/{stock}"
+    url = f"https://www.finnomena.com/stock/{stock}.US"
 
     print(f"🌍 เปิดเว็บ: {url}")
     driver.get(url)
@@ -86,14 +95,6 @@ def fetch_full_financial_data(stock):
             EC.presence_of_element_located((By.CLASS_NAME, "a-toggle-switchtext"))
         )
         print("✅ หน้าโหลดเสร็จแล้ว!")
-
-        # ✅ คลิกปุ่มเปลี่ยนจาก "ไตรมาส" เป็น "ปี"
-        print("🔄 กำลังคลิกปุ่มเปลี่ยนเป็น 'ปี' ...")
-        toggle_button = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.XPATH, '//div[@data-alias="btn_growth_summary_year"]'))
-        )
-        driver.execute_script("arguments[0].click();", toggle_button)
-        print("✅ คลิกเปลี่ยนเป็น 'ปี' สำเร็จ!")
 
         # ✅ รอให้ข้อมูลปีโหลด
         print("⏳ รอให้ข้อมูลปีโหลด...")
@@ -117,13 +118,13 @@ def fetch_full_financial_data(stock):
         # 🔹 ดึงข้อมูลจากแต่ละตาราง
         for table in tables:
             rows = table.find_all("tr")
-            years = [th.text.strip() for th in rows[0].find_all("th")[1:] if "256" in th.text]
-            values_dict = {year: [] for year in years}
+            quarters = [th.text.strip() for th in rows[0].find_all("th")[1:] if "Q" in th.text]
+            values_dict = {quarter: [] for quarter in quarters}
 
             for row in rows[1:]:
                 cols = row.find_all("td")
                 metric_name = cols[0].text.strip()
-                for year, col in zip(years, cols[1:]):
+                for year, col in zip(quarters, cols[1:]):
                     value = col.text.strip().replace(",", "")
                     try:
                         values_dict[year].append(float(value))  # แปลงเป็น float ถ้าเป็นตัวเลข
@@ -133,11 +134,24 @@ def fetch_full_financial_data(stock):
             # ✅ สร้าง DataFrame
             df = pd.DataFrame(values_dict, index=[row.find("td").text.strip() for row in rows[1:]]).T
             df.insert(0, "Stock", stock)
-            df.insert(1, "Year", df.index)
-            df.reset_index(drop=True, inplace=True)
+            # ✅ แปลง Quarter ให้เป็น "4Q2024" แทน "4Q2567"
+            df.insert(1, "Quarter", df.index.map(lambda x: x[:2] + clean_year(x[2:])))
+
+            # ✅ ดึงค่า 'Year' ออกจาก 'Quarter'
+            df["Year"] = df["Quarter"].apply(lambda x: int(x[2:]))
+
+            # ✅ สร้างตัวเลขลำดับของ Quarter เพื่อช่วยเรียงให้ถูกต้อง
+            quarter_map = {"4Q": 4, "3Q": 3, "2Q": 2, "1Q": 1}
+            df["Quarter_Order"] = df["Quarter"].apply(lambda x: quarter_map[x[:2]])
+            
+            # ✅ เรียงลำดับข้อมูลตาม Year ก่อน แล้วตามลำดับ Quarter
+            df = df.sort_values(by=["Year", "Quarter_Order"], ascending=[False, False])
+
+            # ✅ ลบคอลัมน์ที่ใช้ช่วยเรียง
+            df = df.drop(columns=["Year", "Quarter_Order"])
 
             # แปลงปีเป็น ค.ศ.
-            df['Year'] = df['Year'].apply(clean_year)
+            df['Quarter'] = df['Quarter'].apply(clean_year)
             all_data.append(df)
 
         # ✅ รวมทุกตารางเข้าด้วยกัน
@@ -154,20 +168,20 @@ def fetch_full_financial_data(stock):
             if "EV / EBITDA" in col:
                 break
 
-        columns_to_keep = ['Stock', 'Year'] + columns_to_keep[2:]  # กรองให้ไม่เพิ่ม 'Year' ซ้ำ
+        columns_to_keep = ['Stock', 'Quarter'] + columns_to_keep[2:]  # กรองให้ไม่เพิ่ม 'Year' ซ้ำ
         full_df = full_df[columns_to_keep]
 
         # ✅ แทนที่ "N/A" ด้วยค่าว่าง (null)
-        full_df = full_df.replace("N/A", "")
+        full_df = full_df.replace("N/A", "").infer_objects(copy=False)
 
         # ✅ แปลงชื่อคอลัมน์เป็นภาษาอังกฤษ
         full_df = translate_columns(full_df, column_translation)
 
         # ✅ เรียงปีจากใหม่ไปเก่า
-        full_df = full_df.sort_values(by="Year", ascending=False)
+        full_df = full_df.sort_values(by="Quarter", ascending=False)
 
-        # ✅ จัดเรียงคอลัมน์ให้ Stock & Year อยู่ข้างหน้า
-        columns_order = ["Stock", "Year"] + [col for col in full_df.columns if col not in ["Stock", "Year"]]
+        # ✅ จัดเรียงคอลัมน์ให้ Stock & Quarter อยู่ข้างหน้า
+        columns_order = ["Stock", "Quarter"] + [col for col in full_df.columns if col not in ["Stock", "Quarter"]]
         full_df = full_df[columns_order]
 
         print("✅ ข้อมูลทั้งหมดรวมกันสำเร็จ!")
@@ -178,7 +192,7 @@ def fetch_full_financial_data(stock):
         return None
 
 # ✅ ดึงข้อมูลของหุ้นทั้งหมด
-stocks = ["ADVANC", "INTUCH", "TRUE", "DITTO", "DIF", "INSET", "JMART", "INET", "JAS", "HUMAN"]
+stocks = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOG", "META", "TSLA", "AVGO", "TSM", "AMD"]
 all_dfs = []
 
 for stock in stocks:
@@ -191,8 +205,8 @@ for stock in stocks:
 final_df = pd.concat(all_dfs, ignore_index=True)
 
 # ✅ บันทึกข้อมูลลง CSV
-final_df.to_csv("Financial_Thai_Year.csv", index=False, encoding="utf-8-sig")
-print("✅ บันทึกข้อมูลลง 'Financial_Thai_Year.csv' สำเร็จ!")
+final_df.to_csv(os.path.join(BASE_DIR, "Finbert", "Financial_America_Quarter.csv"), index=False)
+print("✅ บันทึกข้อมูลลง 'Financial_America_Quarter.csv' สำเร็จ!")
 
 # ✅ ปิด WebDriver
 driver.quit()

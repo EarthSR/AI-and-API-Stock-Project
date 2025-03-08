@@ -3,6 +3,9 @@ import pandas as pd
 from datetime import datetime
 import sys
 
+# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+
 # ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
@@ -31,7 +34,7 @@ def clean_and_process_data(input_folder, output_file):
     df_cleaned = df.drop_duplicates(subset=['title', 'link'], keep='first')
 
     # 🔹 ปรับรูปแบบวันที่
-    df_cleaned['date'] = pd.to_datetime(df_cleaned['date'], errors='coerce')
+    df_cleaned.loc[:, 'date'] = pd.to_datetime(df_cleaned['date'], errors='coerce')
     df_cleaned = df_cleaned.dropna(subset=['date'])
 
     # 🔹 **ลบข่าวที่เก่ากว่า 01/01/2018**
@@ -54,12 +57,12 @@ def delete_csv_files_in_folder(folder_path, exclude_filename):
             print(f"⚠️ ไม่สามารถลบไฟล์ {file}: {e}")
 
 # 🔹 ตั้งค่าโฟลเดอร์
-bangkokpost_folder = 'D:\\Stock_Project\\AI-and-API-Stock-Project\\BangkokPost_Folder'
-investing_folder = 'D:\\Stock_Project\\AI-and-API-Stock-Project\\Investing_Folder'
-news_data_folder = 'D:\\Stock_Project\\AI-and-API-Stock-Project\\news_data'
+bangkokpost_folder = os.path.join(BASE_DIR, "BangkokPost_Folder")
+investing_folder = os.path.join(BASE_DIR, "Investing_Folder")
+news_data_folder = os.path.join(BASE_DIR, "news_data")
 
-bangkokpost_output_file = os.path.join(news_data_folder, 'bangkokpost_news.csv')
-investing_output_file = os.path.join(news_data_folder, 'investing_news.csv')
+bangkokpost_output_file = os.path.join(news_data_folder, 'Thai_News.csv')
+investing_output_file = os.path.join(news_data_folder, 'USA_News.csv')
 final_output_file = os.path.join(news_data_folder, 'Final_News.csv')
 
 # 🔹 ลบ Final_News.csv ก่อนเริ่ม

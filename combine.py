@@ -1,4 +1,9 @@
 import pandas as pd
+import sys
+import os
+
+# ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
+sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
 # โหลดข้อมูล Sentiment
 sentiment_df_th = pd.read_csv("./Finbert/daily_sentiment_result_th.csv")
@@ -104,7 +109,7 @@ merged_df = merged_df.merge(
 )
 
 # เติมค่า 'Neutral' ในช่องที่เป็น NaN ในคอลัมน์ 'Sentiment'
-merged_df['Sentiment'].fillna('Neutral', inplace=True)
+merged_df = merged_df.assign(Sentiment=merged_df['Sentiment'].fillna('Neutral'))
 
 # เช็คคอลัมน์ที่ลงท้ายด้วย '_x' ถ้ามี NaN ให้ไปเติมค่าในคอลัมน์ที่ลงท้ายด้วย '_y'
 for col in merged_df.columns:
