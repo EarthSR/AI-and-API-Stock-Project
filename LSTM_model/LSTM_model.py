@@ -2,10 +2,12 @@ import pandas as pd
 import numpy as np
 import tensorflow as tf
 import tensorflow.keras.backend as K
+import tensorflow_addons as tfa  # ✅ เพิ่ม TensorFlow Addons
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, BatchNormalization, Embedding, concatenate, Bidirectional, Layer, Masking, Conv1D, Flatten, Attention, MultiHeadAttention, Add, LayerNormalization, Multiply, GlobalAveragePooling1D
+from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, GRU,BatchNormalization, Embedding, concatenate, Bidirectional, Layer, Masking, Conv1D, Flatten, Attention, MultiHeadAttention, Add, LayerNormalization, Multiply, GlobalAveragePooling1D
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import Huber, MeanSquaredError, BinaryCrossentropy
+from tensorflow.keras.regularizers import l2
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from tensorflow.keras.optimizers.schedules import CosineDecay, ExponentialDecay
 from sklearn.preprocessing import RobustScaler, LabelEncoder
@@ -36,6 +38,14 @@ def custom_mape(y_true, y_pred):
         return np.nan
     return np.mean(np.abs((y_true[nonzero_mask] - y_pred[nonzero_mask]) / y_true[nonzero_mask])) * 100
 
+# ✅ Huber Loss (Price) + Focal Loss (Direction)
+def focal_loss_fixed(y_true, y_pred, gamma=2.0, alpha=0.25):
+    y_true = tf.cast(y_true, tf.float32)
+    epsilon = tf.keras.backend.epsilon()
+    y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
+    loss = -alpha * (y_true * tf.math.pow(1 - y_pred, gamma) * tf.math.log(y_pred)) \
+           - (1 - alpha) * ((1 - y_true) * tf.math.pow(y_pred, gamma) * tf.math.log(1 - y_pred))
+    return tf.reduce_mean(loss)
 
 def softmax_axis1(x):
     return tf.keras.activations.softmax(x, axis=1)
@@ -216,9 +226,15 @@ def plot_residuals(y_true, y_pred, ticker):
 # ฟังก์ชัน Loss แบบ Cosine Similarity (หากต้องการ)
 # ------------------------------------------------------------------------------------
 def cosine_similarity_loss(y_true, y_pred):
-    y_true = K.l2_normalize(y_true, axis=-1)
-    y_pred = K.l2_normalize(y_pred, axis=-1)
-    return 1 - K.sum(y_true * y_pred, axis=-1)
+    """ Loss Function ที่ใช้ Cosine Similarity """
+    y_true = K.cast(y_true, dtype=tf.float32)  # ✅ แปลง y_true เป็น float32
+    y_pred = K.cast(y_pred, dtype=tf.float32)  # ✅ แปลง y_pred เป็น float32
+
+    y_true = K.l2_normalize(y_true + K.epsilon(), axis=-1)  # ✅ ป้องกัน division by zero
+    y_pred = K.l2_normalize(y_pred + K.epsilon(), axis=-1)  # ✅ ป้องกัน division by zero
+
+    return -K.mean(y_true * y_pred)  # ✅ ใช้ negative cosine similarity
+
 
 # ลงทะเบียน Loss
 tf.keras.utils.get_custom_objects()["cosine_similarity_loss"] = cosine_similarity_loss
@@ -377,9 +393,11 @@ joblib.dump(scaler_target, 'scaler_target.pkl')
 
 np.save('test_features.npy', test_features_scaled)
 np.save('test_price.npy', test_price_scaled)
+np.save('train_features.npy', train_features_scaled)
+np.save('train_price.npy', train_price_scaled)
 print("✅ บันทึก test_features.npy และ test_price.npy สำเร็จ!")
 
-seq_length = 10
+seq_length = 15
 
 # ------------------------------------------------------------------------------------
 # 3) สร้าง Sequence (ต่อ Ticker) สำหรับ Multi-Task (Price + Direction)
@@ -455,74 +473,62 @@ num_feature = train_features_scaled.shape[1]
 features_input = Input(shape=(seq_length, num_feature), name='features_input')
 ticker_input   = Input(shape=(seq_length,), name='ticker_input')
 
-# -------------------------- Embedding Layer --------------------------
-from tensorflow.keras.layers import MultiHeadAttention, Conv1D, LayerNormalization
 
-from tensorflow.keras.layers import Conv1D, LayerNormalization, Add
+# -------------------------- กำหนดฟังก์ชัน Quantile Loss ก่อน --------------------------
+def quantile_loss(y_true, y_pred, quantile=0.5):
+    error = y_true - y_pred
+    return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
 
 # -------------------------- Embedding Layer --------------------------
 embedding_dim = 32
-ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
+ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name="ticker_embedding")(ticker_input)
 
 # รวม features + ticker_embedding
 merged = concatenate([features_input, ticker_embedding], axis=-1)
 x = merged
 
 # -------------------------- LSTM Layers --------------------------
-x = Bidirectional(LSTM(128, return_sequences=True))(x)
+x = LSTM(64, return_sequences=True)(x)
 x = Dropout(0.3)(x)
-x = Bidirectional(LSTM(64, return_sequences=True))(x)
+x = LSTM(32, return_sequences=True)(x)
 x = Dropout(0.3)(x)
-x = Bidirectional(LSTM(32, return_sequences=True))(x)
+x = LSTM(16, return_sequences=False)(x)  # ชั้นสุดท้าย return_sequences=False
 x = Dropout(0.3)(x)
 
-# -------------------------- Self-Attention --------------------------
-attention_output = MultiHeadAttention(num_heads=4, key_dim=32)(x, x)
-x = concatenate([x, attention_output])  # ✅ ใช้ Concatenate แทน Residual Connection
-
-# -------------------------- Dense Layers --------------------------
-x = Flatten()(x)  # ✅ กลับมาใช้ Flatten แทน GlobalPooling
+# -------------------------- Fully Connected Layers --------------------------
 x = Dense(128, activation="relu")(x)
 x = Dropout(0.3)(x)
 x = Dense(64, activation="relu")(x)
-x = Dropout(0.2)(x)
+x = Dropout(0.3)(x)
 
-# -------------------------- 2 Outputs --------------------------
-price_output = Dense(1, name='price_output')(x)
-direction_output = Dense(1, activation='sigmoid', name='direction_output')(x)
+# -------------------------- Output Layers --------------------------
+price_output = Dense(1, name="price_output")(x)  # พยากรณ์ราคาหุ้น
+direction_output = Dense(1, activation="sigmoid", name="direction_output")(x)  # พยากรณ์ทิศทาง
 
 # -------------------------- สร้างโมเดล --------------------------
-model_multi = Model(inputs=[features_input, ticker_input], outputs=[price_output, direction_output])
+model = Model(inputs=[features_input, ticker_input], outputs=[price_output, direction_output])
 
-# ✅ ใช้ ExponentialDecay แทน CosineDecay
-lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-    initial_learning_rate=3e-4, decay_steps=10000, decay_rate=0.95
-)
-
-# ✅ ใช้ AdamW
+# -------------------------- Optimizer & Loss --------------------------
 optimizer = AdamW(learning_rate=3e-4, weight_decay=1e-5)
 
-# ✅ Compile โมเดลใหม่
-model_multi.compile(
+model.compile(
     optimizer=optimizer,
-    loss={'price_output': Huber(delta=1.5), 'direction_output': 'binary_crossentropy'},
-    loss_weights={'price_output': 0.7, 'direction_output': 0.3},
-    metrics={'price_output': ['mae'], 'direction_output': ['accuracy']}
+    loss={"price_output": tf.keras.losses.Huber(delta=1.0), "direction_output": "binary_crossentropy"},
+    loss_weights={"price_output": 0.7, "direction_output": 0.3},
+    metrics={"price_output": ["mae"], "direction_output": ["accuracy"]}
 )
 
-model_multi.summary()
+model.summary()
+
+# -------------------------- Callbacks --------------------------
+early_stopping = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)
+checkpoint = ModelCheckpoint("best_multi_task_model.keras", monitor="val_loss", save_best_only=True, mode="min")
+lr_scheduler = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6)
 
 # -------------------------- Training --------------------------
-early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-checkpoint = ModelCheckpoint('best_multi_task_model.keras', monitor='val_loss', save_best_only=True, mode='min')
-lr_scheduler = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
-
-history = model_multi.fit(
+history = model.fit(
     [X_price_train, X_ticker_train],
-    {
-        'price_output': y_price_train,
-        'direction_output': y_dir_train
-    },
+    {"price_output": y_price_train, "direction_output": y_dir_train},
     epochs=200,
     batch_size=32,
     verbose=1,
@@ -531,10 +537,10 @@ history = model_multi.fit(
     callbacks=[early_stopping, checkpoint, lr_scheduler]
 )
 
-plot_training_history(history)
+# -------------------------- Save Model --------------------------
+model.save("multi_task_model.keras")
+print("✅ โมเดลที่ดีที่สุดถูกบันทึกแล้ว!")
 
-model_multi.save('multi_task_price_dir_model.keras')
-logging.info("บันทึกโมเดล Multi-Task (รุ่นปรับปรุง) เรียบร้อยแล้ว")
 
 # ------------------------------------------------------------------------------------
 # 5) ฟังก์ชัน Walk-Forward Validation (Multi-Task) + Online Learning
@@ -677,14 +683,14 @@ def walk_forward_validation_multi_task(
 # 6) เรียกใช้งาน Walk-Forward Validation สำหรับ Multi-Task
 # ------------------------------------------------------------------------------------
 best_multi_model = load_model(
-    "best_multi_task_model.keras", 
+    "best_multi_task_model.keras",
     custom_objects={
+        "Huber": Huber,
         "focal_loss_fixed": focal_loss_fixed,
-        "softmax_axis1": softmax_axis1  # ✅ ต้องระบุฟังก์ชันที่ใช้กับ Lambda Layer
+        "softmax_axis1": softmax_axis1
     },
     safe_mode=False  # ✅ อนุญาตให้โหลด Lambda Layer
 )
-
 
 predictions_df, results_per_ticker = walk_forward_validation_multi_task(
     model = best_multi_model,
