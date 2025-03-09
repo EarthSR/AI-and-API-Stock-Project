@@ -3,7 +3,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow.keras.backend as K
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, BatchNormalization, Embedding, concatenate, Bidirectional, Layer, Masking, Conv1D, Flatten, Attention
+from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, BatchNormalization, Embedding, concatenate, Bidirectional, Layer, Masking, Conv1D, Flatten, Attention, MultiHeadAttention, Add, LayerNormalization, Multiply, GlobalAveragePooling1D
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import Huber, MeanSquaredError, BinaryCrossentropy
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
@@ -36,6 +36,10 @@ def custom_mape(y_true, y_pred):
         return np.nan
     return np.mean(np.abs((y_true[nonzero_mask] - y_pred[nonzero_mask]) / y_true[nonzero_mask])) * 100
 
+
+def softmax_axis1(x):
+    return tf.keras.activations.softmax(x, axis=1)
+
 def smape(y_true, y_pred):
     """
     Symmetric Mean Absolute Percentage Error (sMAPE)
@@ -47,6 +51,29 @@ def smape(y_true, y_pred):
     if not np.any(nonzero_mask):
         return np.nan
     return np.mean(diff[nonzero_mask] / denominator[nonzero_mask]) * 100
+
+# **Focal Loss สำหรับ Direction**
+def focal_loss(alpha=0.25, gamma=2.0):
+    def focal_loss_fixed(y_true, y_pred):
+        epsilon = 1e-8
+        y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
+        pt = tf.where(K.equal(y_true, 1), y_pred, 1 - y_pred)
+        loss = -K.mean(alpha * K.pow(1. - pt, gamma) * K.log(pt))
+        return loss
+    return focal_loss_fixed
+
+# เปลี่ยน Optimizer เป็น AdamW
+from tensorflow.keras.optimizers import AdamW
+@register_keras_serializable()
+def focal_loss_fixed(y_true, y_pred, alpha=0.25, gamma=2.0):
+    """
+    Custom Focal Loss
+    """
+    epsilon = 1e-8
+    y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
+    pt = tf.where(K.equal(y_true, 1), y_pred, 1 - y_pred)
+    loss = -K.mean(alpha * K.pow(1. - pt, gamma) * K.log(pt))
+    return loss
 
 # ------------------------------------------------------------------------------------
 # ตั้งค่า Logging
@@ -243,28 +270,54 @@ bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
 df['Bollinger_High'] = bollinger.bollinger_hband()
 df['Bollinger_Low'] = bollinger.bollinger_lband()
 
+# ATR (Average True Range)
+atr = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=14)
+df['ATR'] = atr.average_true_range()
+
+# Keltner Channels
+keltner = ta.volatility.KeltnerChannel(high=df['High'], low=df['Low'], close=df['Close'], window=20, window_atr=10)
+df['Keltner_High'] = keltner.keltner_channel_hband()
+df['Keltner_Low'] = keltner.keltner_channel_lband()
+df['Keltner_Middle'] = keltner.keltner_channel_mband()
+
+# Chaikin Volatility
+window_cv = 10
+df['High_Low_Diff'] = df['High'] - df['Low']
+df['High_Low_EMA'] = df['High_Low_Diff'].ewm(span=window_cv, adjust=False).mean()
+df['Chaikin_Vol'] = df['High_Low_EMA'].pct_change(periods=window_cv) * 100
+
+# Donchian Channels
+window_dc = 20
+df['Donchian_High'] = df['High'].rolling(window=window_dc).max()
+df['Donchian_Low'] = df['Low'].rolling(window=window_dc).min()
+
+# Parabolic SAR
+psar = ta.trend.PSARIndicator(high=df['High'], low=df['Low'], close=df['Close'], step=0.02, max_step=0.2)
+df['PSAR'] = psar.psar()
+
 financial_columns = [
-    'Total Revenue', 'QoQ Growth (%)', 'YoY Growth (%)', 'Net Profit', 
-    'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 'Gross Margin (%)', 
+    'Total Revenue', 'QoQ Growth (%)',
+    'Earnings Per Share (EPS)','ROE (%)',
     'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ', 
     'P/BV Ratio ', 'Dividend Yield (%)'
 ]
 df_financial = df[['Date', 'Ticker'] + financial_columns].drop_duplicates()
 df_financial[financial_columns] = df_financial[financial_columns].where(df_financial[financial_columns].ne(0)).bfill()
 
-stock_columns = [
-    'RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
-    'Bollinger_High', 'Bollinger_Low', 'SMA_50', 'SMA_200'
-]
+stock_columns = ['RSI','EMA_12','EMA_26','MACD','MACD_Signal','Bollinger_High',
+                 'Bollinger_Low','ATR','Keltner_High','Keltner_Low','Keltner_Middle',
+                 'Chaikin_Vol','Donchian_High','Donchian_Low','PSAR','SMA_50','SMA_200']
+
 df[stock_columns] = df[stock_columns].fillna(method='ffill')
 df.fillna(0, inplace=True)
 
 feature_columns = [
     'Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment',
-    'Total Revenue','QoQ Growth (%)', 'YoY Growth (%)', 'Net Profit', 
-    'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 'Gross Margin (%)', 
-    'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ', 'P/BV Ratio ', 
-    'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
+    'Total Revenue', 'QoQ Growth (%)',
+    'Earnings Per Share (EPS)','ROE (%)',
+    'ATR','Keltner_High','Keltner_Low','Keltner_Middle','Chaikin_Vol','Donchian_High','Donchian_Low','PSAR',
+    'Net Profit Margin (%)', 'Debt to Equity ', 'P/E Ratio ', 
+    'P/BV Ratio ', 'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
     'Bollinger_High', 'Bollinger_Low','SMA_50', 'SMA_200'
 ]
 
@@ -310,12 +363,12 @@ train_dir = train_df['Direction'].values  # 1D
 test_dir  = test_df['Direction'].values   # 1D
 
 # สเกล Feature
-scaler_features = RobustScaler(quantile_range=(5, 95))
+scaler_features = RobustScaler()
 train_features_scaled = scaler_features.fit_transform(train_features)
 test_features_scaled  = scaler_features.transform(test_features)
 
 # สเกล Price
-scaler_target = RobustScaler(quantile_range=(5, 95))
+scaler_target = RobustScaler()
 train_price_scaled = scaler_target.fit_transform(train_price)
 test_price_scaled  = scaler_target.transform(test_price)
 
@@ -397,73 +450,72 @@ print("y_price_train shape :", y_price_train.shape)
 print("y_dir_train shape   :", y_dir_train.shape)
 
 num_feature = train_features_scaled.shape[1]
-# ลดขนาด LSTM และเพิ่ม Attention Layer
+
+# -------------------------- Input Layers --------------------------
 features_input = Input(shape=(seq_length, num_feature), name='features_input')
 ticker_input   = Input(shape=(seq_length,), name='ticker_input')
 
-embedding_dim = 16
+# -------------------------- Embedding Layer --------------------------
+from tensorflow.keras.layers import MultiHeadAttention, Conv1D, LayerNormalization
+
+from tensorflow.keras.layers import Conv1D, LayerNormalization, Add
+
+# -------------------------- Embedding Layer --------------------------
+embedding_dim = 32
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
 
 # รวม features + ticker_embedding
 merged = concatenate([features_input, ticker_embedding], axis=-1)
+x = merged
 
-# LSTM Layer ลดขนาดลง
-x = LSTM(64, return_sequences=True)(merged)
+# -------------------------- LSTM Layers --------------------------
+x = Bidirectional(LSTM(128, return_sequences=True))(x)
 x = Dropout(0.3)(x)
-x = LSTM(32, return_sequences=True)(x)
+x = Bidirectional(LSTM(64, return_sequences=True))(x)
 x = Dropout(0.3)(x)
-x = LSTM(16, return_sequences=True)(x)
+x = Bidirectional(LSTM(32, return_sequences=True))(x)
 x = Dropout(0.3)(x)
 
-# **เพิ่ม Attention Layer**
-attention_output = Attention()([x, x])
-x = concatenate([x, attention_output])
-x = Flatten()(x)  # แปลงข้อมูลให้เป็น 1D
-x = BatchNormalization()(x)
+# -------------------------- Self-Attention --------------------------
+attention_output = MultiHeadAttention(num_heads=4, key_dim=32)(x, x)
+x = concatenate([x, attention_output])  # ✅ ใช้ Concatenate แทน Residual Connection
 
-# 2 Outputs
+# -------------------------- Dense Layers --------------------------
+x = Flatten()(x)  # ✅ กลับมาใช้ Flatten แทน GlobalPooling
+x = Dense(128, activation="relu")(x)
+x = Dropout(0.3)(x)
+x = Dense(64, activation="relu")(x)
+x = Dropout(0.2)(x)
+
+# -------------------------- 2 Outputs --------------------------
 price_output = Dense(1, name='price_output')(x)
 direction_output = Dense(1, activation='sigmoid', name='direction_output')(x)
 
-# สร้างโมเดล
+# -------------------------- สร้างโมเดล --------------------------
 model_multi = Model(inputs=[features_input, ticker_input], outputs=[price_output, direction_output])
 
-# **Focal Loss สำหรับ Direction**
-def focal_loss(alpha=0.25, gamma=2.0):
-    def focal_loss_fixed(y_true, y_pred):
-        epsilon = 1e-8
-        y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
-        pt = tf.where(K.equal(y_true, 1), y_pred, 1 - y_pred)
-        loss = -K.mean(alpha * K.pow(1. - pt, gamma) * K.log(pt))
-        return loss
-    return focal_loss_fixed
+# ✅ ใช้ ExponentialDecay แทน CosineDecay
+lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+    initial_learning_rate=3e-4, decay_steps=10000, decay_rate=0.95
+)
 
-# เปลี่ยน Optimizer เป็น AdamW
-from tensorflow.keras.optimizers import AdamW
-@register_keras_serializable()
-def focal_loss_fixed(y_true, y_pred, alpha=0.25, gamma=2.0):
-    """
-    Custom Focal Loss
-    """
-    epsilon = 1e-8
-    y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
-    pt = tf.where(K.equal(y_true, 1), y_pred, 1 - y_pred)
-    loss = -K.mean(alpha * K.pow(1. - pt, gamma) * K.log(pt))
-    return loss
+# ✅ ใช้ AdamW
+optimizer = AdamW(learning_rate=3e-4, weight_decay=1e-5)
+
+# ✅ Compile โมเดลใหม่
 model_multi.compile(
-    optimizer=AdamW(learning_rate=1e-3, weight_decay=1e-5),
-    loss={'price_output': MeanSquaredError(), 'direction_output': focal_loss()},
+    optimizer=optimizer,
+    loss={'price_output': Huber(delta=1.5), 'direction_output': 'binary_crossentropy'},
     loss_weights={'price_output': 0.7, 'direction_output': 0.3},
     metrics={'price_output': ['mae'], 'direction_output': ['accuracy']}
 )
 
 model_multi.summary()
 
-logging.info("เริ่มฝึกโมเดล Multi-Task (Price & Direction) - รุ่นปรับปรุง")
-
+# -------------------------- Training --------------------------
 early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 checkpoint = ModelCheckpoint('best_multi_task_model.keras', monitor='val_loss', save_best_only=True, mode='min')
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=1e-5)
+lr_scheduler = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
 
 history = model_multi.fit(
     [X_price_train, X_ticker_train],
@@ -471,18 +523,19 @@ history = model_multi.fit(
         'price_output': y_price_train,
         'direction_output': y_dir_train
     },
-    epochs=100,
+    epochs=200,
     batch_size=32,
     verbose=1,
-    shuffle=True,
+    shuffle=False,
     validation_split=0.1,
-    callbacks=[early_stopping, checkpoint, reduce_lr]
+    callbacks=[early_stopping, checkpoint, lr_scheduler]
 )
 
-plot_training_history(history)  # เรียกฟังก์ชัน plot ของเดิมได้เลย
+plot_training_history(history)
 
 model_multi.save('multi_task_price_dir_model.keras')
 logging.info("บันทึกโมเดล Multi-Task (รุ่นปรับปรุง) เรียบร้อยแล้ว")
+
 # ------------------------------------------------------------------------------------
 # 5) ฟังก์ชัน Walk-Forward Validation (Multi-Task) + Online Learning
 # ------------------------------------------------------------------------------------
@@ -623,7 +676,14 @@ def walk_forward_validation_multi_task(
 # ------------------------------------------------------------------------------------
 # 6) เรียกใช้งาน Walk-Forward Validation สำหรับ Multi-Task
 # ------------------------------------------------------------------------------------
-best_multi_model = load_model("best_multi_task_model.h5", custom_objects={"focal_loss_fixed": focal_loss_fixed})
+best_multi_model = load_model(
+    "best_multi_task_model.keras", 
+    custom_objects={
+        "focal_loss_fixed": focal_loss_fixed,
+        "softmax_axis1": softmax_axis1  # ✅ ต้องระบุฟังก์ชันที่ใช้กับ Lambda Layer
+    },
+    safe_mode=False  # ✅ อนุญาตให้โหลด Lambda Layer
+)
 
 
 predictions_df, results_per_ticker = walk_forward_validation_multi_task(
@@ -634,7 +694,7 @@ predictions_df, results_per_ticker = walk_forward_validation_multi_task(
     scaler_target = scaler_target,
     ticker_encoder = ticker_encoder,
     seq_length = seq_length,
-    retrain_frequency = 20
+    retrain_frequency=1
 )
 
 # แสดงผล Metrics
