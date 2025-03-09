@@ -1037,9 +1037,8 @@ app.put(
 app.get("/api/users/:userId/profile", verifyToken, (req, res) => {
   const userId = req.params.userId;
 
-  // คำสั่ง SQL ดึงข้อมูลโปรไฟล์ของผู้ใช้
   const getUserProfileSql = `
-    SELECT UserID, Username, Gender, Birthday, ProfileImageURL 
+    SELECT UserID, Username, Email, Gender, Birthday, ProfileImageURL 
     FROM User WHERE UserID = ?;
   `;
 
@@ -1053,24 +1052,23 @@ app.get("/api/users/:userId/profile", verifyToken, (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    // ดึงข้อมูลผู้ใช้ที่พบ
     const user = results[0];
 
-    // คำนวณอายุจากวันเกิด
-    const age = calculateAge(user.Birthday);
+    // ✅ ตรวจสอบค่า birthday และ profileImage ก่อนส่งออกไป
+    const age = user.Birthday ? calculateAge(user.Birthday) : "N/A";
+    const profileImage = user.ProfileImageURL ? user.ProfileImageURL : "/uploads/default.png";
 
-    // ส่งข้อมูลโปรไฟล์กลับไป
     res.json({
       userId: user.UserID,
       username: user.Username,
+      email: user.Email,
       gender: user.Gender,
       birthday: user.Birthday,
       age: age,
-      profileImage: user.ProfileImageURL || "No image uploaded"
+      profileImage: profileImage
     });
   });
 });
-
 
 // Helper function: แปลงวันเกิดเป็น YYYY-MM-DD
 function formatDateForSQL(dateString) {
@@ -1336,7 +1334,7 @@ app.get("/api/latest-news", async (req, res) => {
       const newsQuery = `
         SELECT Title, Sentiment, PublishedDate 
         FROM News 
-        WHERE PublishedDate = ?
+        WHERE PublishedDate
         ORDER BY PublishedDate DESC
         LIMIT 10;
       `;
