@@ -72,6 +72,15 @@ def focal_loss(alpha=0.25, gamma=2.0):
         return loss
     return focal_loss_fixed
 
+def quantile_loss(y_true, y_pred, quantile=0.5):
+    error = y_true - y_pred
+    return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
+
+def cosine_similarity_loss(y_true, y_pred):
+    y_true = tf.keras.backend.l2_normalize(y_true, axis=-1)
+    y_pred = tf.keras.backend.l2_normalize(y_pred, axis=-1)
+    return -tf.reduce_mean(y_true * y_pred)
+
 # เปลี่ยน Optimizer เป็น AdamW
 from tensorflow.keras.optimizers import AdamW
 @register_keras_serializable()
@@ -479,6 +488,13 @@ def quantile_loss(y_true, y_pred, quantile=0.5):
     error = y_true - y_pred
     return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
 
+from tensorflow.keras.layers import Conv1D, GlobalAveragePooling1D
+from tensorflow.keras.layers import Attention, BatchNormalization, LSTM
+
+from tensorflow.keras.layers import MultiHeadAttention, BatchNormalization, LSTM, Add
+
+from tensorflow.keras.layers import Concatenate, BatchNormalization, LSTM
+
 # -------------------------- Embedding Layer --------------------------
 embedding_dim = 32
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name="ticker_embedding")(ticker_input)
@@ -520,12 +536,12 @@ model.compile(
 
 model.summary()
 
-# -------------------------- Callbacks --------------------------
+
+# ---------------------- Callbacks ----------------------
 early_stopping = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)
 checkpoint = ModelCheckpoint("best_multi_task_model.keras", monitor="val_loss", save_best_only=True, mode="min")
-lr_scheduler = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6)
 
-# -------------------------- Training --------------------------
+# ---------------------- Training ----------------------
 history = model.fit(
     [X_price_train, X_ticker_train],
     {"price_output": y_price_train, "direction_output": y_dir_train},
@@ -534,7 +550,7 @@ history = model.fit(
     verbose=1,
     shuffle=False,
     validation_split=0.1,
-    callbacks=[early_stopping, checkpoint, lr_scheduler]
+    callbacks=[early_stopping, checkpoint]
 )
 
 # -------------------------- Save Model --------------------------
