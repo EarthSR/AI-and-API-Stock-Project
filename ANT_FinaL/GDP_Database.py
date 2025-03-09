@@ -44,8 +44,8 @@ df_gdp = df_gdp.where(pd.notna(df_gdp), None)
 
 # ✅ บันทึกข้อมูลลง CSV
 df_gdp.to_csv("GDP_AllData.csv", index=False)
-df_gdp[df_gdp["Country Code"] == "THA"].to_csv("GDP_TH.csv", index=False)
-df_gdp[df_gdp["Country Code"] == "USA"].to_csv("GDP_US.csv", index=False)
+df_gdp[df_gdp["Country Code"] == "TH"].to_csv("GDP_TH.csv", index=False)
+df_gdp[df_gdp["Country Code"] == "US"].to_csv("GDP_US.csv", index=False)
 print("✅ บันทึกข้อมูลลงไฟล์ CSV สำเร็จ: GDP_AllData.csv, GDP_TH.csv, GDP_US.csv")
 
 # ✅ เชื่อมต่อฐานข้อมูลและบันทึกข้อมูล

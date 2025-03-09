@@ -17,12 +17,29 @@ stock_df_us = pd.read_csv("./Finbert/stock_data_with_marketcap_usa.csv")
 financial_thai_df = pd.read_csv("./Finbert/Financial_Thai_Quarter.csv")
 financial_us_df = pd.read_csv("./Finbert/Financial_America_Quarter.csv")
 
+print("🔍 คอลัมน์ใน Financial_Thai_Quarter.csv:", financial_thai_df.columns.tolist())
+print("🔍 คอลัมน์ใน Financial_America_Quarter.csv:", financial_us_df.columns.tolist())
+
+# ✅ ลบช่องว่างและแปลงชื่อคอลัมน์
+financial_thai_df.columns = financial_thai_df.columns.str.strip()
+financial_us_df.columns = financial_us_df.columns.str.strip()
+
+# ✅ แปลง EV / EBITDA เป็น EVEBITDA
+financial_thai_df.rename(columns={"EV / EBITDA": "EVEBITDA"}, inplace=True)
+financial_us_df.rename(columns={"EV / EBITDA": "EVEBITDA"}, inplace=True)
+
+# ✅ ตรวจสอบอีกครั้งว่าชื่อคอลัมน์ถูกต้อง
+print("📌 คอลัมน์ใน Financial_Thai_Quarter.csv (หลัง Rename):", financial_thai_df.columns.tolist())
+print("📌 คอลัมน์ใน Financial_America_Quarter.csv (หลัง Rename):", financial_us_df.columns.tolist())
+
 columns_to_keep = [
     'Stock', 'Quarter', 'QoQ Growth (%)',
     'Total Revenue', 'YoY Growth (%)', 'Net Profit', 'Earnings Per Share (EPS)', 
     'ROA (%)', 'ROE (%)', 'Gross Margin (%)', 'Net Profit Margin (%)',
-    'Debt to Equity (x)', 'P/E Ratio (x)', 'P/BV Ratio (x)', 'Dividend Yield (%)'
+    'Debt to Equity (x)', 'P/E Ratio (x)', 'P/BV Ratio (x)', 'Dividend Yield (%)',
+    'EVEBITDA'  # ✅ ใช้ EVEBITDA แทน EV / EBITDA
 ]
+
 financial_thai_df = financial_thai_df[columns_to_keep]
 financial_us_df = financial_us_df[columns_to_keep]
 
@@ -129,7 +146,6 @@ front_columns = [col for col in ['Date', 'Ticker', 'Quarter Date'] if col in mer
 other_columns = [col for col in merged_df.columns if col not in front_columns]
 merged_df = merged_df[front_columns + other_columns]
 
-# **Function Clean ข้อมูลหลังการ Merge (ตรวจสอบว่า Date และ Quarter Date ตรงกัน)**
 def clean_data_based_on_dates(df):
     # กำหนดคอลัมน์ที่ต้องการลบข้อมูลหาก Date และ Quarter Date ไม่ตรงกัน
     columns_to_clean = [
@@ -137,14 +153,14 @@ def clean_data_based_on_dates(df):
         'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 'Gross Margin (%)', 
         'Net Profit Margin (%)', 'Debt to Equity (x)', 'P/E Ratio (x)', 'P/BV Ratio (x)', 
         'Dividend Yield (%)',
-        'Debt to Equity ', 'P/E Ratio ', 'P/BV Ratio '  # เพิ่มคอลัมน์ที่ไม่มี (x) ต่อท้าย
+        'Debt to Equity ', 'P/E Ratio ', 'P/BV Ratio ', 
+        'EVEBITDA'  # ✅ เพิ่ม EVEBITDA เข้าไปในเงื่อนไขการลบข้อมูล
     ]
     
     # เช็คว่าค่าของ Date และ Quarter Date ตรงกันหรือไม่
     for col in columns_to_clean:
-        df.loc[df['Date'] != df['Quarter Date'], col] = None  # ลบข้อมูลในคอลัมน์ที่ไม่ตรงกัน
+        df.loc[df['Date'] != df['Quarter Date'], col] = None  # ✅ กำหนดเป็น None ถ้า Date != Quarter Date
     return df
-
 
 # เรียกใช้งานฟังก์ชัน Clean
 merged_df = clean_data_based_on_dates(merged_df)

@@ -86,6 +86,7 @@ df = df.rename(columns={
     "Earnings Per Share (EPS)": "EPS",
     "Gross Margin (%)": "GrossMargin",
     "Net Profit Margin (%)": "NetProfitMargin",
+    "EVEBITDA": "EVEBITDA",
     "Debt to Equity ": "DebtToEquity"
 })
 
@@ -107,10 +108,10 @@ df = df.where(pd.notna(df), None)  # แปลง NaN เป็น None เพ�
 
 # ✅ แยกข้อมูลสำหรับ Stock และเพิ่ม Sector, Industry, Description
 stock__data = df[["StockSymbol", "Market", "MarketCap", "CompanyName", "Sector", "Industry", "Description"]].drop_duplicates(subset=["StockSymbol"], keep="last")
-stock_detail_data = df[[
+stock_detail_data = df[[  
     "Date", "StockSymbol", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice", "PERatio", "ROE", "DividendYield",
     "QoQGrowth", "YoYGrowth", "TotalRevenue", "NetProfit", "EPS", "GrossMargin", "NetProfitMargin", "DebtToEquity",
-    "Change (%)", "Volume"  # ✅ เพิ่ม Change (%) และ Volume
+    "Change (%)", "Volume","EVEBITDA"
 ]]
 
 print(stock__data.head(10))  # แสดง 10 แถวแรกของ Stock ก่อนบันทึกลงฐานข้อมูล
@@ -118,7 +119,6 @@ print(stock__data.head(10))  # แสดง 10 แถวแรกของ Stock
 stock_detail_data = stock_detail_data.copy()  # ✅ สร้าง Copy ป้องกัน Warning
 stock_detail_data.loc[:, "PredictionTrend"] = None
 stock_detail_data.loc[:, "PredictionClose"] = None
-
 
 # ✅ บันทึกไฟล์ CSV แยกกัน
 print(f"💾 กำลังบันทึกไฟล์ {STOCK_CSV_PATH} ...")
@@ -175,20 +175,23 @@ try:
     INSERT INTO StockDetail (
         Date, StockSymbol, OpenPrice, HighPrice, LowPrice, ClosePrice, PERatio, ROE, DividendYield,
         QoQGrowth, YoYGrowth, TotalRevenue, NetProfit, EPS, GrossMargin, NetProfitMargin, DebtToEquity,
-        `Change (%)`, Volume, PredictionTrend, PredictionClose
+        `Change (%)`, Volume, EVEBITDA, PredictionTrend, PredictionClose
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON DUPLICATE KEY UPDATE 
-        OpenPrice=VALUES(OpenPrice), HighPrice=VALUES(HighPrice), LowPrice=VALUES(LowPrice), 
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)  
+    ON DUPLICATE KEY UPDATE  
+        OpenPrice=VALUES(OpenPrice), HighPrice=VALUES(HighPrice), LowPrice=VALUES(LowPrice),  
         ClosePrice=VALUES(ClosePrice), PERatio=VALUES(PERatio), ROE=VALUES(ROE), DividendYield=VALUES(DividendYield),
-        QoQGrowth=VALUES(QoQGrowth), YoYGrowth=VALUES(YoYGrowth), TotalRevenue=VALUES(TotalRevenue), 
-        NetProfit=VALUES(NetProfit), EPS=VALUES(EPS), GrossMargin=VALUES(GrossMargin), 
-        NetProfitMargin=VALUES(NetProfitMargin), DebtToEquity=VALUES(DebtToEquity),
+        QoQGrowth=VALUES(QoQGrowth), YoYGrowth=VALUES(YoYGrowth), TotalRevenue=VALUES(TotalRevenue),  
+        NetProfit=VALUES(NetProfit), EPS=VALUES(EPS), GrossMargin=VALUES(GrossMargin),  
+        NetProfitMargin=VALUES(NetProfitMargin), DebtToEquity=VALUES(DebtToEquity),  
         `Change (%)`=VALUES(`Change (%)`), Volume=VALUES(Volume),
-        PredictionTrend=VALUES(PredictionTrend), PredictionClose=VALUES(PredictionClose);
+        EVEBITDA=VALUES(EVEBITDA), PredictionTrend=VALUES(PredictionTrend), PredictionClose=VALUES(PredictionClose);
     """
     
     stock_detail_values = convert_nan_to_none(stock_detail_data.values.tolist())
+    # ✅ ตรวจสอบและแปลงค่า EVEBITDA (NaN → None)
+    stock_detail_data["EVEBITDA"] = stock_detail_data["EVEBITDA"].replace([np.inf, -np.inf], np.nan)
+
     cursor.executemany(insert_stock_detail_query, stock_detail_values)
     print(f"✅ บันทึกข้อมูลลง StockDetail: {len(stock_detail_values)} รายการ")
 
