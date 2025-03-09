@@ -481,7 +481,6 @@ app.post("/api/verify-reset-otp", async (req, res) => {
   }
 });
 
-
 // Reset Password
 app.post("/api/reset-password", async (req, res) => {
   try {
@@ -527,7 +526,6 @@ app.post("/api/reset-password", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
-
 
 // Resend OTP for Reset Password
 app.post("/api/resend-otp/reset-password", async (req, res) => {
@@ -719,13 +717,19 @@ app.post("/api/login", async (req, res) => {
 
 // Set Profile และ Login อัตโนมัติหลังจากตั้งโปรไฟล์เสร็จ
 app.post("/api/set-profile", verifyToken, upload.single('picture'), (req, res) => {
-  const { newUsername, birthday } = req.body;
+  const { newUsername, birthday, gender } = req.body;
   const userId = req.userId; // รับ UserID จาก token
   const picture = req.file ? `/uploads/${req.file.filename}` : null;
 
-  // ตรวจสอบว่า newUsername, picture, และ birthday ถูกส่งมาหรือไม่
-  if (!newUsername || !picture || !birthday) {
-    return res.status(400).json({ message: "New username, picture, and birthday are required" });
+  // ตรวจสอบค่าที่ต้องมี
+  if (!newUsername || !picture || !birthday || !gender) {
+    return res.status(400).json({ message: "New username, picture, birthday, and gender are required" });
+  }
+
+  // ตรวจสอบว่าค่า gender ถูกต้อง
+  const validGenders = ["Male", "Female", "Other"];
+  if (!validGenders.includes(gender)) {
+    return res.status(400).json({ message: "Invalid gender. Please choose 'Male', 'Female', or 'Other'." });
   }
 
   // แปลงวันที่จาก DD/MM/YYYY เป็น YYYY-MM-DD
@@ -733,15 +737,19 @@ app.post("/api/set-profile", verifyToken, upload.single('picture'), (req, res) =
   const formattedBirthday = `${birthdayParts[2]}-${birthdayParts[1]}-${birthdayParts[0]}`;
 
   // อัปเดตโปรไฟล์ของผู้ใช้ และเปลี่ยนสถานะเป็น Active
-  const updateProfileQuery = "UPDATE User SET Username = ?, ProfileImageURL = ?, Birthday = ?, Status = 'active' WHERE UserID = ?";
-  pool.query(updateProfileQuery, [newUsername, picture, formattedBirthday, userId], (err) => {
+  const updateProfileQuery = `
+    UPDATE User 
+    SET Username = ?, ProfileImageURL = ?, Birthday = ?, Gender = ?, Status = 'active' 
+    WHERE UserID = ?`;
+
+  pool.query(updateProfileQuery, [newUsername, picture, formattedBirthday, gender, userId], (err) => {
     if (err) {
       console.error("Error updating profile: ", err);
       return res.status(500).json({ message: "Error updating profile" });
     }
 
     // ดึงข้อมูลผู้ใช้เพื่อนำไปสร้าง Token
-    pool.query("SELECT UserID, Email, Username, ProfileImageURL FROM User WHERE UserID = ?", [userId], (err, userResults) => {
+    pool.query("SELECT UserID, Email, Username, ProfileImageURL, Gender FROM User WHERE UserID = ?", [userId], (err, userResults) => {
       if (err) {
         console.error("Database error fetching user data:", err);
         return res.status(500).json({ message: "Error fetching user data" });
@@ -764,6 +772,7 @@ app.post("/api/set-profile", verifyToken, upload.single('picture'), (req, res) =
           email: user.Email,
           username: user.Username,
           profileImage: user.ProfileImageURL,
+          gender: user.Gender
         },
       });
     });
