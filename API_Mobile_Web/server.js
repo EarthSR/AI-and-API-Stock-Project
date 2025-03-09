@@ -1550,12 +1550,13 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
         return res.status(404).json({ error: "No stock data available" });
       }
 
-      // ดึงข้อมูลหลักของหุ้น
+      // ดึงข้อมูลหลักของหุ้น รวมถึง Market เพื่อดูว่าหุ้นตัวนี้เป็นของประเทศไหน
       const stockQuery = `
         SELECT 
           sd.StockDetailID, 
           s.StockSymbol, 
           s.CompanyName, 
+          s.Market,         -- ✅ เพิ่ม Market เพื่อดูว่าหุ้นตัวนี้เป็นของประเทศไหน
           s.Sector, 
           s.Industry, 
           s.Description, 
@@ -1580,22 +1581,22 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
 
         const stock = results[0];
 
-        // แปลงค่า Type ของหุ้นเป็น US หรือ TH Stock
-        let stockType = stock.CompanyName; // ✅ เปลี่ยนเป็นชื่อหุ้นแทน Market
+        // ✅ ดึงค่าประเทศจาก Market
+        let stockType = stock.Market === "America" ? "US Stock" : "TH Stock";
 
-        // คำนวณการเปลี่ยนแปลงราคาพยากรณ์
+        // ✅ คำนวณการเปลี่ยนแปลงราคาพยากรณ์
         let pricePredictionChange = stock.PredictionClose
           ? ((stock.PredictionClose - stock.ClosePrice) / stock.ClosePrice) * 100
           : null;
 
-        // ดึงค่าอัตราแลกเปลี่ยน USD → THB (ถ้าเป็นหุ้น US)
-        let exchangeRate = 1; // Default = 1 (หุ้นไทย)
-        if (stockType.includes("NASDAQ") || stockType.includes("NYSE")) {
+        // ✅ ดึงค่าอัตราแลกเปลี่ยน USD → THB (เฉพาะหุ้นอเมริกา)
+        let exchangeRate = 1;
+        if (stock.Market === "America") {
           try {
             const exchangeRateQuery = "SELECT Rate FROM ExchangeRates WHERE Currency = 'USD'";
             const [exchangeResult] = await pool.promise().query(exchangeRateQuery);
             if (exchangeResult.length > 0) {
-              exchangeRate = exchangeResult[0].Rate;
+              exchangeRate = parseFloat(exchangeResult[0].Rate); // ✅ แปลงเป็นตัวเลขจริง
             }
           } catch (exRateErr) {
             console.error("Error fetching exchange rate:", exRateErr);
@@ -1604,14 +1605,12 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
 
         // ✅ ตรวจสอบว่า ClosePrice มีค่าหรือไม่
         const closePrice = stock.ClosePrice !== null ? parseFloat(stock.ClosePrice) : 0;
-        const closePriceTHB = stockType.includes("NASDAQ") || stockType.includes("NYSE")
-          ? closePrice * exchangeRate
-          : closePrice;
+        const closePriceTHB = stock.Market === "America" ? closePrice * exchangeRate : closePrice;
 
         // ✅ ตรวจสอบค่า closePriceTHB ก่อนใช้ .toFixed(2)
         const formattedClosePriceTHB = isNaN(closePriceTHB) ? "N/A" : closePriceTHB.toFixed(2);
 
-        // ดึงข้อมูลกราฟย้อนหลังตาม Timeframe ที่เลือก
+        // ✅ ดึงข้อมูลกราฟย้อนหลังตาม Timeframe ที่เลือก
         const historyQuery = `
           SELECT StockSymbol, Date, ClosePrice
           FROM StockDetail 
@@ -1626,11 +1625,11 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
             return res.status(500).json({ error: "Database error fetching historical data" });
           }
 
-          // ส่ง Response กลับ
+          // ✅ ส่ง Response กลับ
           res.json({
             StockDetailID: stock.StockDetailID,
             StockSymbol: stock.StockSymbol,
-            Type: stockType,
+            Type: stockType, // ✅ เปลี่ยนเป็นประเภทของหุ้นตาม Market
             ClosePrice: stock.ClosePrice,
             ClosePriceTHB: formattedClosePriceTHB, // ✅ ใช้ค่าที่ตรวจสอบแล้ว
             Date: latestDate,
@@ -1654,6 +1653,7 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 
 
