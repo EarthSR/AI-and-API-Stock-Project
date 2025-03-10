@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import sqlite3  # หรือใช้ pymysql สำหรับ MySQL
+import pymysql
 import joblib
 import tensorflow as tf
 import tensorflow.keras.backend as K
@@ -14,24 +14,24 @@ scaler_target = joblib.load("../LSTM_model/scaler_target.pkl")
 ticker_encoder = joblib.load("../LSTM_model/ticker_encoder.pkl")
 
 # ✅ โหลด Weighted Stacking Model
-weighted_stacking_price = joblib.load("weighted_stacking_price.pkl")
-weighted_stacking_direction = joblib.load("weighted_stacking_direction.pkl")
+weighted_stacking_price = joblib.load("../Ensemble_Model/weighted_stacking_price.pkl")
+weighted_stacking_direction = joblib.load("../Ensemble_Model/weighted_stacking_direction.pkl")
 
 # ✅ โหลด Base Models (XGBoost และ RandomForest)
-xgb_model = joblib.load("xgb_model_price.pkl")
-rf_model = joblib.load("rf_model_price.pkl")
-xgb_dir_model = joblib.load("xgb_model_direction.pkl")
-rf_dir_model = joblib.load("rf_model_direction.pkl")
+xgb_model = joblib.load("../Ensemble_Model/xgb_model_price.pkl")
+rf_model = joblib.load("../Ensemble_Model/rf_model_price.pkl")
+xgb_dir_model = joblib.load("../Ensemble_Model/xgb_model_direction.pkl")
+rf_dir_model = joblib.load("../Ensemble_Model/rf_model_direction.pkl")
 
 def walk_forward_validation_multi_task(
     db_connection, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length=10
 ):
     """
     ทำ Walk-Forward Validation โดยใช้ Weighted Stacking Model
-    อัปเดต `PredictionPrice` และ `PredictionTrend` ในฐานข้อมูล
+    อัปเดต `PredictionPrice` และ `PredictionTrend` ในฐานข้อมูล MySQL
     
     Args:
-        db_connection: การเชื่อมต่อฐานข้อมูล SQLite / MySQL
+        db_connection: การเชื่อมต่อฐานข้อมูล MySQL
         feature_columns: ชื่อฟีเจอร์ที่ใช้
         scaler_features: Scaler ของฟีเจอร์
         scaler_target: Scaler ของ Price
@@ -50,7 +50,7 @@ def walk_forward_validation_multi_task(
 
         # ✅ ดึงข้อมูลย้อนหลัง 10 วันล่าสุดจาก StockDetail
         query_stock = f"""
-            SELECT Date, OpenPrice, HighPrice, LowPrice, ClosePrice, Volume, PERatio, ROE, EPS 
+            SELECT Date, OpenPrice, HighPrice, LowPrice, ClosePrice, Volume, TotalRevenue, QoQGrowth, EPS,ROE, NetProfitMarginNetProfitMargin,DebtToEquity,PERatio,
             FROM StockDetail 
             WHERE StockSymbol = '{ticker}' 
             ORDER BY Date DESC 
@@ -136,8 +136,14 @@ def walk_forward_validation_multi_task(
     # ✅ คืนค่า DataFrame ผลลัพธ์
     return pd.DataFrame(all_predictions)
 
-# ✅ ใช้ฐานข้อมูลจริง
-db_connection = sqlite3.connect("stock_database.db")
+# ✅ เชื่อมต่อฐานข้อมูล MySQL
+db_connection = pymysql.connect(
+    host="10.10.50.62",
+    user="trademine",
+    password="trade789",
+    database="TradeMine",
+    cursorclass=pymysql.cursors.DictCursor
+)
 
 # ✅ เรียกใช้ฟังก์ชัน
 predictions_df = walk_forward_validation_multi_task(
