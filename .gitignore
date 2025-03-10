@@ -1,7 +1,7 @@
 *.csv
 *.log
 *.temp
-*.json
+
 *.rar
 *.h5
 *.pkl
