@@ -2,10 +2,12 @@ import pandas as pd
 import numpy as np
 import tensorflow as tf
 import tensorflow.keras.backend as K
+import tensorflow_addons as tfa  # ✅ เพิ่ม TensorFlow Addons
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import Input, GRU, Dense, Dropout, BatchNormalization, Embedding, concatenate, Bidirectional, Layer, Masking, Conv1D, Flatten, Attention, Lambda, GlobalAveragePooling1D, RepeatVector
+from tensorflow.keras.layers import Input, GRU, Dense, Dropout, GRU,BatchNormalization, Embedding, concatenate, Bidirectional, Layer, Masking, Conv1D, Flatten, Attention, MultiHeadAttention, Add, LayerNormalization, Multiply, GlobalAveragePooling1D
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import Huber, MeanSquaredError, BinaryCrossentropy
+from tensorflow.keras.regularizers import l2
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from tensorflow.keras.optimizers.schedules import CosineDecay, ExponentialDecay
 from sklearn.preprocessing import RobustScaler, LabelEncoder
@@ -16,8 +18,6 @@ import joblib
 import logging
 from tensorflow.keras.losses import Loss
 from tensorflow.keras.saving import register_keras_serializable
-from tensorflow.keras.optimizers import AdamW
-
 
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -38,6 +38,18 @@ def custom_mape(y_true, y_pred):
         return np.nan
     return np.mean(np.abs((y_true[nonzero_mask] - y_pred[nonzero_mask]) / y_true[nonzero_mask])) * 100
 
+# ✅ Huber Loss (Price) + Focal Loss (Direction)
+def focal_loss_fixed(y_true, y_pred, gamma=2.0, alpha=0.25):
+    y_true = tf.cast(y_true, tf.float32)
+    epsilon = tf.keras.backend.epsilon()
+    y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
+    loss = -alpha * (y_true * tf.math.pow(1 - y_pred, gamma) * tf.math.log(y_pred)) \
+           - (1 - alpha) * ((1 - y_true) * tf.math.pow(y_pred, gamma) * tf.math.log(1 - y_pred))
+    return tf.reduce_mean(loss)
+
+def softmax_axis1(x):
+    return tf.keras.activations.softmax(x, axis=1)
+
 def smape(y_true, y_pred):
     """
     Symmetric Mean Absolute Percentage Error (sMAPE)
@@ -51,7 +63,7 @@ def smape(y_true, y_pred):
     return np.mean(diff[nonzero_mask] / denominator[nonzero_mask]) * 100
 
 # **Focal Loss สำหรับ Direction**
-def focal_loss(alpha=0.5, gamma=1.5):
+def focal_loss(alpha=0.25, gamma=2.0):
     def focal_loss_fixed(y_true, y_pred):
         epsilon = 1e-8
         y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
@@ -60,6 +72,17 @@ def focal_loss(alpha=0.5, gamma=1.5):
         return loss
     return focal_loss_fixed
 
+def quantile_loss(y_true, y_pred, quantile=0.5):
+    error = y_true - y_pred
+    return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
+
+def cosine_similarity_loss(y_true, y_pred):
+    y_true = tf.keras.backend.l2_normalize(y_true, axis=-1)
+    y_pred = tf.keras.backend.l2_normalize(y_pred, axis=-1)
+    return -tf.reduce_mean(y_true * y_pred)
+
+# เปลี่ยน Optimizer เป็น AdamW
+from tensorflow.keras.optimizers import AdamW
 @register_keras_serializable()
 def focal_loss_fixed(y_true, y_pred, alpha=0.25, gamma=2.0):
     """
@@ -210,18 +233,17 @@ def plot_residuals(y_true, y_pred, ticker):
 
 # ------------------------------------------------------------------------------------
 # ฟังก์ชัน Loss แบบ Cosine Similarity (หากต้องการ)
-# ------------------------------------------------------------------------------------import tensorflow.keras.backend as K
-import tensorflow as tf
-
+# ------------------------------------------------------------------------------------
 def cosine_similarity_loss(y_true, y_pred):
     """ Loss Function ที่ใช้ Cosine Similarity """
     y_true = K.cast(y_true, dtype=tf.float32)  # ✅ แปลง y_true เป็น float32
     y_pred = K.cast(y_pred, dtype=tf.float32)  # ✅ แปลง y_pred เป็น float32
 
-    y_true = K.l2_normalize(y_true + K.epsilon(), axis=-1)  # ✅ ป้องกันค่าต่ำเกินไป
-    y_pred = K.l2_normalize(y_pred + K.epsilon(), axis=-1)  # ✅ ป้องกันค่าต่ำเกินไป
+    y_true = K.l2_normalize(y_true + K.epsilon(), axis=-1)  # ✅ ป้องกัน division by zero
+    y_pred = K.l2_normalize(y_pred + K.epsilon(), axis=-1)  # ✅ ป้องกัน division by zero
 
     return -K.mean(y_true * y_pred)  # ✅ ใช้ negative cosine similarity
+
 
 # ลงทะเบียน Loss
 tf.keras.utils.get_custom_objects()["cosine_similarity_loss"] = cosine_similarity_loss
@@ -384,7 +406,7 @@ np.save('train_features.npy', train_features_scaled)
 np.save('train_price.npy', train_price_scaled)
 print("✅ บันทึก test_features.npy และ test_price.npy สำเร็จ!")
 
-seq_length = 15
+seq_length = 10
 
 # ------------------------------------------------------------------------------------
 # 3) สร้าง Sequence (ต่อ Ticker) สำหรับ Multi-Task (Price + Direction)
@@ -454,89 +476,92 @@ print("X_ticker_train shape:", X_ticker_train.shape)
 print("y_price_train shape :", y_price_train.shape)
 print("y_dir_train shape   :", y_dir_train.shape)
 
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, GRU, Bidirectional, Dropout, Conv1D, BatchNormalization
-from tensorflow.keras.layers import MultiHeadAttention, Add, GlobalAveragePooling1D, LayerNormalization, Flatten, Concatenate, Embedding, RepeatVector
-from tensorflow.keras.optimizers import AdamW
-from tensorflow.keras.activations import swish
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
-import tensorflow_addons as tfa
-
 num_feature = train_features_scaled.shape[1]
 
-# ------------------- Input Layers -------------------
+# -------------------------- Input Layers --------------------------
 features_input = Input(shape=(seq_length, num_feature), name='features_input')
-ticker_input = Input(shape=(seq_length,), name='ticker_input')
+ticker_input   = Input(shape=(seq_length,), name='ticker_input')
 
-# ------------------- Embedding Layer -------------------
-embedding_dim = 32
-ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name='ticker_embedding')(ticker_input)
-ticker_embedding = GlobalAveragePooling1D()(ticker_embedding)  
-ticker_embedding = RepeatVector(seq_length)(ticker_embedding)
 
-# รวม Features + Embedding
-merged = Concatenate(axis=-1)([features_input, ticker_embedding])
+# -------------------------- กำหนดฟังก์ชัน Quantile Loss ก่อน --------------------------
+def quantile_loss(y_true, y_pred, quantile=0.5):
+    error = y_true - y_pred
+    return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
 
-# ✅ CNN Layer ลด Noise
-x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu', kernel_initializer='glorot_uniform')(merged)
-x = BatchNormalization()(x)
+from tensorflow.keras.layers import MultiHeadAttention, LayerNormalization, Dense, Dropout, Add, Input, GRU, GlobalAveragePooling1D, Conv1D, Bidirectional, Embedding
+from tensorflow.keras.models import Model
+import tensorflow.keras.backend as K
 
-# ✅ GRU Layers
-gru_1 = Bidirectional(GRU(64, return_sequences=True, kernel_regularizer=tf.keras.regularizers.l2(1e-4)))(x)
-x = Dropout(0.2)(gru_1)
+# ---------------------- Quantile Loss ----------------------
+from tensorflow.keras.saving import register_keras_serializable
 
-gru_2 = Bidirectional(GRU(32, return_sequences=True, kernel_regularizer=tf.keras.regularizers.l2(1e-4)))(x)
-x = Dropout(0.2)(gru_2)
+@register_keras_serializable()
+def quantile_loss(y_true, y_pred, quantile=0.5):
+    """Custom Quantile Loss"""
+    error = y_true - y_pred
+    return K.mean(K.maximum(quantile * error, (quantile - 1) * error))
 
-# ✅ ใช้ GlobalAveragePooling1D
-gru_2_pooled = GlobalAveragePooling1D()(gru_2)
-gru_2_resized = Dense(128, activation="linear")(gru_2_pooled)
-x = Add()([gru_1[:, -1, :], gru_2_resized])
-x = LayerNormalization()(x)
 
-# ✅ Fully Connected Layer
-x = Dense(128, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
+# ---------------------- Embedding Layer ----------------------
+embedding_dim = 16
+ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name="ticker_embedding")(ticker_input)
+ticker_embedding = Dense(8, activation="relu")(ticker_embedding)
+
+# รวม features + ticker_embedding
+merged = concatenate([features_input, ticker_embedding], axis=-1)
+
+# ---------------------- GRU Layers ----------------------
+x = Bidirectional(GRU(64, return_sequences=True))(merged)
+x = Dropout(0.2)(x)
+x = Bidirectional(GRU(32, return_sequences=False))(x)
 x = Dropout(0.2)(x)
 
-# ✅ Output Layers
-price_output = Dense(1, name='price_output')(x)
-direction_output = Dense(1, activation='sigmoid', name='direction_output')(x)
+# ---------------------- Fully Connected Layers ----------------------
+x = Dense(64, activation="relu")(x)
+x = Dropout(0.2)(x)
+x = Dense(32, activation="relu")(x)
+x = Dropout(0.2)(x)
 
-# ------------------- สร้างโมเดล -------------------
+# ---------------------- Output Layers ----------------------
+price_output = Dense(1, name="price_output")(x)
+direction_output = Dense(1, activation="sigmoid", name="direction_output")(x)
+
+# ---------------------- สร้างโมเดล ----------------------
 model = Model(inputs=[features_input, ticker_input], outputs=[price_output, direction_output])
 
-# ------------------- Optimizer -------------------
-optimizer = AdamW(learning_rate=1e-3, weight_decay=1e-5)
+# ---------------------- Optimizer & Loss ----------------------
+optimizer = AdamW(learning_rate=3e-4, weight_decay=1e-6)
 
-# ✅ Compile โมเดลใหม่
 model.compile(
     optimizer=optimizer,
-    loss={'price_output': Huber(delta=1.5), 'direction_output': 'binary_crossentropy'},
-    loss_weights={'price_output': 0.7, 'direction_output': 0.3},
-    metrics={'price_output': ['mae'], 'direction_output': ['accuracy']}
+    loss={"price_output": tf.keras.losses.Huber(delta=1.0), "direction_output": "binary_crossentropy"},
+    loss_weights={"price_output": 0.8, "direction_output": 0.2},
+    metrics={"price_output": ["mae"], "direction_output": ["accuracy"]}
 )
 
 model.summary()
 
-# ------------------- Callbacks -------------------
-early_stopping = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)  # ✅ เพิ่ม patience ให้โมเดลเรียนรู้ได้นานขึ้น
-checkpoint = ModelCheckpoint('best_multi_task_model.keras', monitor='val_loss', save_best_only=True, mode='min')
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=5e-5)  # ✅ ลด LR ช้าลง + ป้องกัน LR ต่ำเกินไป
+early_stopping = EarlyStopping(monitor="val_loss", patience=20, restore_best_weights=True)
+lr_scheduler = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6)
+checkpoint = ModelCheckpoint("best_multi_task_model.keras", monitor="val_loss", save_best_only=True, mode="min")
 
-# ------------------- Training -------------------
+callbacks = [early_stopping, lr_scheduler, checkpoint]
+
 history = model.fit(
     [X_price_train, X_ticker_train],
-    {'price_output': y_price_train, 'direction_output': y_dir_train},
+    {"price_output": y_price_train, "direction_output": y_dir_train},
     epochs=200,
-    batch_size=32,
-    validation_split=0.1,
+    batch_size=16,
+    verbose=1,
     shuffle=False,
-    callbacks=[early_stopping, checkpoint, reduce_lr]
+    validation_split=0.1,
+    callbacks=callbacks
 )
 
-# บันทึกโมเดลที่ดีที่สุด
-model.save('multi_task_price_dir_model.keras')
+# -------------------------- Save Model --------------------------
+model.save("multi_task_model.keras")
+print("✅ โมเดลที่ดีที่สุดถูกบันทึกแล้ว!")
+
 
 # ------------------------------------------------------------------------------------
 # 5) ฟังก์ชัน Walk-Forward Validation (Multi-Task) + Online Learning
@@ -678,8 +703,15 @@ def walk_forward_validation_multi_task(
 # ------------------------------------------------------------------------------------
 # 6) เรียกใช้งาน Walk-Forward Validation สำหรับ Multi-Task
 # ------------------------------------------------------------------------------------
-best_multi_model = load_model("best_multi_task_model.keras", custom_objects={"focal_loss_fixed": focal_loss_fixed})
-
+best_multi_model = load_model(
+    "best_multi_task_model.keras",
+    custom_objects={
+        "quantile_loss": quantile_loss,
+        "focal_loss_fixed": focal_loss_fixed,
+        "softmax_axis1": softmax_axis1
+    },
+    safe_mode=False  # ✅ อนุญาตให้โหลด Lambda Layer
+)
 
 predictions_df, results_per_ticker = walk_forward_validation_multi_task(
     model = best_multi_model,
