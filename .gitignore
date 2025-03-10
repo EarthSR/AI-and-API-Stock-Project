@@ -1,7 +1,6 @@
 *.csv
 *.log
 *.temp
-
 *.rar
 *.h5
 *.pkl
