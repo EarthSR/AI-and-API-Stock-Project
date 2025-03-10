@@ -1588,12 +1588,13 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
           s.Sector, 
           s.Industry, 
           s.Description, 
-          s.MarketCap, 
+          sd.MarketCap, 
           sd.OpenPrice, 
           sd.ClosePrice, 
           sd.\`Change (%)\` AS ChangePercentage, 
           sd.Volume, 
-          sd.PredictionClose
+          sd.PredictionClose, 
+          sd.PredictionTrend  -- ✅ เพิ่ม PredictionTrend
         FROM Stock s
         LEFT JOIN StockDetail sd ON s.StockSymbol = sd.StockSymbol AND sd.Date = ?
         WHERE s.StockSymbol = ?;
@@ -1673,6 +1674,7 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
               Date: latestDate,
               Change: stock.ChangePercentage,
               PredictionClose: stock.PredictionClose,
+              PredictionTrend: stock.PredictionTrend, // ✅ เพิ่ม PredictionTrend
               PredictionCloseDate: latestDate,
               PricePredictionChange: pricePredictionChange ? pricePredictionChange.toFixed(2) + "%" : "N/A",
               SelectedTimeframe: timeframe,
@@ -1698,6 +1700,7 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 //Recommended US Stocks
 app.get("/api/recommend-us-stocks", async (req, res) => {
@@ -2044,6 +2047,76 @@ app.get("/api/most-held-th-stocks", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------//
+
+// API ให้ React ดึง Secure Embed URL ไปใช้
+app.get("/get-embed-url", (req, res) => {
+  res.json({
+    embedUrl:
+      "https://app.powerbi.com/view?r=eyJrIjoiOGU0ZjNhMjktYjJiZC00ODA1LWIzM2EtNzNkNDg0NzhhMzVkIiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
+  });
+});
+
+//Admin//
+app.post("/api/admin/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "กรุณากรอกอีเมลและรหัสผ่าน" });
+    }
+
+    // ค้นหาผู้ใช้ที่เป็น Admin และมีสถานะ Active
+    const sql = "SELECT * FROM User WHERE Email = ? AND Status = 'active' AND Role = 'admin'";
+    pool.query(sql, [email], (err, results) => {
+      if (err) {
+        console.error("Database error during admin login:", err);
+        return res.status(500).json({ error: "เกิดข้อผิดพลาดระหว่างการเข้าสู่ระบบ" });
+      }
+
+      if (results.length === 0) {
+        return res.status(404).json({ message: "ไม่พบบัญชีแอดมิน หรืออาจถูกระงับ" });
+      }
+
+      const user = results[0];
+
+      // ตรวจสอบรหัสผ่าน
+      bcrypt.compare(password, user.Password, (err, isMatch) => {
+        if (err) {
+          console.error("Password comparison error:", err);
+          return res.status(500).json({ error: "เกิดข้อผิดพลาดในการตรวจสอบรหัสผ่าน" });
+        }
+
+        if (!isMatch) {
+          return res.status(401).json({ message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
+        }
+
+        // ✅ สร้าง JWT Token (ไม่มี LastLogin / LastLoginIP)
+        const token = jwt.sign({ id: user.UserID, role: user.Role }, JWT_SECRET, { expiresIn: "7d" });
+
+        // ✅ ส่งข้อมูล Response
+        res.status(200).json({
+          message: "เข้าสู่ระบบแอดมินสำเร็จ",
+          token,
+          user: {
+            id: user.UserID,
+            email: user.Email,
+            username: user.Username,
+            profile_image: user.ProfileImageURL,
+            role: user.Role
+          },
+        });
+      });
+    });
+  } catch (error) {
+    console.error("Internal error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
 
 
 

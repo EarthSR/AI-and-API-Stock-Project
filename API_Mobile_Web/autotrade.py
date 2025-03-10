@@ -57,32 +57,33 @@ cursor.execute(query)
 stocks = cursor.fetchall()
 
 def get_settrade_price(stock_symbol):
-    stock_symbol_api = f"{stock_symbol}.BK"
     try:
         market_data = investor.MarketData()
         print(f"📌 ตรวจสอบ API: {market_data}")
 
-        # ✅ ดึงข้อมูลจาก API
-        quote = market_data.get_quote_symbol(stock_symbol_api)
+        # ✅ ดึงข้อมูลจาก API โดยไม่ต้องเติม ".BK"
+        quote = market_data.get_quote_symbol(stock_symbol)
 
-        # ✅ แสดงข้อมูลดิบที่ API คืนค่าก่อน parse เป็น JSON
+        # ✅ Debug Data
         print(f"📌 Debug Data สำหรับ {stock_symbol}: {repr(quote)}")
 
-        # ✅ ตรวจสอบว่า API คืนค่ากลับมาเป็น Dictionary หรือไม่
-        if not isinstance(quote, dict):
-            print(f"❌ API คืนค่าที่ไม่ใช่ JSON (อาจเป็น HTML หรือข้อความ Error):\n{quote}")
+        # ✅ เช็คว่าข้อมูลมีอยู่หรือไม่
+        if isinstance(quote, dict):
+            if quote.get("marketStatus") == "Close":
+                print(f"⚠️ ตลาดปิดอยู่ ไม่สามารถดึงราคาสำหรับ {stock_symbol}")
+                return None
+            if "last" in quote and quote["last"] is not None:
+                return float(quote["last"])
+            else:
+                print(f"⚠️ ไม่พบราคาล่าสุดของ {stock_symbol}, อาจไม่มีการซื้อขาย")
+                return None
+        else:
+            print(f"❌ API คืนค่าที่ไม่ใช่ JSON: {repr(quote)}")
             return None
 
-        # ✅ ถ้าเป็น Dictionary และมี key "last" ให้คืนค่าราคาหุ้น
-        if "last" in quote:
-            return float(quote["last"])
-        else:
-            print(f"❌ ไม่พบราคาสำหรับ {stock_symbol}")
-            return None
     except Exception as e:
         print(f"❌ ไม่สามารถดึงราคาหุ้นไทย {stock_symbol}: {str(e)}")
         return None
-
 
 # 📌 ฟังก์ชันส่งคำสั่งซื้อขายหุ้นไทยผ่าน Settrade
 def execute_settrade_trade(stock_symbol, trade_type, quantity):
