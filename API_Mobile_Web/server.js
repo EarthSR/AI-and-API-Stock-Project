@@ -1588,7 +1588,7 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
           s.Sector, 
           s.Industry, 
           s.Description, 
-          s.MarketCap, 
+          sd.MarketCap, 
           sd.OpenPrice, 
           sd.ClosePrice, 
           sd.\`Change (%)\` AS ChangePercentage, 
@@ -2044,6 +2044,99 @@ app.get("/api/most-held-th-stocks", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------//
+
+//Admin//
+app.post("/api/admin/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "กรุณากรอกอีเมลและรหัสผ่าน" });
+    }
+
+    // ดึง IP ของผู้ใช้
+    const ipAddress = req.headers["x-forwarded-for"] || req.connection.remoteAddress;
+
+    // ตรวจสอบว่าผู้ใช้เป็น Admin และ Active
+    const sql = "SELECT * FROM User WHERE Email = ? AND Status = 'active' AND Role = 'admin'";
+    pool.query(sql, [email], (err, results) => {
+      if (err) {
+        console.error("Database error during admin login:", err);
+        return res.status(500).json({ error: "เกิดข้อผิดพลาดระหว่างการเข้าสู่ระบบ" });
+      }
+
+      if (results.length === 0) {
+        return res.status(404).json({ message: "ไม่พบบัญชีแอดมินนี้ หรืออาจถูกระงับ" });
+      }
+
+      const user = results[0];
+
+      // ตรวจสอบจำนวนครั้งที่ล็อกอินผิดพลาด
+      if (user.FailedAttempts >= 5) {
+        const now = Date.now();
+        const timeSinceLastAttempt = now - new Date(user.LastFailedAttempt).getTime();
+        if (timeSinceLastAttempt < 300000) { // 5 นาที
+          return res.status(429).json({ message: "คุณล็อกอินผิดพลาดหลายครั้ง โปรดลองอีกครั้งใน 5 นาที" });
+        }
+      }
+
+      // เปรียบเทียบรหัสผ่านกับค่า Hash ในฐานข้อมูล
+      bcrypt.compare(password, user.Password, (err, isMatch) => {
+        if (err) {
+          console.error("Password comparison error:", err);
+          return res.status(500).json({ error: "เกิดข้อผิดพลาดในการตรวจสอบรหัสผ่าน" });
+        }
+
+        if (!isMatch) {
+          // เพิ่มจำนวนครั้งที่ล็อกอินผิดพลาด
+          const updateFailSql = "UPDATE User SET FailedAttempts = FailedAttempts + 1, LastFailedAttempt = NOW() WHERE UserID = ?";
+          pool.query(updateFailSql, [user.UserID], (err) => {
+            if (err) console.error("Error logging failed login attempt:", err);
+          });
+
+          const remainingAttempts = 5 - (user.FailedAttempts + 1);
+          return res.status(401).json({
+            message: `อีเมลหรือรหัสผ่านไม่ถูกต้อง คุณมีโอกาสอีก ${remainingAttempts} ครั้งก่อนถูกระงับชั่วคราว`
+          });
+        }
+
+        // รีเซ็ต FailedAttempts ถ้าล็อกอินสำเร็จ
+        const resetFailSql = "UPDATE User SET FailedAttempts = 0, LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?";
+        pool.query(resetFailSql, [ipAddress, user.UserID], (err) => {
+          if (err) {
+            console.error("Error resetting failed attempts or updating login time:", err);
+            return res.status(500).json({ error: "เกิดข้อผิดพลาดระหว่างอัปเดตข้อมูลล็อกอิน" });
+          }
+
+          // สร้าง JWT Token สำหรับแอดมิน
+          const token = jwt.sign({ id: user.UserID, role: user.Role }, JWT_SECRET, { expiresIn: "7d" });
+
+          // ส่ง Response กลับไปยังผู้ใช้
+          res.status(200).json({
+            message: "เข้าสู่ระบบแอดมินสำเร็จ",
+            token,
+            user: {
+              id: user.UserID,
+              email: user.Email,
+              username: user.Username,
+              profile_image: user.ProfileImageURL,
+              role: user.Role,
+              last_login: user.LastLogin,
+              last_login_ip: ipAddress
+            },
+          });
+        });
+      });
+    });
+  } catch (error) {
+    console.error("Internal error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 
 
 
