@@ -44,8 +44,13 @@ df = df.rename(columns={
     "Debt to Equity ": "DebtToEquity",
     "MarketCap": "MarketCap",
     "P/BV Ratio ": "P_BV_Ratio", 
-    "Dividend Yield (%)": "Dividend_Yield"
+    "Dividend Yield (%)": "Dividend_Yield",
+    "Sentiment": "Sentiment"
 })
+
+# ✅ เติมค่า 'Neutral' ให้ 'Sentiment' ที่เป็น NaN ก่อนบันทึก
+df['Sentiment'] = df['Sentiment'].fillna("Neutral")
+
 
 # ✅ **Dictionary ของ CompanyName, Market, Sector, Industry และ Description**
 company_dict = {
@@ -98,8 +103,12 @@ stock__data = df[["StockSymbol", "Market", "CompanyName", "Sector", "Industry", 
 stock_detail_data = df[[  
     "Date", "StockSymbol", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice", "PERatio", "ROE",
     "QoQGrowth", "YoYGrowth", "TotalRevenue", "NetProfit", "EPS", "GrossMargin", "NetProfitMargin", "DebtToEquity",
-    "Changepercen", "Volume", "EVEBITDA", "MarketCap", "P_BV_Ratio", "Dividend_Yield",
+    "Changepercen", "Volume", "EVEBITDA", "MarketCap", "P_BV_Ratio", "Dividend_Yield", "Sentiment",
 ]]
+
+# ✅ เติมค่า "Neutral" ให้กับ `Sentiment` ที่เป็น NaN
+stock_detail_data["Sentiment"] = stock_detail_data["Sentiment"].fillna("Neutral")
+
 
 # ✅ เพิ่มคอลัมน์ 'PredictionTrend' และ 'PredictionClose' เป็น None ก่อน
 stock_detail_data["PredictionTrend"] = None
@@ -112,12 +121,11 @@ print(stock_detail_data.columns)
 stock_detail_data = stock_detail_data[[
     "Date", "StockSymbol", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice", "PERatio", "ROE",
     "QoQGrowth", "YoYGrowth", "TotalRevenue", "NetProfit", "EPS", "GrossMargin", "NetProfitMargin", "DebtToEquity",
-    "Changepercen", "Volume", "EVEBITDA", "MarketCap", "P_BV_Ratio", "Dividend_Yield", "PredictionTrend", "PredictionClose"
+    "Changepercen", "Volume", "EVEBITDA", "MarketCap", "P_BV_Ratio", "Dividend_Yield", "Sentiment", "PredictionTrend", "PredictionClose"
 ]]
 
-
 # ตรวจสอบข้อมูลอีกครั้งก่อนการบันทึก
-print(stock_detail_data[['EVEBITDA', 'MarketCap', 'Volume']].head())
+print(stock_detail_data[['EVEBITDA', 'MarketCap', 'Volume', 'Sentiment']].head())
 
 # ตรวจสอบค่าที่ไม่ใช่ตัวเลขในคอลัมน์ YoYGrowth
 stock_detail_data["YoYGrowth"] = pd.to_numeric(stock_detail_data["YoYGrowth"], errors='coerce')
@@ -185,9 +193,9 @@ try:
     INSERT INTO StockDetail (
         Date, StockSymbol, OpenPrice, HighPrice, LowPrice, ClosePrice, PERatio, ROE, QoQGrowth, YoYGrowth,
         TotalRevenue, NetProfit, EPS, GrossMargin, NetProfitMargin, DebtToEquity, Changepercen, Volume,
-        EVEBITDA, MarketCap, P_BV_Ratio, Dividend_Yield, PredictionTrend, PredictionClose
+        EVEBITDA, MarketCap, P_BV_Ratio, Dividend_Yield, Sentiment, PredictionTrend, PredictionClose
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE  
         StockSymbol=VALUES(StockSymbol), Date=VALUES(Date), OpenPrice=VALUES(OpenPrice),
         HighPrice=VALUES(HighPrice), LowPrice=VALUES(LowPrice), ClosePrice=VALUES(ClosePrice),
@@ -195,12 +203,17 @@ try:
         TotalRevenue=VALUES(TotalRevenue), NetProfit=VALUES(NetProfit), EPS=VALUES(EPS),
         GrossMargin=VALUES(GrossMargin), NetProfitMargin=VALUES(NetProfitMargin), DebtToEquity=VALUES(DebtToEquity),
         Changepercen=VALUES(Changepercen), Volume=VALUES(Volume), EVEBITDA=VALUES(EVEBITDA), 
-        MarketCap=VALUES(MarketCap), P_BV_Ratio=VALUES(P_BV_Ratio), Dividend_Yield=VALUES(Dividend_Yield),
+        MarketCap=VALUES(MarketCap), P_BV_Ratio=VALUES(P_BV_Ratio), Dividend_Yield=VALUES(Dividend_Yield), Sentiment=VALUES(Sentiment),
         PredictionTrend=VALUES(PredictionTrend), PredictionClose=VALUES(PredictionClose);
 
     """
 
+    # ✅ เติมค่า "Neutral" ให้ `Sentiment` ก่อนแปลงเป็น None สำหรับ MySQL
+    stock_detail_data["Sentiment"] = stock_detail_data["Sentiment"].fillna("Neutral")
+
+    # ✅ แปลง `NaN` → `None` สำหรับ MySQL
     stock_detail_values = convert_nan_to_none(stock_detail_data.values.tolist())
+
     print("ข้อมูลที่กำลังจะบันทึกลงฐานข้อมูล:")
     print(stock_detail_values[:1])  # แสดง 5 แถวแรกก่อนบันทึก
 
