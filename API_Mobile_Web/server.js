@@ -905,16 +905,16 @@ app.get("/api/search", (req, res) => {
     return res.status(400).json({ error: "Search query is required" });
   }
 
-  // Trim the query และแปลงให้เป็นตัวพิมพ์เล็ก
+  // Trim ค่าที่ค้นหาและแปลงเป็นตัวพิมพ์เล็ก
   const searchValue = `%${query.trim().toLowerCase()}%`;
 
-  // SQL query เพื่อค้นหาข้อมูลจาก Stock และ StockDetail
+  // SQL query ค้นหาหุ้นและรายละเอียดหุ้นล่าสุด
   const searchSql = `
     SELECT 
         s.StockSymbol, 
         s.Market, 
-        s.MarketCap, 
         s.CompanyName, 
+        sd.StockDetailID,  -- ✅ เพิ่ม StockDetailID
         sd.Date, 
         sd.ClosePrice
     FROM Stock s
@@ -941,6 +941,7 @@ app.get("/api/search", (req, res) => {
       if (existingStock) {
         // ถ้ามีอยู่แล้ว เพิ่มข้อมูล ClosePrice เข้าไปในรายการราคา
         existingStock.prices.push({
+          StockDetailID: stock.StockDetailID, // ✅ เพิ่ม StockDetailID
           date: stock.Date,
           close_price: stock.ClosePrice,
         });
@@ -949,11 +950,11 @@ app.get("/api/search", (req, res) => {
         acc.push({
           StockSymbol: stock.StockSymbol,
           Market: stock.Market,
-          MarketCap: stock.MarketCap,
           CompanyName: stock.CompanyName,
           prices: stock.Date
             ? [
                 {
+                  StockDetailID: stock.StockDetailID, // ✅ เพิ่ม StockDetailID
                   date: stock.Date,
                   close_price: stock.ClosePrice,
                 },
@@ -968,6 +969,7 @@ app.get("/api/search", (req, res) => {
     res.json({ results: groupedResults });
   });
 });
+
 
 
 // ---- Profile ---- //
@@ -1236,7 +1238,7 @@ app.get("/api/favorites", verifyToken, (req, res) => {
     const stockSymbols = stockResults.map(stock => stock.StockSymbol);
 
     const fetchStockDetailsSql = `
-      SELECT StockSymbol, ClosePrice, \`Change (%)\` AS ChangePercentage, Date
+      SELECT StockSymbol, ClosePrice, Changepercen AS ChangePercentage, Date
       FROM StockDetail
       WHERE StockSymbol IN (?) 
       ORDER BY Date DESC;
@@ -1299,11 +1301,11 @@ app.get("/api/top-10-stocks", async (req, res) => {
 
       // คิวรี่หุ้นที่มีการเปลี่ยนแปลงสูงสุด 10 อันดับ พร้อมราคาปิด และ StockDetailID
       const query = `
-        SELECT sd.StockDetailID, s.StockSymbol, sd.\`Change (%)\` AS ChangePercentage, sd.ClosePrice
+        SELECT sd.StockDetailID, s.StockSymbol, sd.Changepercen AS ChangePercentage, sd.ClosePrice
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ?
-        ORDER BY sd.\`Change (%)\` DESC
+        ORDER BY sd.Changepercen DESC
         LIMIT 10;
       `;
 
@@ -1352,14 +1354,14 @@ app.get("/api/trending-stocks", async (req, res) => {
           sd.StockDetailID,
           sd.Date, 
           s.StockSymbol, 
-          sd.\`Change (%)\` AS ChangePercentage, 
+          sd.Changepercen AS ChangePercentage, 
           sd.ClosePrice,
           sd.PredictionClose,
           s.Market
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ?
-        ORDER BY s.Market DESC, sd.\`Change (%)\` DESC
+        ORDER BY s.Market DESC, sd.Changepercen DESC
         LIMIT 3;
       `;
 
@@ -1588,10 +1590,9 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
           s.Sector, 
           s.Industry, 
           s.Description, 
-          sd.MarketCap, 
           sd.OpenPrice, 
           sd.ClosePrice, 
-          sd.\`Change (%)\` AS ChangePercentage, 
+          sd.Changepercen AS ChangePercentage, 
           sd.Volume, 
           sd.PredictionClose, 
           sd.PredictionTrend  -- ✅ เพิ่ม PredictionTrend
@@ -1682,7 +1683,6 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
               Overview: {
                 Open: stock.OpenPrice,
                 Close: stock.ClosePrice,
-                MarketCap: stock.MarketCap,
                 AvgVolume30D: formattedAvgVolume30D // ✅ ใช้ค่าที่แก้ไขแล้ว
               },
               Profile: {
@@ -1724,11 +1724,11 @@ app.get("/api/recommend-us-stocks", async (req, res) => {
           sd.StockDetailID, 
           s.StockSymbol, 
           sd.ClosePrice, 
-          sd.\`Change (%)\` AS ChangePercentage
+          sd.Changepercen AS ChangePercentage
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ? AND s.Market = 'America'
-        ORDER BY ABS(sd.\`Change (%)\`) DESC
+        ORDER BY ABS(sd.Changepercen) DESC
         LIMIT 5;
       `;
 
@@ -1811,7 +1811,7 @@ app.get("/api/most-held-us-stocks", async (req, res) => {
           s.StockSymbol, 
           s.Market, 
           sd.ClosePrice, 
-          sd.\`Change (%)\` AS ChangePercentage
+          sd.Changepercen AS ChangePercentage
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ? AND s.Market = 'America'
@@ -1897,11 +1897,11 @@ app.get("/api/recommend-th-stocks", async (req, res) => {
           sd.StockDetailID, 
           s.StockSymbol, 
           sd.ClosePrice, 
-          sd.\`Change (%)\` AS ChangePercentage
+          sd.Changepercen AS ChangePercentage
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ? AND s.Market = 'Thailand'
-        ORDER BY ABS(sd.\`Change (%)\`) DESC
+        ORDER BY ABS(sd.Changepercen) DESC
         LIMIT 5;
       `;
 
@@ -1984,7 +1984,7 @@ app.get("/api/most-held-th-stocks", async (req, res) => {
           s.StockSymbol, 
           s.Market, 
           sd.ClosePrice, 
-          sd.\`Change (%)\` AS ChangePercentage
+          sd.Changepercen AS ChangePercentage
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ? AND s.Market = 'Thailand'
@@ -2116,6 +2116,130 @@ app.post("/api/admin/login", async (req, res) => {
     console.error("Internal error:", error.message);
     res.status(500).json({ error: "Internal server error" });
   }
+});
+
+// 📌 ดึงข้อมูลผู้ใช้ทั้งหมด (เฉพาะ Admin เท่านั้น)
+app.get("/api/admin/users", verifyToken, verifyAdmin, (req, res) => {
+  const fetchUsersSql = "SELECT UserID, Email, Username, Role, Status FROM User";
+
+  pool.query(fetchUsersSql, (err, results) => {
+    if (err) {
+      console.error("Database error during fetching users:", err);
+      return res.status(500).json({ error: "Error fetching users" });
+    }
+    res.json(results);
+  });
+});
+
+// 📌 ดึงข้อมูลผู้ใช้ตาม UserID (เฉพาะ Admin เท่านั้น)
+app.get("/api/admin/users/:id", verifyToken, verifyAdmin, (req, res) => {
+  const { id } = req.params;
+
+  const fetchUserSql = "SELECT UserID, Email, Username, Role, Status FROM User WHERE UserID = ?";
+  pool.query(fetchUserSql, [id], (err, results) => {
+    if (err) {
+      console.error("Database error during fetching user:", err);
+      return res.status(500).json({ error: "Error fetching user" });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.json(results[0]);
+  });
+});
+
+// 📌 แก้ไขสถานะของผู้ใช้ (เช่น ระงับ, เปิดใช้งาน)
+app.put("/api/admin/users/:id/status", verifyToken, verifyAdmin, (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  if (!status) {
+    return res.status(400).json({ error: "Status is required" });
+  }
+
+  const updateStatusSql = "UPDATE User SET Status = ? WHERE UserID = ?";
+  pool.query(updateStatusSql, [status, id], (err, results) => {
+    if (err) {
+      console.error("Database error during user status update:", err);
+      return res.status(500).json({ error: "Error updating user status" });
+    }
+
+    if (results.affectedRows === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.json({ message: "User status updated successfully" });
+  });
+});
+
+// 📌 **ลบผู้ใช้ (Soft Delete) + ลบโพสต์ + ลบหุ้นที่ติดตาม**
+// Soft Delete User
+app.delete("/api/admin/users/:id", verifyToken, (req, res) => {
+  const { id } = req.params;
+
+  // ตรวจสอบว่าผู้ใช้เป็น admin
+  if (req.role !== "admin") {
+    return res.status(403).json({ error: "Only admins are allowed to delete users." });
+  }
+
+  // ลบข้อมูลการติดตามหุ้นของผู้ใช้
+  const deleteFollowedStocksSql = "DELETE FROM FollowedStocks WHERE UserID = ?";
+  pool.query(deleteFollowedStocksSql, [id], (followErr, followResults) => {
+    if (followErr) {
+      console.error("Error deleting followed stocks:", followErr);
+      return res.status(500).json({ error: "Error deleting followed stocks" });
+    }
+
+    // ลบพอร์ตการลงทุนของผู้ใช้
+    const deletePortfolioSql = "DELETE FROM Portfolio WHERE UserID = ?";
+    pool.query(deletePortfolioSql, [id], (portfolioErr, portfolioResults) => {
+      if (portfolioErr) {
+        console.error("Error deleting portfolio:", portfolioErr);
+        return res.status(500).json({ error: "Error deleting portfolio" });
+      }
+
+      // ลบข้อมูลการเทรดจำลองของผู้ใช้
+      const deletePaperTradeSql = "DELETE FROM PaperTrade WHERE UserID = ?";
+      pool.query(deletePaperTradeSql, [id], (paperTradeErr, paperTradeResults) => {
+        if (paperTradeErr) {
+          console.error("Error deleting paper trade:", paperTradeErr);
+          return res.status(500).json({ error: "Error deleting paper trade" });
+        }
+
+        // ลบข้อมูลการเทรดประวัติ
+        const deleteTradeHistorySql = "DELETE FROM TradeHistory WHERE UserID = ?";
+        pool.query(deleteTradeHistorySql, [id], (tradeHistoryErr, tradeHistoryResults) => {
+          if (tradeHistoryErr) {
+            console.error("Error deleting trade history:", tradeHistoryErr);
+            return res.status(500).json({ error: "Error deleting trade history" });
+          }
+
+          // ทำการ Soft Delete ผู้ใช้โดยการเปลี่ยนสถานะเป็น 'deactivated'
+          const softDeleteUserSql = "UPDATE User SET Status = 'deactivated' WHERE UserID = ?";
+          pool.query(softDeleteUserSql, [id], (userErr, userResults) => {
+            if (userErr) {
+              console.error("Error during soft delete of user:", userErr);
+              return res.status(500).json({ error: "Error during soft delete of user" });
+            }
+
+            if (userResults.affectedRows === 0) {
+              return res.status(404).json({ error: "User not found" });
+            }
+
+            res.json({
+              message: "User soft-deleted, their related data deleted successfully",
+              deletedFollowedStocks: followResults.affectedRows,
+              deletedPortfolio: portfolioResults.affectedRows,
+              deletedPaperTrade: paperTradeResults.affectedRows,
+              deletedTradeHistory: tradeHistoryResults.affectedRows,
+            });
+          });
+        });
+      });
+    });
+  });
 });
 
 
