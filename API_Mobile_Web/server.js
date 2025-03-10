@@ -118,10 +118,10 @@ const upload = multer({ storage: storage });
     });
   }
 
-//User-Register-Email
+// User-Register-Email
 app.post("/api/register/email", async (req, res) => {
   try {
-      const { email } = req.body;
+      const { email, role = "user" } = req.body; // ถ้า Role ไม่ได้ส่งมา ให้ Default เป็น "user"
 
       if (!email) {
           return res.status(400).json({ error: "กรุณากรอกอีเมล" });
@@ -155,51 +155,53 @@ app.post("/api/register/email", async (req, res) => {
 
           // **เพิ่มข้อมูล User ใหม่หากยังไม่มี**
           pool.query(
-              "INSERT INTO User (Email, Username, Password, Status) VALUES (?, '', '', 'pending') ON DUPLICATE KEY UPDATE Status = 'pending'",
-              [email],
+              `INSERT INTO User (Email, Username, Password, Role, Status) 
+              VALUES (?, '', '', ?, 'pending') 
+              ON DUPLICATE KEY UPDATE Status = 'pending', Role = ?`, // ✅ เพิ่ม Role
+              [email, role, role], // ✅ กำหนดค่า Role
               (err) => {
                   if (err) {
                       console.error("Database error during User insertion or update:", err);
                       return res.status(500).json({ error: "Database error during User insertion or update" });
                   }
 
-                  // **บันทึก OTP เชื่อมกับ Email แทน UserID**
-// ดึง UserID จาก Email ก่อน
-                pool.query(
-                  "SELECT UserID FROM User WHERE Email = ?",
-                  [email],
-                  (err, results) => {
-                      if (err) {
-                          console.error("Error fetching UserID:", err);
-                          return res.status(500).json({ error: "Database error fetching UserID" });
-                      }
-
-                      if (results.length === 0) {
-                          return res.status(404).json({ error: "User not found" });
-                      }
-
-                      const userId = results[0].UserID;
-
-                      // แทรก OTP โดยใช้ UserID แทน Email
-                      pool.query(
-                          "INSERT INTO OTP (OTP_Code, Created_At, Expires_At, UserID) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE OTP_Code = ?, Created_At = ?, Expires_At = ?",
-                          [otp, createdAt, expiresAt, userId, otp, createdAt, expiresAt],
-                          (err) => {
-                              if (err) {
-                                  console.error("Error during OTP insertion:", err);
-                                  return res.status(500).json({ error: "Database error during OTP insertion" });
-                              }
-
-                              console.log("OTP inserted successfully");
-                              sendOtpEmail(email, otp, (error) => {
-                                  if (error) return res.status(500).json({ error: "Error sending OTP email" });
-                                  res.status(200).json({ message: "OTP ถูกส่งไปยังอีเมลของคุณ" });
-                              });
+                  // **ดึง UserID จาก Email**
+                  pool.query(
+                      "SELECT UserID FROM User WHERE Email = ?",
+                      [email],
+                      (err, results) => {
+                          if (err) {
+                              console.error("Error fetching UserID:", err);
+                              return res.status(500).json({ error: "Database error fetching UserID" });
                           }
-                      );
-                  }
-                );
 
+                          if (results.length === 0) {
+                              return res.status(404).json({ error: "User not found" });
+                          }
+
+                          const userId = results[0].UserID;
+
+                          // **แทรก OTP โดยใช้ UserID แทน Email**
+                          pool.query(
+                              `INSERT INTO OTP (OTP_Code, Created_At, Expires_At, UserID) 
+                              VALUES (?, ?, ?, ?) 
+                              ON DUPLICATE KEY UPDATE OTP_Code = ?, Created_At = ?, Expires_At = ?`,
+                              [otp, createdAt, expiresAt, userId, otp, createdAt, expiresAt],
+                              (err) => {
+                                  if (err) {
+                                      console.error("Error during OTP insertion:", err);
+                                      return res.status(500).json({ error: "Database error during OTP insertion" });
+                                  }
+
+                                  console.log("OTP inserted successfully");
+                                  sendOtpEmail(email, otp, (error) => {
+                                      if (error) return res.status(500).json({ error: "Error sending OTP email" });
+                                      res.status(200).json({ message: "OTP ถูกส่งไปยังอีเมลของคุณ" });
+                                  });
+                              }
+                          );
+                      }
+                  );
               }
           );
       });
@@ -208,6 +210,7 @@ app.post("/api/register/email", async (req, res) => {
       res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 
 //Verify-OTP
@@ -586,8 +589,7 @@ app.post("/api/resend-otp/reset-password", async (req, res) => {
   }
 });
 
-
-//Login
+// Login
 app.post("/api/login", async (req, res) => {
   try {
     const { email, password, googleId } = req.body;
@@ -621,11 +623,13 @@ app.post("/api/login", async (req, res) => {
             // ผู้ใช้เคยล็อกอินด้วย Google แล้ว
             const user = results[0];
       
-            // สร้าง JWT Token
+            // สร้าง JWT Token และเพิ่ม Role
             const token = jwt.sign({ id: user.UserID, role: user.Role }, JWT_SECRET);
       
             // อัปเดตข้อมูลล็อกอินล่าสุด
             pool.query("UPDATE User SET LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?", [ipAddress, user.UserID]);
+
+            console.log(`User logged in: ${user.Email}, Role: ${user.Role}`);
       
             return res.status(200).json({
               message: "เข้าสู่ระบบด้วย Google สำเร็จ",
@@ -634,13 +638,14 @@ app.post("/api/login", async (req, res) => {
                 id: user.UserID,
                 email: user.Email,
                 username: user.Username,
+                role: user.Role, // ✅ ส่ง Role กลับไปด้วย
               },
             });
           } else {
             // ล็อกอินครั้งแรก → ลงทะเบียนบัญชีใหม่
             pool.query(
               "INSERT INTO User (GoogleID, Email, Username, Role, LastLogin, LastLoginIP) VALUES (?, ?, ?, 'user', NOW(), ?)",
-              [googleId, googleEmail, googleUsername, ipAddress],
+              [googleId, email, "", ipAddress],
               (err, result) => {
                 if (err) {
                   return res.status(500).json({ message: "เกิดข้อผิดพลาดในการสร้างบัญชี" });
@@ -648,14 +653,17 @@ app.post("/api/login", async (req, res) => {
       
                 const newUserId = result.insertId;
                 const token = jwt.sign({ id: newUserId, role: "user" }, JWT_SECRET);
+
+                console.log(`New user registered: ${email}, Role: user`);
       
                 return res.status(201).json({
                   message: "สมัครสมาชิกและเข้าสู่ระบบด้วย Google สำเร็จ",
                   token,
                   user: {
                     id: newUserId,
-                    email: googleEmail,
-                    username: googleUsername,
+                    email: email,
+                    username: "",
+                    role: "user", // ✅ ตั้งค่า Role เป็น "user" สำหรับ Google Register
                   },
                 });
               }
@@ -697,8 +705,10 @@ app.post("/api/login", async (req, res) => {
         // รีเซ็ตจำนวนครั้งที่ล็อกอินผิดพลาด
         pool.query("UPDATE User SET FailedAttempts = 0, LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?", [ipAddress, user.UserID]);
 
-        // สร้าง JWT Token
+        // สร้าง JWT Token และเพิ่ม Role
         const token = jwt.sign({ id: user.UserID, role: user.Role }, JWT_SECRET, { expiresIn: "7d" });
+
+        console.log(`User logged in: ${user.Email}, Role: ${user.Role}`);
 
         // ส่งข้อมูลกลับไปให้ผู้ใช้
         res.status(200).json({
@@ -708,6 +718,7 @@ app.post("/api/login", async (req, res) => {
             id: user.UserID,
             email: user.Email,
             username: user.Username,
+            role: user.Role, // ✅ เพิ่ม Role ให้ Response
           },
         });
       });
@@ -717,6 +728,7 @@ app.post("/api/login", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 // Set Profile และ Login อัตโนมัติหลังจากตั้งโปรไฟล์เสร็จ
 app.post("/api/set-profile", verifyToken, upload.single('picture'), (req, res) => {
