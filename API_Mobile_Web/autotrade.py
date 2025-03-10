@@ -1,22 +1,12 @@
 import pymysql
 import requests
+import json
 from settrade_v2 import Investor
 
-# 📌 ตั้งค่าพอร์ตโบรกเกอร์ Alpaca (หุ้นต่างประเทศ)
-ALPACA_API_KEY = "CK7TZZC4V4NIBB43FPKD"
-ALPACA_SECRET_KEY = "CqHdNXFXJllrU6Rq9aIgCUERNSWdw2tq1cwagSwe"
-ALPACA_BASE_URL = "https://broker-api.sandbox.alpaca.markets"
-
-HEADERS_ALPACA = {
-    "APCA-API-KEY-ID": ALPACA_API_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
-    "Content-Type": "application/json"
-}
-
 # 📌 ตั้งค่า API สำหรับตลาดหุ้นไทย (Settrade v2)
-SETTRADE_APP_ID = "9hULPQzhsHUwnWtA"
-SETTRADE_APP_SECRET = "FYbYY4VaqUh1V0rj97sCKOJkoSNqqK8TZhaS6lT9WpE="
-SETTRADE_BROKER_ID = "SANDBOX"  # ✅ เปลี่ยนจาก "SANDBOX" เป็นโบรกเกอร์จริง เช่น "SIT", "KSEC", "BLS"
+SETTRADE_APP_ID = "2DaswIgiipmhvNAf"
+SETTRADE_APP_SECRET = "PFjxcryxZol0qmuCCGslg60D/H1djOOrooqw0vmgLMs="
+SETTRADE_BROKER_ID = "SANDBOX"  # ✅ เปลี่ยนเป็นโบรกเกอร์จริง เช่น "SIT", "KSEC", "BLS"
 SETTRADE_APP_CODE = "SANDBOX"
 SETTRADE_ACC_NO = "earthsr-E"
 
@@ -27,10 +17,10 @@ try:
         app_secret=SETTRADE_APP_SECRET,
         broker_id=SETTRADE_BROKER_ID,
         app_code=SETTRADE_APP_CODE,
-        is_auto_queue=False
+        is_auto_queue=True  # ✅ เปิดใช้งาน Auto Queue
     )
     thai_account = investor.Equity(account_no=SETTRADE_ACC_NO)
-    
+
     # ✅ ตรวจสอบข้อมูลบัญชี Settrade API ก่อนทำงาน
     account_info = thai_account.get_account_info()
     print("✅ ข้อมูลบัญชี Settrade API:", account_info)
@@ -49,12 +39,12 @@ conn = pymysql.connect(
 )
 cursor = conn.cursor()
 
-# 📌 ดึงข้อมูลพยากรณ์จากวันที่ล่าสุดของแต่ละหุ้น พร้อมตรวจสอบตลาด (`Market`)
+# 📌 ดึงข้อมูลพยากรณ์จากวันที่ล่าสุดของแต่ละหุ้น
 query = """
 SELECT s.StockDetailID, s.StockSymbol, COALESCE(st.Market, 'UNKNOWN') AS Market, 
        s.PredictionTrend, s.PredictionClose 
 FROM StockDetail s
-JOIN Stock st ON s.StockSymbol = st.StockSymbol  -- เชื่อมกับ Stock เพื่อดึง Market
+JOIN Stock st ON s.StockSymbol = st.StockSymbol
 INNER JOIN (
     SELECT StockSymbol, MAX(Date) AS LatestDate 
     FROM StockDetail 
@@ -66,27 +56,33 @@ LIMIT 10;
 cursor.execute(query)
 stocks = cursor.fetchall()
 
-# 📌 ฟังก์ชันดึงราคาตลาดหุ้นไทยจาก Settrade
 def get_settrade_price(stock_symbol):
     stock_symbol_api = f"{stock_symbol}.BK"
     try:
-        quote = thai_account.get_quote(stock_symbol_api)
-        return quote["last_price"]
+        market_data = investor.MarketData()
+        print(f"📌 ตรวจสอบ API: {market_data}")
+
+        # ✅ ดึงข้อมูลจาก API
+        quote = market_data.get_quote_symbol(stock_symbol_api)
+
+        # ✅ แสดงข้อมูลดิบที่ API คืนค่าก่อน parse เป็น JSON
+        print(f"📌 Debug Data สำหรับ {stock_symbol}: {repr(quote)}")
+
+        # ✅ ตรวจสอบว่า API คืนค่ากลับมาเป็น Dictionary หรือไม่
+        if not isinstance(quote, dict):
+            print(f"❌ API คืนค่าที่ไม่ใช่ JSON (อาจเป็น HTML หรือข้อความ Error):\n{quote}")
+            return None
+
+        # ✅ ถ้าเป็น Dictionary และมี key "last" ให้คืนค่าราคาหุ้น
+        if "last" in quote:
+            return float(quote["last"])
+        else:
+            print(f"❌ ไม่พบราคาสำหรับ {stock_symbol}")
+            return None
     except Exception as e:
         print(f"❌ ไม่สามารถดึงราคาหุ้นไทย {stock_symbol}: {str(e)}")
         return None
 
-# 📌 ฟังก์ชันดึงราคาตลาดหุ้นต่างประเทศจาก Alpaca
-def get_alpaca_price(stock_symbol):
-    url = f"{ALPACA_BASE_URL}/v1/market_data/stocks/{stock_symbol}/quotes/latest"
-    response = requests.get(url, headers=HEADERS_ALPACA)
-
-    if response.status_code == 200:
-        data = response.json()
-        return data.get("quote", {}).get("ap", None)  # "ap" คือ Ask Price (ราคาขายล่าสุด)
-    
-    print(f"❌ ไม่สามารถดึงราคาหุ้น {stock_symbol}: {response.json()}")
-    return None
 
 # 📌 ฟังก์ชันส่งคำสั่งซื้อขายหุ้นไทยผ่าน Settrade
 def execute_settrade_trade(stock_symbol, trade_type, quantity):
@@ -95,7 +91,7 @@ def execute_settrade_trade(stock_symbol, trade_type, quantity):
             symbol=f"{stock_symbol}.BK",
             side=trade_type.lower(),
             quantity=quantity,
-            price="MP",  # ✅ ใช้ราคาตลาด (Market Price) แทน 0
+            price="MP",  # ✅ ใช้ราคาตลาด (Market Price)
             validity="GTC"
         )
         return order_result
@@ -103,81 +99,65 @@ def execute_settrade_trade(stock_symbol, trade_type, quantity):
         print(f"❌ คำสั่ง {trade_type} หุ้นไทย {stock_symbol} ล้มเหลว: {str(e)}")
         return None
 
-# 📌 ฟังก์ชันส่งคำสั่งซื้อขายหุ้นต่างประเทศผ่าน Alpaca API
-def execute_alpaca_trade(account_id, stock_symbol, trade_type, quantity):
-    trade_payload = {
-        "symbol": stock_symbol,
-        "qty": quantity,
-        "side": trade_type.lower(),
-        "type": "market",
-        "time_in_force": "gtc"
-    }
-    url = f"{ALPACA_BASE_URL}/v1/trading/accounts/{account_id}/orders"
-    response = requests.post(url, json=trade_payload, headers=HEADERS_ALPACA)
+# 📌 ฟังก์ชันบันทึกคำสั่งซื้อขายลง `TradeHistory`
+def log_trade(stock_symbol, trade_type, quantity, predicted_price, actual_price, status):
+    total_trade_value = quantity * actual_price if actual_price else None
+    profit_loss = (actual_price - predicted_price) * quantity if actual_price else None
+    trade_fee = total_trade_value * 0.001 if total_trade_value else None  # ✅ ค่าธรรมเนียม 0.1%
+    vat = trade_fee * 0.07 if trade_fee else None  # ✅ ภาษี 7% ของค่าธรรมเนียม
 
-    if response.status_code == 200:
-        return response.json()
-    
-    print(f"❌ คำสั่ง {trade_type} {stock_symbol} ล้มเหลว: {response.json()}")
-    return None
-
-# 📌 ดึง account_id จาก Alpaca
-def get_alpaca_account_id():
-    url = f"{ALPACA_BASE_URL}/v1/accounts"
-    response = requests.get(url, headers=HEADERS_ALPACA)
-
-    if response.status_code == 200:
-        accounts = response.json()
-        if accounts:
-            return accounts[0]["id"]  # ใช้บัญชีแรก
-    
-    print(f"❌ ไม่สามารถดึง account_id: {response.json()}")
-    return None
-
-# 📌 ดึง account_id จาก Alpaca (ใช้เฉพาะหุ้นต่างประเทศ)
-account_id = get_alpaca_account_id()
-if not account_id:
-    print("❌ ไม่สามารถดึง account_id, ยกเลิกการเทรดหุ้นต่างประเทศ")
+    query = """
+    INSERT INTO TradeHistory (TradeType, Quantity, Price, ActualPrice, 
+                              TotalTradeValue, ProfitLoss, TradeFee, VAT, TradeStatus)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+    """
+    cursor.execute(query, (trade_type, quantity, predicted_price, actual_price, 
+                           total_trade_value, profit_loss, trade_fee, vat, status))
+    conn.commit()
+    print(f"✅ บันทึกคำสั่ง {trade_type} {stock_symbol} จำนวน {quantity} หุ้น @ {actual_price} สำเร็จ")
 
 # 📌 เริ่ม Trade Logic
+STOP_LOSS_THRESHOLD = 0.98  # 2% loss
+TAKE_PROFIT_THRESHOLD = 1.05  # 5% gain
+
 for stock in stocks:
     stock_id, stock_symbol, market, prediction_trend, prediction_close = stock
 
-    # ตรวจสอบว่า Market เป็น "Thailand" หรือไม่
-    is_thai_stock = market.lower() == "thailand"
-
-    # แปลงค่าจาก String เป็น Float
-    prediction_trend = float(prediction_trend)
-    prediction_close = float(prediction_close)
-
-    # ดึงราคาตลาดปัจจุบัน
-    market_price = None
-    if is_thai_stock:
-        market_price = get_settrade_price(stock_symbol)
-    else:
-        market_price = get_alpaca_price(stock_symbol)
-
-    if market_price is None:
-        print(f"❌ ไม่พบราคาตลาดของ {stock_symbol}")
+    # ตรวจสอบว่าเป็นหุ้นไทย
+    if market.lower() != "thailand":
         continue
 
-    # 📌 ตัดสินใจซื้อขาย
+    # ดึงราคาตลาดปัจจุบัน
+    market_price = get_settrade_price(stock_symbol)
+
+    if market_price is None:
+        continue
+
+    # ตัดสินใจซื้อขาย
     trade_decision = "HOLD"
     trade_quantity = 10
 
     if prediction_trend > 0 and prediction_close > market_price:
-        trade_decision = "BUY"
+        if market_price <= prediction_close * STOP_LOSS_THRESHOLD:
+            trade_decision = "SELL"  # Stop Loss
+        else:
+            trade_decision = "BUY"
     elif prediction_trend < 0 and prediction_close < market_price:
-        trade_decision = "SELL"
+        if market_price >= prediction_close * TAKE_PROFIT_THRESHOLD:
+            trade_decision = "BUY"  # Take Profit
+        else:
+            trade_decision = "SELL"
 
     # 📌 ส่งคำสั่งซื้อขาย
     if trade_decision in ["BUY", "SELL"]:
-        if is_thai_stock:
-            trade_response = execute_settrade_trade(stock_symbol, trade_decision, trade_quantity)
+        trade_response = execute_settrade_trade(stock_symbol, trade_decision, trade_quantity)
+
+        # ✅ บันทึกข้อมูลคำสั่งซื้อขายลง `TradeHistory`
+        if trade_response:
+            log_trade(stock_symbol, trade_decision, trade_quantity, prediction_close, market_price, "SUCCESS")
         else:
-            trade_response = execute_alpaca_trade(account_id, stock_symbol, trade_decision, trade_quantity)
+            log_trade(stock_symbol, trade_decision, trade_quantity, prediction_close, None, "FAILED")
 
-        print(f"📈 {trade_decision} {stock_symbol} ({market}) @ {market_price} → {trade_response}")
-
+# ปิดการเชื่อมต่อ Database
 conn.close()
-print("✅ Auto Trade Logic ดำเนินการเสร็จสิ้น!")
+print("✅ Auto Trade Logic สำหรับตลาดหุ้นไทยดำเนินการเสร็จสิ้น!")
