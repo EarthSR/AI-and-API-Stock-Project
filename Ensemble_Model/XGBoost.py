@@ -3,61 +3,56 @@ import pandas as pd
 import joblib
 import xgboost as xgb
 import lightgbm as lgb
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score
 from sklearn.preprocessing import RobustScaler
 
-# ✅ 1. โหลดข้อมูล
-train_features = np.load('../GRU_Model/train_features.npy')
-train_targets = np.load('../GRU_Model/train_price.npy')
-test_features = np.load('../GRU_Model/test_features.npy')
-test_targets = np.load('../GRU_Model/test_price.npy')
+# ✅ 1. โหลดผลลัพธ์จาก 4 โมเดล (LSTM, GRU, XGBoost, RandomForest)
+predictions_lstm = pd.read_csv("../LSTM_model/all_predictions_per_day_multi_task.csv")
+predictions_gru = pd.read_csv("../GRU_Model/all_predictions_per_day_multi_task.csv")
 
-# ✅ 2. ใช้ RobustScaler กับราคาปิด
-scaler_price = RobustScaler()
-y_train_scaled = scaler_price.fit_transform(train_targets.reshape(-1, 1))
-y_test_scaled = scaler_price.transform(test_targets.reshape(-1, 1))
+# ✅ 2. รวมผลลัพธ์จากทุกโมเดลเป็น Feature Set ใหม่
+ensemble_features = pd.DataFrame({
+    "Ticker": predictions_lstm["Ticker"],
+    "Date": pd.to_datetime(predictions_lstm["Date"]),
+    "Actual_Price": predictions_lstm["Actual_Price"],
+    "Predicted_Price_LSTM": predictions_lstm["Predicted_Price"],
+    "Predicted_Price_GRU": predictions_gru["Predicted_Price"],
+    "Actual_Direction": predictions_lstm["Actual_Dir"],
+    "Predicted_Dir_LSTM": predictions_lstm["Predicted_Dir"],
+    "Predicted_Dir_GRU": predictions_gru["Predicted_Dir"]
+})
 
-# ✅ 3. แปลงทิศทางเป็น 1 (ขึ้น) / 0 (ลง)
-direction_train = (train_targets > np.median(train_targets)).astype(int)
-direction_test = (test_targets > np.median(test_targets)).astype(int)
+# ✅ 3. แบ่งข้อมูล Train/Test
+train_cutoff = pd.Timestamp("2024-12-01")
+train_mask = ensemble_features["Date"] < train_cutoff
 
-# ✅ 4. ใช้ชุดข้อมูลเดิม
-X_train, y_train_price, y_train_dir = train_features, y_train_scaled, direction_train
-X_test, y_test_price, y_test_dir = test_features, y_test_scaled, direction_test
+X_train = ensemble_features.loc[train_mask, ["Predicted_Price_LSTM", "Predicted_Price_GRU"]].values
+y_train_price = ensemble_features.loc[train_mask, "Actual_Price"].values
+y_train_dir = ensemble_features.loc[train_mask, "Actual_Direction"].values
 
-print(f"✅ ขนาดชุด Train: {X_train.shape}, ขนาดชุด Test: {X_test.shape}")
+X_test = ensemble_features.loc[~train_mask, ["Predicted_Price_LSTM", "Predicted_Price_GRU"]].values
+y_test_price = ensemble_features.loc[~train_mask, "Actual_Price"].values
+y_test_dir = ensemble_features.loc[~train_mask, "Actual_Direction"].values
 
-# ✅ 5. ตั้งค่า Base Models (โมเดลเดียวทำนาย 2 ค่า)
-xgb_model = xgb.XGBRegressor(
-    n_estimators=2000, learning_rate=0.002, max_depth=8, subsample=0.85,
-    colsample_bytree=0.85, gamma=0.2, objective="reg:squarederror", random_state=42
-)
+# ✅ 4. โหลด Scaler เดิมที่เคยใช้
+scaler_target = joblib.load("../LSTM_model/scaler_target.pkl")
 
-rf_model = RandomForestRegressor(
-    n_estimators=2000, max_depth=8, min_samples_split=4, min_samples_leaf=2,
-    max_features="sqrt", n_jobs=-1, random_state=42
-)
+# ✅ 5. ใช้ Scaler กับราคาปิด
+y_train_price_scaled = scaler_target.transform(y_train_price.reshape(-1, 1))
+y_test_price_scaled = scaler_target.transform(y_test_price.reshape(-1, 1))
 
-xgb_dir_model = xgb.XGBClassifier(
-    n_estimators=2000, learning_rate=0.002, max_depth=8, subsample=0.85,
-    colsample_bytree=0.85, gamma=0.2, objective="binary:logistic", random_state=42
-)
+# ✅ 6. Train Base Models (ราคา & ทิศทาง)
+xgb_model = xgb.XGBRegressor(n_estimators=2000, learning_rate=0.002, max_depth=8, subsample=0.85, colsample_bytree=0.85, gamma=0.2, objective="reg:squarederror", random_state=42)
+rf_model = RandomForestRegressor(n_estimators=2000, max_depth=8, min_samples_split=4, min_samples_leaf=2, max_features="sqrt", n_jobs=-1, random_state=42)
+xgb_dir_model = xgb.XGBClassifier(n_estimators=2000, learning_rate=0.002, max_depth=8, subsample=0.85, colsample_bytree=0.85, gamma=0.2, objective="binary:logistic", random_state=42)
+rf_dir_model = RandomForestClassifier(n_estimators=2000, max_depth=8, min_samples_split=4, min_samples_leaf=2, max_features="sqrt", n_jobs=-1, random_state=42)
 
-rf_dir_model = RandomForestClassifier(
-    n_estimators=2000, max_depth=8, min_samples_split=4, min_samples_leaf=2,
-    max_features="sqrt", n_jobs=-1, random_state=42
-)
-
-# ✅ 6. ฝึก Base Models
 print("\n🔍 กำลังฝึก Base Models (ราคาปิด & ทิศทาง)...")
-xgb_model.fit(X_train, y_train_price.ravel())
-rf_model.fit(X_train, y_train_price.ravel())
+xgb_model.fit(X_train, y_train_price_scaled.ravel())
+rf_model.fit(X_train, y_train_price_scaled.ravel())
 xgb_dir_model.fit(X_train, y_train_dir.ravel())
 rf_dir_model.fit(X_train, y_train_dir.ravel())
-
-print("✅ ฝึก Base Models สำเร็จ!")
 
 # ✅ 7. ทำนายค่าจาก Base Models
 y_pred_xgb = xgb_model.predict(X_test)
@@ -66,38 +61,24 @@ dir_pred_xgb = xgb_dir_model.predict(X_test)
 dir_pred_rf = rf_dir_model.predict(X_test)
 
 # ✅ 8. ย้อนกลับค่าทำนายราคาปิดเป็นสเกลจริง
-y_pred_xgb_actual = scaler_price.inverse_transform(y_pred_xgb.reshape(-1, 1))
-y_pred_rf_actual = scaler_price.inverse_transform(y_pred_rf.reshape(-1, 1))
-y_test_actual = scaler_price.inverse_transform(y_test_price.reshape(-1, 1))
+y_pred_xgb_actual = scaler_target.inverse_transform(y_pred_xgb.reshape(-1, 1))
+y_pred_rf_actual = scaler_target.inverse_transform(y_pred_rf.reshape(-1, 1))
+y_test_actual = scaler_target.inverse_transform(y_test_price_scaled.reshape(-1, 1))
 
-# ✅ 9. ใช้ Weighted Stacking
-ensemble_weighted_price = (0.6 * y_pred_xgb_actual) + (0.4 * y_pred_rf_actual)
-ensemble_weighted_dir = (dir_pred_xgb + dir_pred_rf) / 2
-ensemble_weighted_dir = (ensemble_weighted_dir > 0.5).astype(int)  # Convert to binary
+# ✅ 9. ใช้ Weighted Stacking (รวม 4 โมเดล)
+w_lstm, w_gru, w_xgb, w_rf = 0.3, 0.3, 0.2, 0.2
+ensemble_weighted_price = (w_lstm * ensemble_features.loc[~train_mask, "Predicted_Price_LSTM"].values.reshape(-1, 1)) + \
+                          (w_gru * ensemble_features.loc[~train_mask, "Predicted_Price_GRU"].values.reshape(-1, 1)) + \
+                          (w_xgb * y_pred_xgb_actual) + (w_rf * y_pred_rf_actual)
 
-# ✅ 10. สร้าง Meta Learner (ใช้ LightGBM)
-meta_features_train = np.column_stack((y_pred_xgb, y_pred_rf))  
-meta_dir_features_train = np.column_stack((dir_pred_xgb, dir_pred_rf))
+# ✅ 10. ใช้ Weighted Stacking สำหรับทิศทาง
+ensemble_weighted_dir = (0.3 * ensemble_features.loc[~train_mask, "Predicted_Dir_LSTM"].values) + \
+                        (0.3 * ensemble_features.loc[~train_mask, "Predicted_Dir_GRU"].values) + \
+                        (0.2 * dir_pred_xgb) + (0.2 * dir_pred_rf)
 
-meta_learner = lgb.LGBMRegressor(
-    n_estimators=1000, learning_rate=0.005, max_depth=5, random_state=42
-)
+ensemble_weighted_dir = (ensemble_weighted_dir > 0.5).astype(int)  # แปลงเป็น 0 หรือ 1
 
-meta_dir_learner = lgb.LGBMClassifier(
-    n_estimators=1000, learning_rate=0.005, max_depth=5, random_state=42
-)
-
-# ✅ 11. ฝึก Meta Learner
-meta_learner.fit(meta_features_train, y_test_price.ravel())
-meta_dir_learner.fit(meta_dir_features_train, y_test_dir.ravel())
-
-# ✅ 12. ทำนายด้วย Meta Learner
-y_pred_meta = meta_learner.predict(meta_features_train)
-y_pred_meta_actual = scaler_price.inverse_transform(y_pred_meta.reshape(-1, 1))
-
-dir_pred_meta = meta_dir_learner.predict(meta_dir_features_train)
-
-# ✅ 13. คำนวณ Metrics
+# ✅ 11. ฟังก์ชันประเมินผลลัพธ์
 def evaluate_price(y_true, y_pred, model_name):
     mae = mean_absolute_error(y_true, y_pred)
     mse = mean_squared_error(y_true, y_pred)
@@ -108,35 +89,42 @@ def evaluate_price(y_true, y_pred, model_name):
     print(f"MSE: {mse:.4f}")
     print(f"RMSE: {rmse:.4f}")
     print(f"R2 Score: {r2:.4f}")
-    return mae, mse, rmse, r2
 
 def evaluate_direction(y_true, y_pred, model_name):
     acc = accuracy_score(y_true, y_pred)
     print(f"\n✅ **ผลลัพธ์การพยากรณ์ทิศทาง {model_name}**")
     print(f"Accuracy: {acc:.4f}")
-    return acc
 
-# ✅ 14. ประเมินผลลัพธ์
-evaluate_price(y_test_actual, y_pred_meta_actual, "Meta Learner Stacking")
-evaluate_direction(y_test_dir, dir_pred_meta, "Meta Learner Stacking")
+# ✅ 12. แสดงผลลัพธ์แยกแต่ละโมเดล
+evaluate_price(y_test_actual, ensemble_features.loc[~train_mask, "Predicted_Price_LSTM"].values, "LSTM Model")
+evaluate_direction(y_test_dir, ensemble_features.loc[~train_mask, "Predicted_Dir_LSTM"].values, "LSTM Model")
 
-# ✅ 15. บันทึกผลลัพธ์ลง CSV
-results_df = pd.DataFrame({
-    'Actual_Price': y_test_actual.flatten(),
-    'Predicted_XGB_Price': y_pred_xgb_actual.flatten(),
-    'Predicted_RF_Price': y_pred_rf_actual.flatten(),
-    'Weighted_Stacking_Price': ensemble_weighted_price.flatten(),
-    'Meta_Learner_Price': y_pred_meta_actual.flatten(),
-    'Actual_Direction': y_test_dir.flatten(),
-    'Predicted_Direction_Meta': dir_pred_meta.flatten()
-})
+evaluate_price(y_test_actual, ensemble_features.loc[~train_mask, "Predicted_Price_GRU"].values, "GRU Model")
+evaluate_direction(y_test_dir, ensemble_features.loc[~train_mask, "Predicted_Dir_GRU"].values, "GRU Model")
 
-results_df.to_csv('stacking_ensemble_predictions.csv', index=False)
+evaluate_price(y_test_actual, y_pred_xgb_actual, "XGBoost Model")
+evaluate_direction(y_test_dir, dir_pred_xgb, "XGBoost Model")
 
-# ✅ 16. บันทึกโมเดล
-joblib.dump(meta_learner, 'meta_learner_price.pkl')
-joblib.dump(meta_dir_learner, 'meta_learner_direction.pkl')
-joblib.dump(scaler_price, 'scaler_price.pkl')
+evaluate_price(y_test_actual, y_pred_rf_actual, "RandomForest Model")
+evaluate_direction(y_test_dir, dir_pred_rf, "RandomForest Model")
 
-print("✅ บันทึกโมเดลสำเร็จ!")
-print("✅ บันทึกผลลัพธ์ลงไฟล์ 'stacking_ensemble_predictions.csv' สำเร็จ!")
+evaluate_price(y_test_actual, ensemble_weighted_price, "Weighted Stacking")
+evaluate_direction(y_test_dir, ensemble_weighted_dir, "Weighted Stacking")
+
+# ✅ 13. บันทึกโมเดล Weighted Stacking
+joblib.dump(ensemble_weighted_price, "weighted_stacking_price.pkl")
+joblib.dump(ensemble_weighted_dir, "weighted_stacking_direction.pkl")
+
+# ✅ บันทึกโมเดล Base Models
+joblib.dump(xgb_model, "xgb_model_price.pkl")
+joblib.dump(rf_model, "rf_model_price.pkl")
+joblib.dump(xgb_dir_model, "xgb_model_direction.pkl")
+joblib.dump(rf_dir_model, "rf_model_direction.pkl")
+
+# ✅ บันทึก Scaler เพื่อใช้ในอนาคต
+joblib.dump(scaler_target, "scaler_target.pkl")
+
+print("✅ บันทึกโมเดล Weighted Stacking และ Base Models สำเร็จ!")
+
+
+print("✅ เสร็จสิ้น!")

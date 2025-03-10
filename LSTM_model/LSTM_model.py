@@ -345,7 +345,7 @@ feature_columns = [
     'P/BV Ratio ', 'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
     'Bollinger_High', 'Bollinger_Low','SMA_50', 'SMA_200'
 ]
-
+joblib.dump(feature_columns, 'feature_columns.pkl')
 # สร้าง Direction = 1 ถ้าพรุ่งนี้ราคาสูงขึ้น, 0 ถ้าลงหรือนิ่ง
 df['Direction'] = (df['Close'].shift(-1) > df['Close']).astype(int)
 
@@ -359,6 +359,7 @@ df.dropna(subset=['Direction', 'TargetPrice'], inplace=True)
 ticker_encoder = LabelEncoder()
 df['Ticker_ID'] = ticker_encoder.fit_transform(df['Ticker'])
 num_tickers = len(ticker_encoder.classes_)
+joblib.dump(ticker_encoder, 'ticker_encoder.pkl')
 
 # แยก Train / Test
 sorted_dates = df['Date'].unique()
@@ -530,7 +531,7 @@ direction_output = Dense(1, activation="sigmoid", name="direction_output")(x)
 model = Model(inputs=[features_input, ticker_input], outputs=[price_output, direction_output])
 
 # ---------------------- Optimizer & Loss ----------------------
-optimizer = AdamW(learning_rate=1e-3, weight_decay=1e-5)
+optimizer = AdamW(learning_rate=3e-4, weight_decay=1e-6)
 
 model.compile(
     optimizer=optimizer,
@@ -551,7 +552,7 @@ history = model.fit(
     [X_price_train, X_ticker_train],
     {"price_output": y_price_train, "direction_output": y_dir_train},
     epochs=200,
-    batch_size=32,
+    batch_size=16,
     verbose=1,
     shuffle=False,
     validation_split=0.1,
