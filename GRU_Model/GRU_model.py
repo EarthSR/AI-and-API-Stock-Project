@@ -378,6 +378,9 @@ print("Last date in train set:", train_df['Date'].max())
 train_features = train_df[feature_columns].values
 test_features  = test_df[feature_columns].values
 
+train_features[train_features == np.inf] = np.max(train_features[train_features != np.inf])
+train_features[train_features == -np.inf] = np.min(train_features[train_features != -np.inf])
+
 train_ticker_id = train_df['Ticker_ID'].values
 test_ticker_id  = test_df['Ticker_ID'].values
 
