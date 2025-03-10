@@ -2047,6 +2047,14 @@ app.get("/api/most-held-th-stocks", async (req, res) => {
 
 //-----------------------------------------------------------------------------------------------------------------------------------------------//
 
+// API ให้ React ดึง Secure Embed URL ไปใช้
+app.get("/get-embed-url", (req, res) => {
+  res.json({
+    embedUrl:
+      "https://app.powerbi.com/view?r=eyJrIjoiOGU0ZjNhMjktYjJiZC00ODA1LWIzM2EtNzNkNDg0NzhhMzVkIiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
+  });
+});
+
 //Admin//
 app.post("/api/admin/login", async (req, res) => {
   try {

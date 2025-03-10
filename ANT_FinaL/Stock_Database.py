@@ -71,9 +71,9 @@ company_dict = {
     "AAPL": ("Apple Inc.", "America", "Technology", "Consumer Electronics", "Apple Inc. designs, manufactures, and markets smartphones, personal computers, tablets, wearables, and accessories worldwide. The company offers iPhone, a line of smartphones; Mac, a line of personal computers; iPad, a line of multi-purpose tablets; and wearables, home, and accessories comprising AirPods, Apple TV, Apple Watch, Beats products, and HomePod. It also provides AppleCare support and cloud services; and operates various platforms, including the App Store that allow customers to discover and download applications and digital content, such as books, music, video, games, and podcasts, as well as advertising services include third-party licensing arrangements and its own advertising platforms. In addition, the company offers various subscription-based services, such as Apple Arcade, a game subscription service; Apple Fitness+, a personalized fitness service; Apple Music, which offers users a curated listening experience with on-demand radio stations; Apple News+, a subscription news and magazine service; Apple TV+, which offers exclusive original content; Apple Card, a co-branded credit card; and Apple Pay, a cashless payment service, as well as licenses its intellectual property. The company serves consumers, and small and mid-sized businesses; and the education, enterprise, and government markets. It distributes third-party applications for its products through the App Store. The company also sells its products through its retail and online stores, and direct sales force; and third-party cellular network carriers, wholesalers, retailers, and resellers. Apple Inc. was founded in 1976 and is headquartered in Cupertino, California."),
 }
 
-# ✅ คำนวณ Change (%) จาก OpenPrice และ ClosePrice
+# ✅ คำนวณ Changepercen จาก OpenPrice และ ClosePrice
 df["Change"] = df["ClosePrice"] - df["OpenPrice"]
-df["Change (%)"] = (df["Change"] / df["OpenPrice"]) * 100
+df["Changepercen"] = (df["Change"] / df["OpenPrice"]) * 100
 
 # ✅ เติมข้อมูล CompanyName, Market, Sector, Industry, Description
 df["CompanyName"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[0])
@@ -98,16 +98,26 @@ stock__data = df[["StockSymbol", "Market", "CompanyName", "Sector", "Industry", 
 stock_detail_data = df[[  
     "Date", "StockSymbol", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice", "PERatio", "ROE",
     "QoQGrowth", "YoYGrowth", "TotalRevenue", "NetProfit", "EPS", "GrossMargin", "NetProfitMargin", "DebtToEquity",
-    "Change (%)", "Volume", "EVEBITDA", "MarketCap", "P_BV_Ratio", "Dividend_Yield",
+    "Changepercen", "Volume", "EVEBITDA", "MarketCap", "P_BV_Ratio", "Dividend_Yield",
 ]]
 
-# ตรวจสอบข้อมูลก่อนบันทึก
-print(stock__data.head(10))  # แสดง 10 แถวแรกของ Stock ก่อนบันทึกลงฐานข้อมูล
+# ✅ เพิ่มคอลัมน์ 'PredictionTrend' และ 'PredictionClose' เป็น None ก่อน
+stock_detail_data["PredictionTrend"] = None
+stock_detail_data["PredictionClose"] = None
 
-# ✅ คัดลอกข้อมูลและเพิ่ม PredictionTrend, PredictionClose
-stock_detail_data = stock_detail_data.copy()  # ✅ สร้าง Copy ป้องกัน Warning
-stock_detail_data.loc[:, "PredictionTrend"] = None
-stock_detail_data.loc[:, "PredictionClose"] = None
+# ✅ ตรวจสอบลำดับคอลัมน์ใน DataFrame
+print(stock_detail_data.columns)
+
+# แก้ไขลำดับคอลัมน์ให้ตรงกับฐานข้อมูลที่ต้องการ
+stock_detail_data = stock_detail_data[[
+    "Date", "StockSymbol", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice", "PERatio", "ROE",
+    "QoQGrowth", "YoYGrowth", "TotalRevenue", "NetProfit", "EPS", "GrossMargin", "NetProfitMargin", "DebtToEquity",
+    "Changepercen", "Volume", "EVEBITDA", "MarketCap", "P_BV_Ratio", "Dividend_Yield", "PredictionTrend", "PredictionClose"
+]]
+
+
+# ตรวจสอบข้อมูลอีกครั้งก่อนการบันทึก
+print(stock_detail_data[['EVEBITDA', 'MarketCap', 'Volume']].head())
 
 # ตรวจสอบค่าที่ไม่ใช่ตัวเลขในคอลัมน์ YoYGrowth
 stock_detail_data["YoYGrowth"] = pd.to_numeric(stock_detail_data["YoYGrowth"], errors='coerce')
@@ -118,8 +128,7 @@ stock_detail_data["YoYGrowth"] = stock_detail_data["YoYGrowth"].fillna(0)
 # จำกัดค่า YoYGrowth ให้อยู่ระหว่าง -100 และ 100
 stock_detail_data["YoYGrowth"] = np.clip(stock_detail_data["YoYGrowth"], -100, 100)
 
-
-# ตรวจสอบค่าของ YoYGrowth ก่อนบันทึก 
+# ตรวจสอบว่าไม่มีค่าที่เกินขอบเขต
 print(stock_detail_data["YoYGrowth"].describe())
 
 # ✅ บันทึกไฟล์ CSV แยกกัน
@@ -174,23 +183,26 @@ try:
     # ตัวอย่างการแก้ไขคำสั่ง INSERT สำหรับ StockDetail
     insert_stock_detail_query = """
     INSERT INTO StockDetail (
-        Date, StockSymbol, OpenPrice, HighPrice, LowPrice, ClosePrice, PERatio, ROE, Dividend_Yield,
-        QoQGrowth, YoYGrowth, TotalRevenue, NetProfit, EPS, GrossMargin, NetProfitMargin, DebtToEquity,
-        `Change (%)`, Volume, EVEBITDA, MarketCap, P_BV_Ratio, PredictionTrend, PredictionClose
+        Date, StockSymbol, OpenPrice, HighPrice, LowPrice, ClosePrice, PERatio, ROE, QoQGrowth, YoYGrowth,
+        TotalRevenue, NetProfit, EPS, GrossMargin, NetProfitMargin, DebtToEquity, Changepercen, Volume,
+        EVEBITDA, MarketCap, P_BV_Ratio, Dividend_Yield, PredictionTrend, PredictionClose
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)  
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE  
-        OpenPrice=VALUES(OpenPrice), HighPrice=VALUES(HighPrice), LowPrice=VALUES(LowPrice),  
-        ClosePrice=VALUES(ClosePrice), PERatio=VALUES(PERatio), ROE=VALUES(ROE), Dividend_Yield=VALUES(Dividend_Yield),
-        QoQGrowth=VALUES(QoQGrowth), YoYGrowth=VALUES(YoYGrowth), TotalRevenue=VALUES(TotalRevenue),  
-        NetProfit=VALUES(NetProfit), EPS=VALUES(EPS), GrossMargin=VALUES(GrossMargin),  
-        NetProfitMargin=VALUES(NetProfitMargin), DebtToEquity=VALUES(DebtToEquity),  
-        `Change (%)`=VALUES(`Change (%)`), Volume=VALUES(Volume),
-        EVEBITDA=VALUES(EVEBITDA), MarketCap=VALUES(MarketCap), P_BV_Ratio=VALUES(P_BV_Ratio), 
+        StockSymbol=VALUES(StockSymbol), Date=VALUES(Date), OpenPrice=VALUES(OpenPrice),
+        HighPrice=VALUES(HighPrice), LowPrice=VALUES(LowPrice), ClosePrice=VALUES(ClosePrice),
+        PERatio=VALUES(PERatio), ROE=VALUES(ROE), QoQGrowth=VALUES(QoQGrowth), YoYGrowth=VALUES(YoYGrowth),
+        TotalRevenue=VALUES(TotalRevenue), NetProfit=VALUES(NetProfit), EPS=VALUES(EPS),
+        GrossMargin=VALUES(GrossMargin), NetProfitMargin=VALUES(NetProfitMargin), DebtToEquity=VALUES(DebtToEquity),
+        Changepercen=VALUES(Changepercen), Volume=VALUES(Volume), EVEBITDA=VALUES(EVEBITDA), 
+        MarketCap=VALUES(MarketCap), P_BV_Ratio=VALUES(P_BV_Ratio), Dividend_Yield=VALUES(Dividend_Yield),
         PredictionTrend=VALUES(PredictionTrend), PredictionClose=VALUES(PredictionClose);
+
     """
 
     stock_detail_values = convert_nan_to_none(stock_detail_data.values.tolist())
+    print("ข้อมูลที่กำลังจะบันทึกลงฐานข้อมูล:")
+    print(stock_detail_values[:1])  # แสดง 5 แถวแรกก่อนบันทึก
 
     # ✅ ตรวจสอบและแปลงค่า EVEBITDA (NaN → None)
     stock_detail_data["EVEBITDA"] = stock_detail_data["EVEBITDA"].replace([np.inf, -np.inf], np.nan)

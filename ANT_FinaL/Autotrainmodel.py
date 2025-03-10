@@ -29,10 +29,7 @@ def calculate_indicators(df):
     """ 📌 คำนวณ Indicators ใน Python """
     df = df.copy()
 
-    # ✅ คำนวณ Change และ Change (%)
-    df["Change"] = df["ClosePrice"] - df["OpenPrice"]
-    df["Change (%)"] = df["ClosePrice"].pct_change() * 100
-    df["Change (%)"] = np.clip(df["Change (%)"], -10, 10)
+    print(f"📊 ก่อนคำนวณ Indicator ({df.shape[0]} rows)")
 
     # ✅ คำนวณ RSI
     df["RSI"] = ta.rsi(df["ClosePrice"], length=14)
@@ -47,18 +44,20 @@ def calculate_indicators(df):
 
     # ✅ คำนวณ MACD
     macd = ta.macd(df["ClosePrice"])
-    df["MACD"] = macd["MACD_12_26_9"]
-    df["MACD_Signal"] = macd["MACDs_12_26_9"]
+    df["MACD"] = macd["MACD_12_26_9"] if macd is not None else np.nan
+    df["MACD_Signal"] = macd["MACDs_12_26_9"] if macd is not None else np.nan
 
     # ✅ คำนวณ Bollinger Bands
     bb = ta.bbands(df["ClosePrice"], length=20)
-    df["Bollinger_High"] = bb["BBU_20_2.0"]
-    df["Bollinger_Low"] = bb["BBL_20_2.0"]
+    df["Bollinger_High"] = bb["BBU_20_2.0"] if bb is not None else np.nan
+    df["Bollinger_Low"] = bb["BBL_20_2.0"] if bb is not None else np.nan
 
     # ✅ คำนวณ ATR
     df["ATR"] = ta.atr(df["HighPrice"], df["LowPrice"], df["ClosePrice"], length=14)
 
-    return df.dropna().reset_index(drop=True)
+    print(f"📊 หลังคำนวณ Indicator ({df.shape[0]} rows)")
+
+    return df.fillna(method="bfill").reset_index(drop=True)
 
 def safe_transform(encoder, ticker):
     """ 📌 แปลงค่า `Ticker` เป็น ID หากไม่พบให้คืน -1 """
@@ -92,15 +91,16 @@ def walk_forward_validation_multi_task(engine, scaler_features, scaler_target, t
         # ✅ ดึงข้อมูลราคาหุ้นย้อนหลัง **เพิ่มจำนวนวัน** (เพื่อคำนวณ Indicator)
         query_stock = f"""
             SELECT Date, OpenPrice, HighPrice, LowPrice, ClosePrice, Volume, 
-                TotalRevenue, QoQGrowth, EPS, ROE, NetProfitMargin, 
-                DebtToEquity, PERatio, DividendYield 
+                Changepercen, TotalRevenue, QoQGrowth, EPS, ROE, NetProfitMargin, 
+                DebtToEquity, PERatio, Dividend_Yield 
             FROM StockDetail 
             WHERE StockSymbol = '{ticker}' 
             ORDER BY Date DESC 
-            LIMIT {seq_length + 200}  -- 🔹 ดึงข้อมูล 200 วันเพื่อรองรับ SMA 200
+            LIMIT {seq_length + 300}
         """
-
         df_ticker = pd.read_sql(query_stock, engine)
+        print(f"🔍 {ticker}: ข้อมูลจาก SQL ก่อน Indicator: {df_ticker.shape}")  # Debug
+
 
         # ✅ ตรวจสอบข้อมูลที่ได้มา
         if df_ticker.empty or len(df_ticker) < seq_length:
