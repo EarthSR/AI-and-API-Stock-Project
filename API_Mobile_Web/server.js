@@ -913,7 +913,6 @@ app.get("/api/search", (req, res) => {
     SELECT 
         s.StockSymbol, 
         s.Market, 
-        s.MarketCap, 
         s.CompanyName, 
         sd.Date, 
         sd.ClosePrice
@@ -949,7 +948,6 @@ app.get("/api/search", (req, res) => {
         acc.push({
           StockSymbol: stock.StockSymbol,
           Market: stock.Market,
-          MarketCap: stock.MarketCap,
           CompanyName: stock.CompanyName,
           prices: stock.Date
             ? [
@@ -1236,7 +1234,7 @@ app.get("/api/favorites", verifyToken, (req, res) => {
     const stockSymbols = stockResults.map(stock => stock.StockSymbol);
 
     const fetchStockDetailsSql = `
-      SELECT StockSymbol, ClosePrice, \`Change (%)\` AS ChangePercentage, Date
+      SELECT StockSymbol, ClosePrice, Changepercen AS ChangePercentage, Date
       FROM StockDetail
       WHERE StockSymbol IN (?) 
       ORDER BY Date DESC;
@@ -1299,11 +1297,11 @@ app.get("/api/top-10-stocks", async (req, res) => {
 
       // คิวรี่หุ้นที่มีการเปลี่ยนแปลงสูงสุด 10 อันดับ พร้อมราคาปิด และ StockDetailID
       const query = `
-        SELECT sd.StockDetailID, s.StockSymbol, sd.\`Change (%)\` AS ChangePercentage, sd.ClosePrice
+        SELECT sd.StockDetailID, s.StockSymbol, sd.Changepercen AS ChangePercentage, sd.ClosePrice
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ?
-        ORDER BY sd.\`Change (%)\` DESC
+        ORDER BY sd.Changepercen DESC
         LIMIT 10;
       `;
 
@@ -1352,14 +1350,14 @@ app.get("/api/trending-stocks", async (req, res) => {
           sd.StockDetailID,
           sd.Date, 
           s.StockSymbol, 
-          sd.\`Change (%)\` AS ChangePercentage, 
+          sd.Changepercen AS ChangePercentage, 
           sd.ClosePrice,
           sd.PredictionClose,
           s.Market
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ?
-        ORDER BY s.Market DESC, sd.\`Change (%)\` DESC
+        ORDER BY s.Market DESC, sd.Changepercen DESC
         LIMIT 3;
       `;
 
@@ -1588,10 +1586,9 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
           s.Sector, 
           s.Industry, 
           s.Description, 
-          sd.MarketCap, 
           sd.OpenPrice, 
           sd.ClosePrice, 
-          sd.\`Change (%)\` AS ChangePercentage, 
+          sd.Changepercen AS ChangePercentage, 
           sd.Volume, 
           sd.PredictionClose, 
           sd.PredictionTrend  -- ✅ เพิ่ม PredictionTrend
@@ -1682,7 +1679,6 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
               Overview: {
                 Open: stock.OpenPrice,
                 Close: stock.ClosePrice,
-                MarketCap: stock.MarketCap,
                 AvgVolume30D: formattedAvgVolume30D // ✅ ใช้ค่าที่แก้ไขแล้ว
               },
               Profile: {
@@ -1724,11 +1720,11 @@ app.get("/api/recommend-us-stocks", async (req, res) => {
           sd.StockDetailID, 
           s.StockSymbol, 
           sd.ClosePrice, 
-          sd.\`Change (%)\` AS ChangePercentage
+          sd.Changepercen AS ChangePercentage
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ? AND s.Market = 'America'
-        ORDER BY ABS(sd.\`Change (%)\`) DESC
+        ORDER BY ABS(sd.Changepercen) DESC
         LIMIT 5;
       `;
 
@@ -1811,7 +1807,7 @@ app.get("/api/most-held-us-stocks", async (req, res) => {
           s.StockSymbol, 
           s.Market, 
           sd.ClosePrice, 
-          sd.\`Change (%)\` AS ChangePercentage
+          sd.Changepercen AS ChangePercentage
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ? AND s.Market = 'America'
@@ -1897,11 +1893,11 @@ app.get("/api/recommend-th-stocks", async (req, res) => {
           sd.StockDetailID, 
           s.StockSymbol, 
           sd.ClosePrice, 
-          sd.\`Change (%)\` AS ChangePercentage
+          sd.Changepercen AS ChangePercentage
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ? AND s.Market = 'Thailand'
-        ORDER BY ABS(sd.\`Change (%)\`) DESC
+        ORDER BY ABS(sd.Changepercen) DESC
         LIMIT 5;
       `;
 
@@ -1984,7 +1980,7 @@ app.get("/api/most-held-th-stocks", async (req, res) => {
           s.StockSymbol, 
           s.Market, 
           sd.ClosePrice, 
-          sd.\`Change (%)\` AS ChangePercentage
+          sd.Changepercen AS ChangePercentage
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ? AND s.Market = 'Thailand'
