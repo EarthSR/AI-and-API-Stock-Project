@@ -1687,6 +1687,357 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
   }
 });
 
+//Recommended US Stocks
+app.get("/api/recommend-us-stocks", async (req, res) => {
+  try {
+    // ดึงวันที่ล่าสุด
+    const latestDateQuery = "SELECT MAX(Date) AS LatestDate FROM StockDetail";
+    pool.query(latestDateQuery, (dateErr, dateResults) => {
+      if (dateErr) {
+        console.error("Database error fetching latest date:", dateErr);
+        return res.status(500).json({ error: "Database error fetching latest date" });
+      }
+
+      const latestDate = dateResults[0]?.LatestDate;
+      if (!latestDate) {
+        return res.status(404).json({ error: "No stock data available" });
+      }
+
+      // คิวรี่ดึงหุ้น **Top 5 ของตลาด US**
+      const recommendQuery = `
+        SELECT 
+          sd.StockDetailID, 
+          s.StockSymbol, 
+          sd.ClosePrice, 
+          sd.\`Change (%)\` AS ChangePercentage
+        FROM StockDetail sd
+        JOIN Stock s ON sd.StockSymbol = s.StockSymbol
+        WHERE sd.Date = ? AND s.Market = 'America'
+        ORDER BY ABS(sd.\`Change (%)\`) DESC
+        LIMIT 5;
+      `;
+
+      pool.query(recommendQuery, [latestDate], (recErr, recommendResults) => {
+        if (recErr) {
+          console.error("Database error fetching recommended stocks:", recErr);
+          return res.status(500).json({ error: "Database error fetching recommended stocks" });
+        }
+
+        const stockSymbols = recommendResults.map(stock => stock.StockSymbol);
+
+        // ดึงข้อมูลกราฟย้อนหลัง 5 วัน
+        const historyQuery = `
+          SELECT StockSymbol, Date, ClosePrice
+          FROM StockDetail
+          WHERE StockSymbol IN (?) 
+          ORDER BY StockSymbol, Date DESC
+        `;
+
+        pool.query(historyQuery, [stockSymbols], (histErr, historyResults) => {
+          if (histErr) {
+            console.error("Database error fetching historical data:", histErr);
+            return res.status(500).json({ error: "Database error fetching historical data" });
+          }
+
+          // จัดกลุ่มข้อมูลย้อนหลังตาม StockSymbol
+          const historyMap = {};
+          historyResults.forEach(entry => {
+            if (!historyMap[entry.StockSymbol]) {
+              historyMap[entry.StockSymbol] = [];
+            }
+            if (historyMap[entry.StockSymbol].length < 5) {
+              historyMap[entry.StockSymbol].push({
+                Date: entry.Date,
+                ClosePrice: entry.ClosePrice
+              });
+            }
+          });
+
+          // ส่ง Response
+          res.json({
+            date: latestDate,
+            recommendedStocks: recommendResults.map(stock => ({
+              StockDetailID: stock.StockDetailID,
+              StockSymbol: stock.StockSymbol,
+              ClosePrice: stock.ClosePrice,
+              Change: stock.ChangePercentage,
+              HistoricalPrices: historyMap[stock.StockSymbol] || []
+            }))
+          });
+        });
+      });
+    });
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+//Most Held US Stocks
+app.get("/api/most-held-us-stocks", async (req, res) => {
+  try {
+    // ดึงวันที่ล่าสุด
+    const latestDateQuery = "SELECT MAX(Date) AS LatestDate FROM StockDetail";
+    pool.query(latestDateQuery, (dateErr, dateResults) => {
+      if (dateErr) {
+        console.error("Database error fetching latest date:", dateErr);
+        return res.status(500).json({ error: "Database error fetching latest date" });
+      }
+
+      const latestDate = dateResults[0]?.LatestDate;
+      if (!latestDate) {
+        return res.status(404).json({ error: "No stock data available" });
+      }
+
+      // คิวรี่ดึงหุ้นทั้งหมดของตลาด US
+      const mostHeldQuery = `
+        SELECT 
+          sd.StockDetailID,
+          s.StockSymbol, 
+          s.Market, 
+          sd.ClosePrice, 
+          sd.\`Change (%)\` AS ChangePercentage
+        FROM StockDetail sd
+        JOIN Stock s ON sd.StockSymbol = s.StockSymbol
+        WHERE sd.Date = ? AND s.Market = 'America'
+        ORDER BY s.StockSymbol ASC;
+      `;
+
+      pool.query(mostHeldQuery, [latestDate], (mostHeldErr, mostHeldResults) => {
+        if (mostHeldErr) {
+          console.error("Database error fetching most held stocks:", mostHeldErr);
+          return res.status(500).json({ error: "Database error fetching most held stocks" });
+        }
+
+        const stockSymbols = mostHeldResults.map(stock => stock.StockSymbol);
+
+        // ดึงข้อมูลกราฟย้อนหลัง 5 วัน
+        const historyQuery = `
+          SELECT StockSymbol, Date, ClosePrice
+          FROM StockDetail
+          WHERE StockSymbol IN (?) 
+          ORDER BY StockSymbol, Date DESC;
+        `;
+
+        pool.query(historyQuery, [stockSymbols], (histErr, historyResults) => {
+          if (histErr) {
+            console.error("Database error fetching historical data:", histErr);
+            return res.status(500).json({ error: "Database error fetching historical data" });
+          }
+
+          // จัดกลุ่มข้อมูลย้อนหลังตาม StockSymbol
+          const historyMap = {};
+          historyResults.forEach(entry => {
+            if (!historyMap[entry.StockSymbol]) {
+              historyMap[entry.StockSymbol] = [];
+            }
+            if (historyMap[entry.StockSymbol].length < 5) {
+              historyMap[entry.StockSymbol].push({
+                Date: entry.Date,
+                ClosePrice: entry.ClosePrice
+              });
+            }
+          });
+
+          // ส่ง Response
+          res.json({
+            date: latestDate,
+            mostHeldStocks: mostHeldResults.map(stock => ({
+              StockDetailID: stock.StockDetailID,
+              StockSymbol: stock.StockSymbol,
+              Type: "US Stock",
+              ClosePrice: stock.ClosePrice,
+              Change: stock.ChangePercentage,
+              HistoricalPrices: historyMap[stock.StockSymbol] || []
+            }))
+          });
+        });
+      });
+    });
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+//Recommended TH Stocks
+app.get("/api/recommend-th-stocks", async (req, res) => {
+  try {
+    // ดึงวันที่ล่าสุด
+    const latestDateQuery = "SELECT MAX(Date) AS LatestDate FROM StockDetail";
+    pool.query(latestDateQuery, (dateErr, dateResults) => {
+      if (dateErr) {
+        console.error("Database error fetching latest date:", dateErr);
+        return res.status(500).json({ error: "Database error fetching latest date" });
+      }
+
+      const latestDate = dateResults[0]?.LatestDate;
+      if (!latestDate) {
+        return res.status(404).json({ error: "No stock data available" });
+      }
+
+      // คิวรี่ดึงหุ้น **Top 5 ของตลาดไทย**
+      const recommendQuery = `
+        SELECT 
+          sd.StockDetailID, 
+          s.StockSymbol, 
+          sd.ClosePrice, 
+          sd.\`Change (%)\` AS ChangePercentage
+        FROM StockDetail sd
+        JOIN Stock s ON sd.StockSymbol = s.StockSymbol
+        WHERE sd.Date = ? AND s.Market = 'Thailand'
+        ORDER BY ABS(sd.\`Change (%)\`) DESC
+        LIMIT 5;
+      `;
+
+      pool.query(recommendQuery, [latestDate], (recErr, recommendResults) => {
+        if (recErr) {
+          console.error("Database error fetching recommended Thai stocks:", recErr);
+          return res.status(500).json({ error: "Database error fetching recommended Thai stocks" });
+        }
+
+        const stockSymbols = recommendResults.map(stock => stock.StockSymbol);
+
+        // ดึงข้อมูลกราฟย้อนหลัง 5 วัน
+        const historyQuery = `
+          SELECT StockSymbol, Date, ClosePrice
+          FROM StockDetail
+          WHERE StockSymbol IN (?) 
+          ORDER BY StockSymbol, Date DESC
+        `;
+
+        pool.query(historyQuery, [stockSymbols], (histErr, historyResults) => {
+          if (histErr) {
+            console.error("Database error fetching historical data:", histErr);
+            return res.status(500).json({ error: "Database error fetching historical data" });
+          }
+
+          // จัดกลุ่มข้อมูลย้อนหลังตาม StockSymbol
+          const historyMap = {};
+          historyResults.forEach(entry => {
+            if (!historyMap[entry.StockSymbol]) {
+              historyMap[entry.StockSymbol] = [];
+            }
+            if (historyMap[entry.StockSymbol].length < 5) {
+              historyMap[entry.StockSymbol].push({
+                Date: entry.Date,
+                ClosePrice: entry.ClosePrice
+              });
+            }
+          });
+
+          // ส่ง Response
+          res.json({
+            date: latestDate,
+            recommendedStocks: recommendResults.map(stock => ({
+              StockDetailID: stock.StockDetailID,
+              StockSymbol: stock.StockSymbol,
+              ClosePrice: stock.ClosePrice,
+              Change: stock.ChangePercentage,
+              HistoricalPrices: historyMap[stock.StockSymbol] || []
+            }))
+          });
+        });
+      });
+    });
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+//Most Held Thai Stocks
+app.get("/api/most-held-th-stocks", async (req, res) => {
+  try {
+    // ดึงวันที่ล่าสุด
+    const latestDateQuery = "SELECT MAX(Date) AS LatestDate FROM StockDetail";
+    pool.query(latestDateQuery, (dateErr, dateResults) => {
+      if (dateErr) {
+        console.error("Database error fetching latest date:", dateErr);
+        return res.status(500).json({ error: "Database error fetching latest date" });
+      }
+
+      const latestDate = dateResults[0]?.LatestDate;
+      if (!latestDate) {
+        return res.status(404).json({ error: "No stock data available" });
+      }
+
+      // คิวรี่ดึงหุ้นทั้งหมดของตลาดไทย
+      const mostHeldQuery = `
+        SELECT 
+          sd.StockDetailID,
+          s.StockSymbol, 
+          s.Market, 
+          sd.ClosePrice, 
+          sd.\`Change (%)\` AS ChangePercentage
+        FROM StockDetail sd
+        JOIN Stock s ON sd.StockSymbol = s.StockSymbol
+        WHERE sd.Date = ? AND s.Market = 'Thailand'
+        ORDER BY s.StockSymbol ASC;
+      `;
+
+      pool.query(mostHeldQuery, [latestDate], (mostHeldErr, mostHeldResults) => {
+        if (mostHeldErr) {
+          console.error("Database error fetching most held Thai stocks:", mostHeldErr);
+          return res.status(500).json({ error: "Database error fetching most held Thai stocks" });
+        }
+
+        const stockSymbols = mostHeldResults.map(stock => stock.StockSymbol);
+
+        // ดึงข้อมูลกราฟย้อนหลัง 5 วัน
+        const historyQuery = `
+          SELECT StockSymbol, Date, ClosePrice
+          FROM StockDetail
+          WHERE StockSymbol IN (?) 
+          ORDER BY StockSymbol, Date DESC;
+        `;
+
+        pool.query(historyQuery, [stockSymbols], (histErr, historyResults) => {
+          if (histErr) {
+            console.error("Database error fetching historical data:", histErr);
+            return res.status(500).json({ error: "Database error fetching historical data" });
+          }
+
+          // จัดกลุ่มข้อมูลย้อนหลังตาม StockSymbol
+          const historyMap = {};
+          historyResults.forEach(entry => {
+            if (!historyMap[entry.StockSymbol]) {
+              historyMap[entry.StockSymbol] = [];
+            }
+            if (historyMap[entry.StockSymbol].length < 5) {
+              historyMap[entry.StockSymbol].push({
+                Date: entry.Date,
+                ClosePrice: entry.ClosePrice
+              });
+            }
+          });
+
+          // ส่ง Response
+          res.json({
+            date: latestDate,
+            mostHeldStocks: mostHeldResults.map(stock => ({
+              StockDetailID: stock.StockDetailID,
+              StockSymbol: stock.StockSymbol,
+              Type: "TH Stock",
+              ClosePrice: stock.ClosePrice,
+              Change: stock.ChangePercentage,
+              HistoricalPrices: historyMap[stock.StockSymbol] || []
+            }))
+          });
+        });
+      });
+    });
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+
+
+
+
 
 
 
