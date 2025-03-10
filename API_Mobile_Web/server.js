@@ -1547,13 +1547,15 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
 
     // กำหนดช่วงเวลาที่รองรับ
     const historyLimits = { "1D": 1, "5D": 5, "30D": 30, "6M": 180 };
+
+    // ตรวจสอบว่า timeframe ถูกต้องหรือไม่
     if (!historyLimits[timeframe]) {
       return res.status(400).json({ error: "Invalid timeframe. Choose from 1D, 5D, 30D, 6M." });
     }
 
     // ดึงวันที่ล่าสุดที่มีข้อมูล
     const latestDateQuery = "SELECT MAX(Date) AS LatestDate FROM StockDetail";
-    pool.query(latestDateQuery, (dateErr, dateResults) => {
+    pool.query(latestDateQuery, async (dateErr, dateResults) => {
       if (dateErr) {
         console.error("Database error fetching latest date:", dateErr);
         return res.status(500).json({ error: "Database error fetching latest date" });
@@ -1569,14 +1571,16 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
         SELECT 
           sd.StockDetailID, 
           s.StockSymbol, 
+          s.Market, 
           s.CompanyName, 
-          s.Market,          -- ✅ ใช้ Market เพื่อตรวจสอบว่าเป็นหุ้นไทยหรือเมกา
           s.Sector, 
           s.Industry, 
           s.Description, 
+          s.MarketCap, 
+          sd.OpenPrice, 
           sd.ClosePrice, 
           sd.\`Change (%)\` AS ChangePercentage, 
-          sd.Date AS LatestDate,
+          sd.Volume, 
           sd.PredictionClose
         FROM Stock s
         LEFT JOIN StockDetail sd ON s.StockSymbol = sd.StockSymbol AND sd.Date = ?
@@ -1595,63 +1599,84 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
 
         const stock = results[0];
 
-        // แปลงค่า Type ของหุ้นเป็น US หรือ TH Stock
+        // ✅ แปลงค่า Type ของหุ้นจาก Market
         let stockType = stock.Market === "America" ? "US Stock" : "TH Stock";
 
-        // คำนวณการเปลี่ยนแปลงราคาพยากรณ์
+        // ✅ ดึงค่าอัตราแลกเปลี่ยน USD → THB ถ้าหุ้นเป็นของตลาดอเมริกา
+        let exchangeRate = 1;
+        if (stockType === "US Stock") {
+          exchangeRate = await getExchangeRate();
+        }
+
+        // ✅ ตรวจสอบค่า ClosePrice และแปลงเป็น THB ถ้าหุ้นเป็นของ US
+        const closePrice = stock.ClosePrice !== null ? parseFloat(stock.ClosePrice) : 0;
+        const closePriceTHB = stockType === "US Stock" ? closePrice * exchangeRate : closePrice;
+
+        // ✅ คำนวณ % การเปลี่ยนแปลงของ Prediction Close
         let pricePredictionChange = stock.PredictionClose
           ? ((stock.PredictionClose - stock.ClosePrice) / stock.ClosePrice) * 100
           : null;
 
-        // ดึงค่าอัตราแลกเปลี่ยน USD → THB (เฉพาะหุ้น US)
-        let exchangeRate = 1; // Default = 1 (หุ้นไทย)
-        if (stockType === "US Stock") {
-          exchangeRate = await getExchangeRate(); // ✅ ใช้ API ดึงค่าเงิน
-        }
-
-        // ✅ ตรวจสอบว่า ClosePrice มีค่าหรือไม่
-        const closePrice = stock.ClosePrice !== null ? parseFloat(stock.ClosePrice) : 0;
-        const closePriceTHB = stockType === "US Stock"
-          ? closePrice * exchangeRate
-          : closePrice;
-
-        // ✅ ตรวจสอบค่า closePriceTHB ก่อนใช้ .toFixed(2)
-        const formattedClosePriceTHB = isNaN(closePriceTHB) ? "N/A" : closePriceTHB.toFixed(2);
-
-        // ดึงข้อมูลกราฟย้อนหลังตาม Timeframe ที่เลือก
-        const historyQuery = `
-          SELECT StockSymbol, Date, ClosePrice
+        // ✅ คำนวณค่าเฉลี่ย Volume 30 วัน
+        const avgVolumeQuery = `
+          SELECT AVG(Volume) AS AvgVolume30D 
           FROM StockDetail 
           WHERE StockSymbol = ? 
           ORDER BY Date DESC 
-          LIMIT ?;
+          LIMIT 30;
         `;
 
-        pool.query(historyQuery, [symbol, historyLimits[timeframe]], (histErr, historyResults) => {
-          if (histErr) {
-            console.error(`Database error fetching historical data:`, histErr);
-            return res.status(500).json({ error: "Database error fetching historical data" });
+        pool.query(avgVolumeQuery, [symbol], (volErr, volResults) => {
+          if (volErr) {
+            console.error("Database error fetching average volume:", volErr);
+            return res.status(500).json({ error: "Database error fetching average volume" });
           }
-
-          // ส่ง Response กลับ
-          res.json({
-            StockDetailID: stock.StockDetailID,
-            StockSymbol: stock.StockSymbol,
-            Type: stockType,
-            ClosePrice: stock.ClosePrice,
-            ClosePriceTHB: formattedClosePriceTHB, // ✅ ใช้ค่าที่ตรวจสอบแล้ว
-            Date: latestDate,
-            Change: stock.ChangePercentage,
-            PredictionClose: stock.PredictionClose,
-            PredictionCloseDate: latestDate,
-            PricePredictionChange: pricePredictionChange ? pricePredictionChange.toFixed(2) + "%" : "N/A",
-            SelectedTimeframe: timeframe,
-            HistoricalPrices: historyResults,
-            Profile: {
-              Sector: stock.Sector,
-              Industry: stock.Industry,
-              Description: stock.Description
+        
+          // ✅ แก้ปัญหา .toFixed(2) ใช้กับค่าที่เป็น null
+          const avgVolume30D = volResults[0]?.AvgVolume30D ? parseFloat(volResults[0].AvgVolume30D) : 0;
+          const formattedAvgVolume30D = avgVolume30D > 0 ? avgVolume30D.toFixed(2) + " Million" : "N/A";
+        
+          // ✅ ดึงข้อมูลกราฟย้อนหลังตาม Timeframe ที่เลือก
+          const historyQuery = `
+            SELECT StockSymbol, Date, ClosePrice
+            FROM StockDetail 
+            WHERE StockSymbol = ? 
+            ORDER BY Date DESC 
+            LIMIT ?;
+          `;
+        
+          pool.query(historyQuery, [symbol, historyLimits[timeframe]], (histErr, historyResults) => {
+            if (histErr) {
+              console.error(`Database error fetching historical data:`, histErr);
+              return res.status(500).json({ error: "Database error fetching historical data" });
             }
+        
+            // ✅ ส่ง Response กลับ
+            res.json({
+              StockDetailID: stock.StockDetailID,
+              StockSymbol: stock.StockSymbol,
+              Type: stockType,
+              ClosePrice: stock.ClosePrice,
+              ClosePriceTHB: closePriceTHB.toFixed(2),
+              Date: latestDate,
+              Change: stock.ChangePercentage,
+              PredictionClose: stock.PredictionClose,
+              PredictionCloseDate: latestDate,
+              PricePredictionChange: pricePredictionChange ? pricePredictionChange.toFixed(2) + "%" : "N/A",
+              SelectedTimeframe: timeframe,
+              HistoricalPrices: historyResults,
+              Overview: {
+                Open: stock.OpenPrice,
+                Close: stock.ClosePrice,
+                MarketCap: stock.MarketCap,
+                AvgVolume30D: formattedAvgVolume30D // ✅ ใช้ค่าที่แก้ไขแล้ว
+              },
+              Profile: {
+                Sector: stock.Sector,
+                Industry: stock.Industry,
+                Description: stock.Description
+              }
+            });
           });
         });
       });
@@ -1661,6 +1686,10 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+
+
+
 
 
 
