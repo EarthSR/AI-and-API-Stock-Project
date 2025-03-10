@@ -2056,7 +2056,9 @@ app.get("/get-embed-url", (req, res) => {
   res.json({
     embedUrl:
       "https://app.powerbi.com/view?r=eyJrIjoiOGU0ZjNhMjktYjJiZC00ODA1LWIzM2EtNzNkNDg0NzhhMzVkIiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
-  });
+    embedUrl:
+      "https://app.powerbi.com/view?r=eyJrIjoiY2VlNGQ1MTItMTE1Zi00ODkyLThhYjEtMjg4MWRkOTRkZWI2IiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
+    });
 });
 
 //Admin//
