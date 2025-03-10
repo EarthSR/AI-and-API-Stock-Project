@@ -406,7 +406,7 @@ np.save('train_features.npy', train_features_scaled)
 np.save('train_price.npy', train_price_scaled)
 print("✅ บันทึก test_features.npy และ test_price.npy สำเร็จ!")
 
-seq_length = 15
+seq_length = 10
 
 # ------------------------------------------------------------------------------------
 # 3) สร้าง Sequence (ต่อ Ticker) สำหรับ Multi-Task (Price + Direction)
@@ -488,60 +488,65 @@ def quantile_loss(y_true, y_pred, quantile=0.5):
     error = y_true - y_pred
     return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
 
-from tensorflow.keras.layers import Conv1D, GlobalAveragePooling1D
-from tensorflow.keras.layers import Attention, BatchNormalization, LSTM
+from tensorflow.keras.layers import MultiHeadAttention, LayerNormalization, Dense, Dropout, Add, Input, LSTM, GlobalAveragePooling1D, Conv1D, Bidirectional, Embedding
+from tensorflow.keras.models import Model
+import tensorflow.keras.backend as K
 
-from tensorflow.keras.layers import MultiHeadAttention, BatchNormalization, LSTM, Add
+# ---------------------- Quantile Loss ----------------------
+from tensorflow.keras.saving import register_keras_serializable
 
-from tensorflow.keras.layers import Concatenate, BatchNormalization, LSTM
+@register_keras_serializable()
+def quantile_loss(y_true, y_pred, quantile=0.5):
+    """Custom Quantile Loss"""
+    error = y_true - y_pred
+    return K.mean(K.maximum(quantile * error, (quantile - 1) * error))
 
-# -------------------------- Embedding Layer --------------------------
-embedding_dim = 32
+
+# ---------------------- Embedding Layer ----------------------
+embedding_dim = 16
 ticker_embedding = Embedding(input_dim=num_tickers, output_dim=embedding_dim, name="ticker_embedding")(ticker_input)
+ticker_embedding = Dense(8, activation="relu")(ticker_embedding)
 
 # รวม features + ticker_embedding
 merged = concatenate([features_input, ticker_embedding], axis=-1)
-x = merged
 
-# -------------------------- LSTM Layers --------------------------
-x = LSTM(64, return_sequences=True)(x)
-x = Dropout(0.3)(x)
-x = LSTM(32, return_sequences=True)(x)
-x = Dropout(0.3)(x)
-x = LSTM(16, return_sequences=False)(x)  # ชั้นสุดท้าย return_sequences=False
-x = Dropout(0.3)(x)
+# ---------------------- LSTM Layers ----------------------
+x = Bidirectional(LSTM(64, return_sequences=True))(merged)
+x = Dropout(0.2)(x)
+x = Bidirectional(LSTM(32, return_sequences=False))(x)
+x = Dropout(0.2)(x)
 
-# -------------------------- Fully Connected Layers --------------------------
-x = Dense(128, activation="relu")(x)
-x = Dropout(0.3)(x)
+# ---------------------- Fully Connected Layers ----------------------
 x = Dense(64, activation="relu")(x)
-x = Dropout(0.3)(x)
+x = Dropout(0.2)(x)
+x = Dense(32, activation="relu")(x)
+x = Dropout(0.2)(x)
 
-# -------------------------- Output Layers --------------------------
-price_output = Dense(1, name="price_output")(x)  # พยากรณ์ราคาหุ้น
-direction_output = Dense(1, activation="sigmoid", name="direction_output")(x)  # พยากรณ์ทิศทาง
+# ---------------------- Output Layers ----------------------
+price_output = Dense(1, name="price_output")(x)
+direction_output = Dense(1, activation="sigmoid", name="direction_output")(x)
 
-# -------------------------- สร้างโมเดล --------------------------
+# ---------------------- สร้างโมเดล ----------------------
 model = Model(inputs=[features_input, ticker_input], outputs=[price_output, direction_output])
 
-# -------------------------- Optimizer & Loss --------------------------
-optimizer = AdamW(learning_rate=3e-4, weight_decay=1e-5)
+# ---------------------- Optimizer & Loss ----------------------
+optimizer = AdamW(learning_rate=1e-3, weight_decay=1e-5)
 
 model.compile(
     optimizer=optimizer,
     loss={"price_output": tf.keras.losses.Huber(delta=1.0), "direction_output": "binary_crossentropy"},
-    loss_weights={"price_output": 0.7, "direction_output": 0.3},
+    loss_weights={"price_output": 0.8, "direction_output": 0.2},
     metrics={"price_output": ["mae"], "direction_output": ["accuracy"]}
 )
 
 model.summary()
 
-
-# ---------------------- Callbacks ----------------------
-early_stopping = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)
+early_stopping = EarlyStopping(monitor="val_loss", patience=20, restore_best_weights=True)
+lr_scheduler = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6)
 checkpoint = ModelCheckpoint("best_multi_task_model.keras", monitor="val_loss", save_best_only=True, mode="min")
 
-# ---------------------- Training ----------------------
+callbacks = [early_stopping, lr_scheduler, checkpoint]
+
 history = model.fit(
     [X_price_train, X_ticker_train],
     {"price_output": y_price_train, "direction_output": y_dir_train},
@@ -550,7 +555,7 @@ history = model.fit(
     verbose=1,
     shuffle=False,
     validation_split=0.1,
-    callbacks=[early_stopping, checkpoint]
+    callbacks=callbacks
 )
 
 # -------------------------- Save Model --------------------------
@@ -701,7 +706,7 @@ def walk_forward_validation_multi_task(
 best_multi_model = load_model(
     "best_multi_task_model.keras",
     custom_objects={
-        "Huber": Huber,
+        "quantile_loss": quantile_loss,
         "focal_loss_fixed": focal_loss_fixed,
         "softmax_axis1": softmax_axis1
     },

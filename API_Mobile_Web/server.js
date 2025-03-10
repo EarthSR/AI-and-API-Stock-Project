@@ -20,6 +20,7 @@ const { PythonShell } = require('python-shell');
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(cors()); // Enable CORS
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 
 // Create Connection Pool
@@ -34,6 +35,8 @@ const pool = mysql.createPool({
     queueLimit: 0,
     connectTimeout: 60000,
   });
+
+
 
   // ฟังก์ชันสำหรับตรวจสอบ JWT token
 const verifyToken = (req, res, next) => {
