@@ -1593,7 +1593,8 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
           sd.ClosePrice, 
           sd.\`Change (%)\` AS ChangePercentage, 
           sd.Volume, 
-          sd.PredictionClose
+          sd.PredictionClose, 
+          sd.PredictionTrend  -- ✅ เพิ่ม PredictionTrend
         FROM Stock s
         LEFT JOIN StockDetail sd ON s.StockSymbol = sd.StockSymbol AND sd.Date = ?
         WHERE s.StockSymbol = ?;
@@ -1673,6 +1674,7 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
               Date: latestDate,
               Change: stock.ChangePercentage,
               PredictionClose: stock.PredictionClose,
+              PredictionTrend: stock.PredictionTrend, // ✅ เพิ่ม PredictionTrend
               PredictionCloseDate: latestDate,
               PricePredictionChange: pricePredictionChange ? pricePredictionChange.toFixed(2) + "%" : "N/A",
               SelectedTimeframe: timeframe,
@@ -1698,6 +1700,7 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 //Recommended US Stocks
 app.get("/api/recommend-us-stocks", async (req, res) => {
