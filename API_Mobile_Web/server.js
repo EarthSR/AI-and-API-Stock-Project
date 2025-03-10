@@ -905,23 +905,27 @@ app.get("/api/search", (req, res) => {
     return res.status(400).json({ error: "Search query is required" });
   }
 
-  // Trim ค่าที่ค้นหาและแปลงเป็นตัวพิมพ์เล็ก
   const searchValue = `%${query.trim().toLowerCase()}%`;
 
-  // SQL query ค้นหาหุ้นและรายละเอียดหุ้นล่าสุด
   const searchSql = `
     SELECT 
         s.StockSymbol, 
         s.Market, 
         s.CompanyName, 
-        sd.StockDetailID,  -- ✅ เพิ่ม StockDetailID
+        sd.StockDetailID,  -- ✅ ดึงเฉพาะวันล่าสุด
         sd.Date, 
         sd.ClosePrice
     FROM Stock s
-    LEFT JOIN StockDetail sd ON s.StockSymbol = sd.StockSymbol
+    INNER JOIN StockDetail sd 
+        ON s.StockSymbol = sd.StockSymbol
+    INNER JOIN (
+        SELECT StockSymbol, MAX(Date) AS LatestDate
+        FROM StockDetail
+        GROUP BY StockSymbol
+    ) latest ON sd.StockSymbol = latest.StockSymbol AND sd.Date = latest.LatestDate
     WHERE LOWER(s.StockSymbol) LIKE ? 
        OR LOWER(s.CompanyName) LIKE ?
-    ORDER BY sd.Date DESC; 
+    ORDER BY sd.Date DESC;
   `;
 
   pool.query(searchSql, [searchValue, searchValue], (err, results) => {
@@ -934,41 +938,20 @@ app.get("/api/search", (req, res) => {
       return res.status(404).json({ message: "No results found" });
     }
 
-    // จัดกลุ่มข้อมูลโดย StockSymbol
-    const groupedResults = results.reduce((acc, stock) => {
-      const existingStock = acc.find((item) => item.StockSymbol === stock.StockSymbol);
-
-      if (existingStock) {
-        // ถ้ามีอยู่แล้ว เพิ่มข้อมูล ClosePrice เข้าไปในรายการราคา
-        existingStock.prices.push({
-          StockDetailID: stock.StockDetailID, // ✅ เพิ่ม StockDetailID
-          date: stock.Date,
-          close_price: stock.ClosePrice,
-        });
-      } else {
-        // ถ้ายังไม่มี ให้เพิ่ม StockSymbol และรายละเอียดหุ้น
-        acc.push({
-          StockSymbol: stock.StockSymbol,
-          Market: stock.Market,
-          CompanyName: stock.CompanyName,
-          prices: stock.Date
-            ? [
-                {
-                  StockDetailID: stock.StockDetailID, // ✅ เพิ่ม StockDetailID
-                  date: stock.Date,
-                  close_price: stock.ClosePrice,
-                },
-              ]
-            : [], // ถ้าไม่มีราคาหุ้น ให้เป็น array ว่าง
-        });
-      }
-
-      return acc;
-    }, []);
+    // ✅ ดึงเฉพาะข้อมูลวันล่าสุด
+    const groupedResults = results.map(stock => ({
+      StockSymbol: stock.StockSymbol,
+      Market: stock.Market,
+      CompanyName: stock.CompanyName,
+      StockDetailID: stock.StockDetailID,  // ✅ ดึง StockDetailID วันล่าสุด
+      LatestDate: stock.Date,
+      ClosePrice: stock.ClosePrice
+    }));
 
     res.json({ results: groupedResults });
   });
 });
+
 
 
 
@@ -2051,12 +2034,22 @@ app.get("/api/most-held-th-stocks", async (req, res) => {
 
 //-----------------------------------------------------------------------------------------------------------------------------------------------//
 
+// Middleware to verify admin role
+const verifyAdmin = (req, res, next) => {
+  if (req.role !== "admin") {
+    return res.status(403).json({ error: "Unauthorized access" });
+  }
+  next();
+};
+
 // API ให้ React ดึง Secure Embed URL ไปใช้
 app.get("/get-embed-url", (req, res) => {
   res.json({
     embedUrl:
       "https://app.powerbi.com/view?r=eyJrIjoiOGU0ZjNhMjktYjJiZC00ODA1LWIzM2EtNzNkNDg0NzhhMzVkIiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
-  });
+    embedUrl:
+      "https://app.powerbi.com/view?r=eyJrIjoiY2VlNGQ1MTItMTE1Zi00ODkyLThhYjEtMjg4MWRkOTRkZWI2IiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
+    });
 });
 
 //Admin//

@@ -1,178 +1,235 @@
 import numpy as np
 import pandas as pd
-import pymysql
+import sqlalchemy
+import os
+import ta
+from tensorflow.keras.models import load_model
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder, RobustScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score
+import xgboost as xgb
+from sklearn.ensemble import RandomForestRegressor
 import joblib
-import pandas_ta as ta
-from sqlalchemy import create_engine
-from sklearn.preprocessing import LabelEncoder
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
-# ✅ เชื่อมต่อฐานข้อมูล MySQL ด้วย SQLAlchemy
-db_connection_str = "mysql+pymysql://trademine:trade789@10.10.50.62/TradeMine"
-engine = create_engine(db_connection_str)
-
-# ✅ โหลด Scaler และ Encoder
-scaler_features = joblib.load("../LSTM_model/scaler_features.pkl")
-scaler_target = joblib.load("../LSTM_model/scaler_target.pkl")
-ticker_encoder = joblib.load("../LSTM_model/ticker_encoder.pkl")
-
-# ✅ โหลด Weighted Stacking Model
-weighted_stacking_price = joblib.load("../Ensemble_Model/weighted_stacking_price.pkl")
-weighted_stacking_direction = joblib.load("../Ensemble_Model/weighted_stacking_direction.pkl")
-
-# ✅ โหลด Base Models (XGBoost และ RandomForest)
+# ------------------------- 1) CONFIG -------------------------
+DB_CONNECTION = "mysql+pymysql://trademine:trade789@10.10.50.62:3306/TradeMine"
+MODEL_LSTM_PATH = "../LSTM_model/best_multi_task_model.keras"
+MODEL_GRU_PATH = "../GRU_Model/best_multi_task_model.keras"
+# ✅ โหลดโมเดล XGBoost และ RandomForest ที่ถูก Train แล้ว
 xgb_model = joblib.load("../Ensemble_Model/xgb_model_price.pkl")
 rf_model = joblib.load("../Ensemble_Model/rf_model_price.pkl")
-xgb_dir_model = joblib.load("../Ensemble_Model/xgb_model_direction.pkl")
-rf_dir_model = joblib.load("../Ensemble_Model/rf_model_direction.pkl")
+# ✅ โหลด Scaler ที่เคยใช้
+scaler_target = joblib.load("../Ensemble_Model/scaler_target.pkl")
+SEQ_LENGTH = 10
+RETRAIN_FREQUENCY = 1
+w_lstm, w_gru = 0.5, 0.5  # ✅ ใช้ Weighted Stacking ระหว่าง LSTM และ GRU
 
-def calculate_indicators(df):
-    """ 📌 คำนวณ Indicators ใน Python """
-    df = df.copy()
+def save_predictions_to_stockdetail(predictions_df):
+    """
+    อัปเดตค่าพยากรณ์ในตาราง `StockDetail` สำหรับหุ้นแต่ละตัวในวันที่ล่าสุด
+    """
+    engine = sqlalchemy.create_engine(DB_CONNECTION)
 
-    print(f"📊 ก่อนคำนวณ Indicator ({df.shape[0]} rows)")
+    with engine.connect() as connection:
+        for _, row in predictions_df.iterrows():
+            ticker = row['Ticker']
+            date = row['Date']
+            predicted_price = row['Predicted_Price']
+            predicted_direction = row['Predicted_Direction']
 
-    # ✅ คำนวณ RSI
-    df["RSI"] = ta.rsi(df["ClosePrice"], length=14)
+            # ✅ อัปเดตค่าพยากรณ์ในตาราง `StockDetail` สำหรับวันที่ล่าสุด
+            connection.execute(f"""
+                UPDATE StockDetail
+                SET PredictionClos = {predicted_price}, PredictionTren = {predicted_direction}
+                WHERE StockSymbo = '{ticker}' 
+                AND Date = (SELECT MAX(Date) FROM StockDetail WHERE StockSymbo = '{ticker}')
+            """)
 
-    # ✅ คำนวณ EMA
-    df["EMA_10"] = ta.ema(df["ClosePrice"], length=10)
-    df["EMA_20"] = ta.ema(df["ClosePrice"], length=20)
+    print("\n✅ อัปเดตค่าพยากรณ์ใน `StockDetail` สำเร็จ!")
 
-    # ✅ คำนวณ SMA
-    df["SMA_50"] = ta.sma(df["ClosePrice"], length=50)
-    df["SMA_200"] = ta.sma(df["ClosePrice"], length=200)
 
-    # ✅ คำนวณ MACD
-    macd = ta.macd(df["ClosePrice"])
-    df["MACD"] = macd["MACD_12_26_9"] if macd is not None else np.nan
-    df["MACD_Signal"] = macd["MACDs_12_26_9"] if macd is not None else np.nan
+# ------------------------- 2) ดึงข้อมูลจาก Database -------------------------
+def fetch_latest_data():
+    engine = sqlalchemy.create_engine(DB_CONNECTION)
+    import sqlalchemy
+import pandas as pd
 
-    # ✅ คำนวณ Bollinger Bands
-    bb = ta.bbands(df["ClosePrice"], length=20)
-    df["Bollinger_High"] = bb["BBU_20_2.0"] if bb is not None else np.nan
-    df["Bollinger_Low"] = bb["BBL_20_2.0"] if bb is not None else np.nan
+# ------------------------- 2) ดึงข้อมูลจาก Database -------------------------
+def fetch_latest_data():
+    """
+    ดึงข้อมูลหุ้นล่าสุดจากฐานข้อมูล MySQL
+    """
+    engine = sqlalchemy.create_engine(DB_CONNECTION)
 
-    # ✅ คำนวณ ATR
-    df["ATR"] = ta.atr(df["HighPrice"], df["LowPrice"], df["ClosePrice"], length=14)
+    query = """
+        SELECT 
+            Date, 
+            StockSymbol, 
+            OpenPrice AS Open, 
+            HighPrice AS High, 
+            LowPrice AS Low, 
+            ClosePrice AS Close, 
+            Volume, 
+            P_BV_Ratio,
+            Sentiment, 
+            Changepercen AS Change_Percent, 
+            TotalRevenue, 
+            QoQGrowth, 
+            EPS, 
+            ROE, 
+            NetProfitMargin, 
+            DebtToEquity, 
+            PERatio, 
+            Dividend_Yield 
+        FROM StockDetail
+        WHERE Date >= CURDATE() - INTERVAL 365 DAY
+        ORDER BY Date ASC
+    """
 
-    print(f"📊 หลังคำนวณ Indicator ({df.shape[0]} rows)")
+    df = pd.read_sql(query, engine)
+    engine.dispose()
 
-    return df.fillna(method="bfill").reset_index(drop=True)
+    # ✅ คำนวณฟีเจอร์ทางเทคนิค
+    df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
+    df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
+    df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    df['SMA_200'] = df['Close'].rolling(window=200).mean()
+    df['EMA_10'] = df['Close'].ewm(span=10, adjust=False).mean()
+    df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+    df['MACD'] = df['EMA_12'] - df['EMA_26']
+    df['MACD_Signal'] = df['MACD'].rolling(window=9).mean()
+    atr = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=14)
+    df['ATR'] = atr.average_true_range()
+    bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
+    df['Bollinger_High'] = bollinger.bollinger_hband()
+    df['Bollinger_Low'] = bollinger.bollinger_lband()
+    df['Sentiment'] = df['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
+    atr = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=14)
+    df['ATR'] = atr.average_true_range()
 
-def safe_transform(encoder, ticker):
-    """ 📌 แปลงค่า `Ticker` เป็น ID หากไม่พบให้คืน -1 """
-    if ticker in encoder.classes_:
-        return encoder.transform([ticker])[0]
-    else:
-        print(f"⚠️ หุ้น {ticker} ไม่มีใน `ticker_encoder`")
-        return -1
+    keltner = ta.volatility.KeltnerChannel(high=df['High'], low=df['Low'], close=df['Close'], window=20, window_atr=10)
+    df['Keltner_High'] = keltner.keltner_channel_hband()
+    df['Keltner_Low'] = keltner.keltner_channel_lband()
+    df['Keltner_Middle'] = keltner.keltner_channel_mband()
+    window_cv = 10
+    df['High_Low_Diff'] = df['High'] - df['Low']
+    df['High_Low_EMA'] = df['High_Low_Diff'].ewm(span=window_cv, adjust=False).mean()
+    df['Chaikin_Vol'] = df['High_Low_EMA'].pct_change(periods=window_cv) * 100
 
-def walk_forward_validation_multi_task(engine, scaler_features, scaler_target, ticker_encoder, seq_length=10):
-    """ 📌 ทำ Walk-Forward Validation ใช้ Weighted Stacking Model """
+    window_dc = 20
+    df['Donchian_High'] = df['High'].rolling(window=window_dc).max()
+    df['Donchian_Low'] = df['Low'].rolling(window=window_dc).min()
+    psar = ta.trend.PSARIndicator(high=df['High'], low=df['Low'], close=df['Close'], step=0.02, max_step=0.2)
+    df['PSAR'] = psar.psar()
+    # ✅ เติมค่าที่ขาด
+    df.fillna(method='ffill', inplace=True)
+    df.fillna(0, inplace=True)
+
+    return df
+
+test_df = fetch_latest_data()
+
+# ------------------------- 3) โหลดโมเดลล่าสุด -------------------------
+model_lstm = load_model(MODEL_LSTM_PATH, custom_objects={}, safe_mode=False)
+model_gru = load_model(MODEL_GRU_PATH, custom_objects={}, safe_mode=False)
+
+# ------------------------- 4) เตรียมข้อมูล -------------------------
+feature_columns = [
+    'Open', 'High', 'Low', 'Close', 'Volume', 'Change_Percent', 'Sentiment',
+    'TotalRevenue', 'QoQGrowth', 'EPS', 'ROE', 'NetProfitMargin', 
+    'DebtToEquity', 'PERatio', 'Dividend_Yield','P_BV_Ratio',
+    'ATR', 'Keltner_High', 'Keltner_Low', 'Keltner_Middle','Chaikin_Vol','Donchian_High', 'Donchian_Low', 'PSAR',
+    'RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal', 'Bollinger_High', 'Bollinger_Low', 'SMA_50', 'SMA_200'
+]
+
+scaler_features = RobustScaler()
+scaler_target = RobustScaler()
+ticker_encoder = LabelEncoder()
+
+test_df["Ticker_ID"] = ticker_encoder.fit_transform(test_df["StockSymbol"])
+scaler_features.fit(test_df[feature_columns])
+scaler_target.fit(test_df[["Close"]])
+
+# ------------------------- 5) Predict Next Day -------------------------
+def predict_next_day(model_lstm, model_gru, df, feature_columns, scaler_features, scaler_target, ticker_encoder, seq_length):
     all_predictions = []
-
-    # ✅ ดึงลิสต์หุ้นจากฐานข้อมูล
-    query_tickers = "SELECT DISTINCT StockSymbol FROM Stock"
-    tickers_df = pd.read_sql(query_tickers, engine)
-    tickers = tickers_df["StockSymbol"].dropna().unique().tolist()
+    tickers = df['StockSymbol'].unique()
 
     for ticker in tickers:
-        print(f"\n📈 Processing Ticker: {ticker}")
+        print(f"\nProcessing Ticker: {ticker}")
+        df_ticker = df[df['StockSymbol'] == ticker].sort_values('Date').reset_index(drop=True)
 
-        # ✅ ตรวจสอบค่า ticker
-        if not isinstance(ticker, str) or ticker.strip() == "":
-            print(f"⚠️ ค่า `StockSymbol` ผิดพลาด ({ticker}) ข้ามหุ้นนี้ไป...")
+        if len(df_ticker) < seq_length:
+            print(f"⚠️ Not enough data for ticker {ticker}, skipping...")
             continue
 
-        ticker_id_val = safe_transform(ticker_encoder, ticker)
-        if ticker_id_val == -1:
-            continue
-
-        # ✅ ดึงข้อมูลราคาหุ้นย้อนหลัง **เพิ่มจำนวนวัน** (เพื่อคำนวณ Indicator)
-        query_stock = f"""
-            SELECT Date, OpenPrice, HighPrice, LowPrice, ClosePrice, Volume, 
-                Changepercen, TotalRevenue, QoQGrowth, EPS, ROE, NetProfitMargin, 
-                DebtToEquity, PERatio, Dividend_Yield 
-            FROM StockDetail 
-            WHERE StockSymbol = '{ticker}' 
-            ORDER BY Date DESC 
-            LIMIT {seq_length + 300}
-        """
-        df_ticker = pd.read_sql(query_stock, engine)
-        print(f"🔍 {ticker}: ข้อมูลจาก SQL ก่อน Indicator: {df_ticker.shape}")  # Debug
-
-
-        # ✅ ตรวจสอบข้อมูลที่ได้มา
-        if df_ticker.empty or len(df_ticker) < seq_length:
-            print(f"⚠️ Not enough data for {ticker}, skipping...")
-            continue
-
-        df_ticker = df_ticker.sort_values("Date").reset_index(drop=True)
-
-        # ✅ คำนวณ Indicators บนข้อมูลย้อนหลังมากพอ
-        df_ticker = calculate_indicators(df_ticker)
-
-        # ✅ ใช้ **เฉพาะ 10 วันล่าสุด** สำหรับการทำนาย
-        df_ticker = df_ticker.iloc[-seq_length:]
-
-        # ✅ ตรวจสอบว่าข้อมูล 10 วันสุดท้ายมีครบทุก Indicator หรือไม่
-        if df_ticker.isnull().sum().sum() > 0:
-            print(f"⚠️ Missing values in indicators for {ticker}, skipping...")
-            continue
-
-        feature_columns = df_ticker.columns.tolist()
-        features = df_ticker[feature_columns].values
-        ticker_ids = np.full((seq_length,), ticker_id_val)
-
-        # ✅ ตรวจสอบว่าข้อมูลไม่ว่างเปล่าหลังคำนวณ Indicators
-        if df_ticker.empty or len(df_ticker) < seq_length:
-            print(f"⚠️ Not enough data after Indicator Calculation for {ticker}, skipping...")
-            continue
-
-        # ✅ ใช้ข้อมูล 10 วันที่ผ่านมาเป็นอินพุต
+        # ✅ ใช้ข้อมูล 10 วันล่าสุด
         historical_data = df_ticker.iloc[-seq_length:]
-        features = historical_data[feature_columns].values
+        last_date = df_ticker.iloc[-1]["Date"]
 
-        # ✅ ตรวจสอบว่า features ไม่ว่างเปล่า
-        if features.shape[0] == 0:
-            print(f"⚠️ Features array is empty for {ticker}, skipping...")
-            continue
+        # ✅ สเกลข้อมูล
+        features_scaled = pd.DataFrame(scaler_features.transform(historical_data[feature_columns]), columns=feature_columns)
+        ticker_ids = historical_data["Ticker_ID"].values
 
-        ticker_ids = np.full((seq_length,), ticker_id_val)
+        # ✅ พยากรณ์ด้วย LSTM และ GRU
+        pred_price_lstm_scaled = np.array(model_lstm.predict([features_scaled.values.reshape(1, seq_length, len(feature_columns)), 
+                                                              ticker_ids.reshape(1, seq_length)], verbose=0)).squeeze()
+        pred_price_gru_scaled = np.array(model_gru.predict([features_scaled.values.reshape(1, seq_length, len(feature_columns)), 
+                                                            ticker_ids.reshape(1, seq_length)], verbose=0)).squeeze()
 
-        # ✅ สเกลข้อมูล Feature ก่อนเข้าโมเดล
-        features_scaled = scaler_features.transform(features.reshape(-1, len(feature_columns)))
-        X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
-        X_ticker = ticker_ids.reshape(1, seq_length)
+        pred_price_lstm = scaler_target.inverse_transform(pred_price_lstm_scaled.reshape(-1, 1)).flatten()[0]
+        pred_price_gru = scaler_target.inverse_transform(pred_price_gru_scaled.reshape(-1, 1)).flatten()[0]
+
+        # ✅ ใช้ Weighted Stacking ระหว่าง LSTM และ GRU
+        predicted_price = (w_lstm * pred_price_lstm) + (w_gru * pred_price_gru)
+
+        # ✅ ทำนายทิศทาง
+        predicted_direction = 1 if predicted_price > df_ticker.iloc[-1]['Close'] else 0
+
+        all_predictions.append({
+            'StockSymbol': ticker,
+            'Date': last_date,  
+            'PredictionClose': predicted_price,
+            'PredictionTrend': predicted_direction
+        })
+
+    predictions_df = pd.DataFrame(all_predictions)
+    return predictions_df
+
+# ------------------------- 6) บันทึกผลลัพธ์ลง Database -------------------------
+from sqlalchemy import create_engine, text
+
+def save_predictions_to_db(predictions_df):
+    """
+    บันทึกผลลัพธ์การพยากรณ์ลงในตาราง `StockDetail`
+    """
+    engine = create_engine(DB_CONNECTION)
+
+    with engine.connect() as connection:
+        for index, row in predictions_df.iterrows():
+            sql_query = text("""
+                UPDATE StockDetail
+                SET PredictionClose = :predicted_price, 
+                    PredictionTrend = :predicted_trend
+                WHERE StockSymbol = :ticker 
+                    AND Date = :date
+            """)
+
+            connection.execute(sql_query, {
+                "predicted_price": row["PredictionClose"],
+                "predicted_trend": row["PredictionTrend"],
+                "ticker": row["StockSymbol"],
+                "date": row["Date"]
+            })
+
+        connection.commit()  # ✅ ต้อง Commit การเปลี่ยนแปลง
+    print("\n✅ บันทึกผลลัพธ์ลงในฐานข้อมูลสำเร็จ!")
 
 
-        # ✅ ทำนายราคาปิดด้วย Base Models
-        pred_price_xgb = xgb_model.predict(X_features.reshape(1, -1))[0]
-        pred_price_rf = rf_model.predict(X_features.reshape(1, -1))[0]
-
-        # ✅ ทำนายทิศทางด้วย Base Models
-        pred_dir_xgb = xgb_dir_model.predict(X_features.reshape(1, -1))[0]
-        pred_dir_rf = rf_dir_model.predict(X_features.reshape(1, -1))[0]
-
-        # ✅ ย้อนกลับราคาจาก Scaler
-        pred_price_xgb_actual = scaler_target.inverse_transform([[pred_price_xgb]])[0][0]
-        pred_price_rf_actual = scaler_target.inverse_transform([[pred_price_rf]])[0][0]
-
-        # ✅ ใช้ Weighted Stacking
-        w_xgb, w_rf = 0.5, 0.5
-        predicted_price = (w_xgb * pred_price_xgb_actual) + (w_rf * pred_price_rf_actual)
-        predicted_dir = 1 if ((0.5 * pred_dir_xgb) + (0.5 * pred_dir_rf)) >= 0.5 else 0
-
-        future_date = pd.to_datetime(df_ticker.iloc[-1]["Date"]) + pd.DateOffset(1)
-
-        print(f"✅ ทำนายวันที่ {future_date}: Predicted Price: {predicted_price:.2f}, Direction: {'Up' if predicted_dir == 1 else 'Down'}")
-
-        all_predictions.append({'Ticker': ticker, 'Date': future_date, 'Predicted_Price': predicted_price, 'Predicted_Dir': predicted_dir})
-
-    print("\n✅ การทำนายเสร็จสมบูรณ์!")
-    return pd.DataFrame(all_predictions)
-
-
-predictions_df = walk_forward_validation_multi_task(engine, scaler_features, scaler_target, ticker_encoder, seq_length=10)
-predictions_df.to_csv("weighted_stacking_predictions.csv", index=False)
-print("\n✅ บันทึกผลลัพธ์ลงไฟล์ 'weighted_stacking_predictions.csv' สำเร็จ!")
+# ------------------------- 7) RUN -------------------------
+predictions_df = predict_next_day(
+    model_lstm, model_gru, test_df, feature_columns, scaler_features, scaler_target, ticker_encoder, SEQ_LENGTH
+)
+save_predictions_to_db(predictions_df)
