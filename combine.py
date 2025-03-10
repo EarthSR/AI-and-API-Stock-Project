@@ -10,8 +10,8 @@ sentiment_df_th = pd.read_csv("./Finbert/daily_sentiment_result_th.csv")
 sentiment_df_us = pd.read_csv("./Finbert/daily_sentiment_result_us.csv")
 
 # โหลดข้อมูลหุ้น
-stock_df_th = pd.read_csv("./Finbert/stock_data_with_marketcap_thai.csv")
-stock_df_us = pd.read_csv("./Finbert/stock_data_with_marketcap_usa.csv")
+stock_df_th = pd.read_csv("./Finbert/stock_data_thai.csv")
+stock_df_us = pd.read_csv("./Finbert/stock_data_usa.csv")
 
 # โหลดข้อมูลการเงิน
 financial_thai_df = pd.read_csv("./Finbert/Financial_Thai_Quarter.csv")
@@ -32,16 +32,18 @@ financial_us_df.rename(columns={"EV / EBITDA": "EVEBITDA"}, inplace=True)
 print("📌 คอลัมน์ใน Financial_Thai_Quarter.csv (หลัง Rename):", financial_thai_df.columns.tolist())
 print("📌 คอลัมน์ใน Financial_America_Quarter.csv (หลัง Rename):", financial_us_df.columns.tolist())
 
+# เพิ่ม MarketCap ใน columns_to_keep
 columns_to_keep = [
-    'Stock', 'Quarter', 'QoQ Growth (%)',
-    'Total Revenue', 'YoY Growth (%)', 'Net Profit', 'Earnings Per Share (EPS)', 
-    'ROA (%)', 'ROE (%)', 'Gross Margin (%)', 'Net Profit Margin (%)',
-    'Debt to Equity (x)', 'P/E Ratio (x)', 'P/BV Ratio (x)', 'Dividend Yield (%)',
-    'EVEBITDA'  # ✅ ใช้ EVEBITDA แทน EV / EBITDA
+    'Stock', 'Quarter', 'QoQ Growth (%)', 'Total Revenue', 'YoY Growth (%)', 
+    'Net Profit', 'Earnings Per Share (EPS)', 'ROA (%)', 'ROE (%)', 'Gross Margin (%)', 
+    'Net Profit Margin (%)', 'Debt to Equity (x)', 'P/E Ratio (x)', 'P/BV Ratio (x)', 
+    'Dividend Yield (%)', 'EVEBITDA', 'MarketCap'  # เพิ่ม 'MarketCap'
 ]
 
+# หลังจากที่โหลดข้อมูลการเงินแล้ว ให้เก็บเฉพาะคอลัมน์ที่ต้องการ
 financial_thai_df = financial_thai_df[columns_to_keep]
 financial_us_df = financial_us_df[columns_to_keep]
+
 
 # ฟังก์ชันแปลง 4Q2024 → 2024Q4
 def fix_quarter_format(quarter_str):
@@ -60,7 +62,7 @@ def quarter_to_announcement_date(quarter_str):
         return pd.Timestamp(f"{year}-{quarter_dates[q]}")
     except:
         return pd.NaT  # หากเกิดข้อผิดพลาดในการแปลง ให้คืนค่าเป็น NaT
-
+    
 # ลบคอลัมน์ที่มีค่า null หรือ NaN ทั้งหมด
 financial_thai_df.dropna(axis=1, how='all', inplace=True)
 financial_us_df.dropna(axis=1, how='all', inplace=True)
@@ -70,6 +72,7 @@ sentiment_df_th["date"] = pd.to_datetime(sentiment_df_th["date"])
 sentiment_df_us["date"] = pd.to_datetime(sentiment_df_us["date"])
 stock_df_th["Date"] = pd.to_datetime(stock_df_th["Date"])
 stock_df_us["Date"] = pd.to_datetime(stock_df_us["Date"])
+
 
 # เปลี่ยนชื่อคอลัมน์ Sentiment Category เป็น Sentiment
 sentiment_df_th.rename(columns={'Sentiment Category': 'Sentiment'}, inplace=True)
@@ -110,7 +113,7 @@ if 'Quarter' not in merged_df.columns:
     # หากไม่มี 'Quarter' ให้เพิ่มคอลัมน์ Quarter ด้วยการใช้ Date เพื่อดึงไตรมาส
     merged_df['Quarter'] = merged_df['Date'].dt.to_period('Q').astype(str)
 
-# ใช้ Ticker และ Quarter เป็นตัวเชื่อมในการรวมข้อมูลการเงิน
+# รวมข้อมูลจาก financial_thai_df และ financial_us_df พร้อมทั้ง 'MarketCap'
 merged_df = merged_df.merge(
     financial_thai_df,
     left_on=['Ticker', 'Quarter'],
@@ -124,6 +127,10 @@ merged_df = merged_df.merge(
     right_on=['Stock', 'Quarter'],
     how='left'
 )
+
+# ตรวจสอบว่า MarketCap ถูกนำมารวมด้วยหรือไม่
+if 'MarketCap' not in merged_df.columns:
+    print("❌ ไม่พบคอลัมน์ MarketCap ใน merged_df")
 
 # เติมค่า 'Neutral' ในช่องที่เป็น NaN ในคอลัมน์ 'Sentiment'
 merged_df = merged_df.assign(Sentiment=merged_df['Sentiment'].fillna('Neutral'))
@@ -173,10 +180,14 @@ financial_columns = ['QoQ Growth (%)', 'Total Revenue', 'YoY Growth (%)', 'Net P
 # ลบแถวที่ Close == 0 และไม่มีข้อมูลงบการเงินเลย (ทุกค่าใน financial_columns เป็น NaN)
 merged_df = merged_df[~((merged_df['Close'] == 0) & (merged_df[financial_columns].isna().all(axis=1)))]
 
-# ลบคอลัมน์ที่ระบุ
-columns_to_remove = ["Debt to Equity (x)", "P/E Ratio (x)", "P/BV Ratio (x)","Market Cap","Quarter"]
+# ไม่ลบ 'MarketCap' จาก merged_df
+columns_to_remove = ["Debt to Equity (x)", "P/E Ratio (x)", "P/BV Ratio (x)", "Quarter"]
 merged_df = merged_df.drop(columns=columns_to_remove, errors='ignore')
 
+# เติม 'MarketCap' เฉพาะกรณีที่ Date ตรงกับ Quarter Date
+merged_df['MarketCap'] = merged_df.apply(
+    lambda row: row['MarketCap'] if row['Date'] == row['Quarter Date'] else None, axis=1
+)
 
 # บันทึกข้อมูลที่รวมแล้วลงไฟล์ CSV
 merged_df.to_csv("merged_stock_sentiment_financial.csv", index=False)

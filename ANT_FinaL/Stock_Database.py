@@ -17,10 +17,35 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # ✅ กำหนดพาธของไฟล์ CSV
 MERGED_CSV_PATH = os.path.join(BASE_DIR, "merged_stock_sentiment_financial.csv")
-MARKETCAP_THAI_CSV = os.path.join(BASE_DIR, "Finbert", "stock_data_with_marketcap_thai.csv")
-MARKETCAP_USA_CSV = os.path.join(BASE_DIR, "Finbert", "stock_data_with_marketcap_usa.csv")
 STOCK_CSV_PATH = os.path.join(BASE_DIR, "Stock.csv")
 STOCK_DETAIL_CSV_PATH = os.path.join(BASE_DIR, "StockDetail.csv")
+
+# ✅ โหลดข้อมูลจาก merged_stock_sentiment_financial.csv
+print("📥 กำลังโหลดไฟล์ merged_stock_sentiment_financial.csv ...")
+df = pd.read_csv(MERGED_CSV_PATH)
+
+# ✅ แปลงชื่อ Column ให้ตรงกับ Database
+df = df.rename(columns={
+    "Ticker": "StockSymbol",
+    "Open": "OpenPrice",
+    "High": "HighPrice",
+    "Low": "LowPrice",
+    "Close": "ClosePrice",
+    "P/E Ratio ": "PERatio",
+    "ROE (%)": "ROE",
+    "QoQ Growth (%)": "QoQGrowth",
+    "YoY Growth (%)": "YoYGrowth",
+    "Total Revenue": "TotalRevenue",
+    "Net Profit": "NetProfit",
+    "Earnings Per Share (EPS)": "EPS",
+    "Gross Margin (%)": "GrossMargin",
+    "Net Profit Margin (%)": "NetProfitMargin",
+    "EVEBITDA": "EVEBITDA",
+    "Debt to Equity ": "DebtToEquity",
+    "MarketCap": "MarketCap",
+    "P/BV Ratio ": "P_BV_Ratio", 
+    "Dividend Yield (%)": "Dividend_Yield"
+})
 
 # ✅ **Dictionary ของ CompanyName, Market, Sector, Industry และ Description**
 company_dict = {
@@ -46,49 +71,9 @@ company_dict = {
     "AAPL": ("Apple Inc.", "America", "Technology", "Consumer Electronics", "Apple Inc. designs, manufactures, and markets smartphones, personal computers, tablets, wearables, and accessories worldwide. The company offers iPhone, a line of smartphones; Mac, a line of personal computers; iPad, a line of multi-purpose tablets; and wearables, home, and accessories comprising AirPods, Apple TV, Apple Watch, Beats products, and HomePod. It also provides AppleCare support and cloud services; and operates various platforms, including the App Store that allow customers to discover and download applications and digital content, such as books, music, video, games, and podcasts, as well as advertising services include third-party licensing arrangements and its own advertising platforms. In addition, the company offers various subscription-based services, such as Apple Arcade, a game subscription service; Apple Fitness+, a personalized fitness service; Apple Music, which offers users a curated listening experience with on-demand radio stations; Apple News+, a subscription news and magazine service; Apple TV+, which offers exclusive original content; Apple Card, a co-branded credit card; and Apple Pay, a cashless payment service, as well as licenses its intellectual property. The company serves consumers, and small and mid-sized businesses; and the education, enterprise, and government markets. It distributes third-party applications for its products through the App Store. The company also sells its products through its retail and online stores, and direct sales force; and third-party cellular network carriers, wholesalers, retailers, and resellers. Apple Inc. was founded in 1976 and is headquartered in Cupertino, California."),
 }
 
-# ✅ โหลดข้อมูลจาก MarketCap CSV
-def load_marketcap_data(filepath):
-    df = pd.read_csv(filepath)
-    df = df.rename(columns={"Ticker": "StockSymbol", "Market Cap": "MarketCap"})
-    # ✅ คำนวณ Change (%) จาก Open และ Close
-    df["Change"] = df["Close"] - df["Open"]
-    df["Change (%)"] = (df["Change"] / df["Open"]) * 100
-
-    # ✅ เลือกเฉพาะคอลัมน์ที่จำเป็น
-    df = df[["StockSymbol", "Date", "MarketCap", "Change (%)"]]
-
-    return df
-
-marketcap_thai_df = load_marketcap_data(MARKETCAP_THAI_CSV)
-marketcap_usa_df = load_marketcap_data(MARKETCAP_USA_CSV)
-
-# ✅ รวม MarketCap จากไทยและอเมริกา
-marketcap_df = pd.concat([marketcap_thai_df, marketcap_usa_df])
-
-# ✅ โหลดข้อมูลจาก merged_stock_sentiment_financial.csv
-print("📥 กำลังโหลดไฟล์ merged_stock_sentiment_financial.csv ...")
-df = pd.read_csv(MERGED_CSV_PATH)
-
-# ✅ แปลงชื่อ Column ให้ตรงกับ Database
-df = df.rename(columns={
-    "Ticker": "StockSymbol",
-    "Open": "OpenPrice",
-    "High": "HighPrice",
-    "Low": "LowPrice",
-    "Close": "ClosePrice",
-    "P/E Ratio ": "PERatio",
-    "ROE (%)": "ROE",
-    "Dividend Yield (%)": "DividendYield",
-    "QoQ Growth (%)": "QoQGrowth",
-    "YoY Growth (%)": "YoYGrowth",
-    "Total Revenue": "TotalRevenue",
-    "Net Profit": "NetProfit",
-    "Earnings Per Share (EPS)": "EPS",
-    "Gross Margin (%)": "GrossMargin",
-    "Net Profit Margin (%)": "NetProfitMargin",
-    "EVEBITDA": "EVEBITDA",
-    "Debt to Equity ": "DebtToEquity"
-})
+# ✅ คำนวณ Change (%) จาก OpenPrice และ ClosePrice
+df["Change"] = df["ClosePrice"] - df["OpenPrice"]
+df["Change (%)"] = (df["Change"] / df["OpenPrice"]) * 100
 
 # ✅ เติมข้อมูล CompanyName, Market, Sector, Industry, Description
 df["CompanyName"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[0])
@@ -97,28 +82,45 @@ df["Sector"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "
 df["Industry"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[3])
 df["Description"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[4])
 
-
-# ✅ ผสม MarketCap ให้ตรงกับ StockSymbol และ Date
-df = df.merge(marketcap_df[["StockSymbol", "Date", "MarketCap", "Change (%)"]], 
-              on=["StockSymbol", "Date"], how="left")
-
+# ✅ เติมข้อมูล CompanyName, Market, Sector, Industry, Description
+df["CompanyName"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[0])
+df["Market"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[1])
+df["Sector"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[2])
+df["Industry"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[3])
+df["Description"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[4])
 
 # ✅ จัดการค่า NaN เพื่อให้สอดคล้องกับ Database
 df = df.where(pd.notna(df), None)  # แปลง NaN เป็น None เพื่อใช้กับ MySQL
 
-# ✅ แยกข้อมูลสำหรับ Stock และเพิ่ม Sector, Industry, Description
-stock__data = df[["StockSymbol", "Market", "MarketCap", "CompanyName", "Sector", "Industry", "Description"]].drop_duplicates(subset=["StockSymbol"], keep="last")
+# ✅ แปลงชื่อ Column ให้ตรงกับ Database สำหรับ Stock
+stock__data = df[["StockSymbol", "Market", "CompanyName", "Sector", "Industry", "Description"]].drop_duplicates(subset=["StockSymbol"], keep="last")
+
 stock_detail_data = df[[  
-    "Date", "StockSymbol", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice", "PERatio", "ROE", "DividendYield",
+    "Date", "StockSymbol", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice", "PERatio", "ROE",
     "QoQGrowth", "YoYGrowth", "TotalRevenue", "NetProfit", "EPS", "GrossMargin", "NetProfitMargin", "DebtToEquity",
-    "Change (%)", "Volume","EVEBITDA"
+    "Change (%)", "Volume", "EVEBITDA", "MarketCap", "P_BV_Ratio", "Dividend_Yield",
 ]]
 
+# ตรวจสอบข้อมูลก่อนบันทึก
 print(stock__data.head(10))  # แสดง 10 แถวแรกของ Stock ก่อนบันทึกลงฐานข้อมูล
 
+# ✅ คัดลอกข้อมูลและเพิ่ม PredictionTrend, PredictionClose
 stock_detail_data = stock_detail_data.copy()  # ✅ สร้าง Copy ป้องกัน Warning
 stock_detail_data.loc[:, "PredictionTrend"] = None
 stock_detail_data.loc[:, "PredictionClose"] = None
+
+# ตรวจสอบค่าที่ไม่ใช่ตัวเลขในคอลัมน์ YoYGrowth
+stock_detail_data["YoYGrowth"] = pd.to_numeric(stock_detail_data["YoYGrowth"], errors='coerce')
+
+# กำหนดค่าที่เป็น NaN ให้เป็น 0
+stock_detail_data["YoYGrowth"] = stock_detail_data["YoYGrowth"].fillna(0)
+
+# จำกัดค่า YoYGrowth ให้อยู่ระหว่าง -100 และ 100
+stock_detail_data["YoYGrowth"] = np.clip(stock_detail_data["YoYGrowth"], -100, 100)
+
+
+# ตรวจสอบค่าของ YoYGrowth ก่อนบันทึก 
+print(stock_detail_data["YoYGrowth"].describe())
 
 # ✅ บันทึกไฟล์ CSV แยกกัน
 print(f"💾 กำลังบันทึกไฟล์ {STOCK_CSV_PATH} ...")
@@ -128,7 +130,6 @@ print(f"✅ บันทึกไฟล์ {STOCK_CSV_PATH} สำเร็จ!"
 print(f"💾 กำลังบันทึกไฟล์ {STOCK_DETAIL_CSV_PATH} ...")
 stock_detail_data.to_csv(STOCK_DETAIL_CSV_PATH, index=False, na_rep="NULL")
 print(f"✅ บันทึกไฟล์ {STOCK_DETAIL_CSV_PATH} สำเร็จ!")
-
 # ✅ เชื่อมต่อฐานข้อมูล
 try:
     print("🔗 กำลังเชื่อมต่อกับฐานข้อมูล ...")
@@ -148,17 +149,15 @@ try:
 
     # ✅ **บันทึกข้อมูลลง Stock**
     insert_stock_query = """
-    INSERT INTO Stock (StockSymbol, Market, MarketCap, CompanyName, Sector, Industry, Description)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    INSERT INTO Stock (StockSymbol, Market, CompanyName, Sector, Industry, Description)
+    VALUES (%s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE 
         Market=COALESCE(VALUES(Market), Market),
-        MarketCap=COALESCE(VALUES(MarketCap), MarketCap),
         CompanyName=COALESCE(VALUES(CompanyName), CompanyName),
         Sector=COALESCE(VALUES(Sector), Sector),
         Industry=COALESCE(VALUES(Industry), Industry),
         Description=COALESCE(VALUES(Description), Description);
     """
-
     # ✅ ตรวจสอบค่าก่อน insert
     print("🔍 ตัวอย่างข้อมูลที่กำลังจะบันทึกลง Stock:")
     print(stock__data.head(5).to_string())  # แสดง 5 แถวแรกก่อนบันทึก
@@ -169,26 +168,30 @@ try:
 
     # ✅ แปลงค่า Volume เป็น int ก่อนบันทึกลงฐานข้อมูล
     stock_detail_data["Volume"] = stock_detail_data["Volume"].replace([np.inf, -np.inf], np.nan).fillna(0).astype(int)
+    # ตรวจสอบว่าใน stock_detail_data มีข้อมูลครบถ้วนหรือไม่
+    print(stock_detail_data.columns)  # ตรวจสอบคอลัมน์ที่มีใน DataFrame
 
-    # ✅ **บันทึกข้อมูลลง StockDetail**
+    # ตัวอย่างการแก้ไขคำสั่ง INSERT สำหรับ StockDetail
     insert_stock_detail_query = """
     INSERT INTO StockDetail (
-        Date, StockSymbol, OpenPrice, HighPrice, LowPrice, ClosePrice, PERatio, ROE, DividendYield,
+        Date, StockSymbol, OpenPrice, HighPrice, LowPrice, ClosePrice, PERatio, ROE, Dividend_Yield,
         QoQGrowth, YoYGrowth, TotalRevenue, NetProfit, EPS, GrossMargin, NetProfitMargin, DebtToEquity,
-        `Change (%)`, Volume, EVEBITDA, PredictionTrend, PredictionClose
+        `Change (%)`, Volume, EVEBITDA, MarketCap, P_BV_Ratio, PredictionTrend, PredictionClose
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)  
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)  
     ON DUPLICATE KEY UPDATE  
         OpenPrice=VALUES(OpenPrice), HighPrice=VALUES(HighPrice), LowPrice=VALUES(LowPrice),  
-        ClosePrice=VALUES(ClosePrice), PERatio=VALUES(PERatio), ROE=VALUES(ROE), DividendYield=VALUES(DividendYield),
+        ClosePrice=VALUES(ClosePrice), PERatio=VALUES(PERatio), ROE=VALUES(ROE), Dividend_Yield=VALUES(Dividend_Yield),
         QoQGrowth=VALUES(QoQGrowth), YoYGrowth=VALUES(YoYGrowth), TotalRevenue=VALUES(TotalRevenue),  
         NetProfit=VALUES(NetProfit), EPS=VALUES(EPS), GrossMargin=VALUES(GrossMargin),  
         NetProfitMargin=VALUES(NetProfitMargin), DebtToEquity=VALUES(DebtToEquity),  
         `Change (%)`=VALUES(`Change (%)`), Volume=VALUES(Volume),
-        EVEBITDA=VALUES(EVEBITDA), PredictionTrend=VALUES(PredictionTrend), PredictionClose=VALUES(PredictionClose);
+        EVEBITDA=VALUES(EVEBITDA), MarketCap=VALUES(MarketCap), P_BV_Ratio=VALUES(P_BV_Ratio), 
+        PredictionTrend=VALUES(PredictionTrend), PredictionClose=VALUES(PredictionClose);
     """
-    
+
     stock_detail_values = convert_nan_to_none(stock_detail_data.values.tolist())
+
     # ✅ ตรวจสอบและแปลงค่า EVEBITDA (NaN → None)
     stock_detail_data["EVEBITDA"] = stock_detail_data["EVEBITDA"].replace([np.inf, -np.inf], np.nan)
 

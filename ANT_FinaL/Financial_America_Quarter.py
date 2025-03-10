@@ -68,7 +68,7 @@ column_translation = {
     "หนี้สิน/ทุน (เท่า)": "Debt to Equity (x)",
     "วงจรเงินสด (วัน)": "Cash Cycle (Days)",
     "ราคาล่าสุด (ดอลลาร์สหรัฐฯ)": "Last Price (USD)",
-    "มูลค่าหลักทรัพย์ตามราคาตลาด (ล้านดอลลาร์สหรัฐฯ)": "Market Cap (Million USD)",
+    "มูลค่าหลักทรัพย์ตามราคาตลาด (ล้านดอลลาร์สหรัฐฯ)": "MarketCap",
     "P/E (เท่า)": "P/E Ratio (x)",
     "P/BV (เท่า)": "P/BV Ratio (x)",
     "มูลค่าหุ้นทางบัญชีต่อหุ้น (ดอลลาร์สหรัฐฯ)": "Book Value Per Share (USD)",

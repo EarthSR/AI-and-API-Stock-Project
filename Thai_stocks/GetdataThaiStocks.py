@@ -35,30 +35,12 @@ for ticker in tickers:
     ticker_data = data[ticker].copy()
     ticker_data['Ticker'] = ticker.replace('.BK', '')  # ลบ .BK ออก
 
-    # ดึงข้อมูล Market Cap
-    stock = yf.Ticker(ticker)
-    max_retries = 3
-    retry_count = 0
-
-    while retry_count < max_retries:
-        try:
-            stock_info = stock.info  # ✅ ดึง `info` ไว้ในตัวแปรเพื่อลด API call
-            market_cap = stock_info.get('marketCap', 'N/A')  # ✅ ใช้ค่าเริ่มต้นเป็น 'N/A'
-            break  # ✅ ถ้าดึงได้สำเร็จ ให้ออกจาก loop ทันที
-        except Exception as e:
-            retry_count += 1
-            print(f"⚠️ ไม่สามารถดึง Market Cap ของ {ticker}: {e} (ลองใหม่ {retry_count}/{max_retries})")
-            if retry_count == max_retries:
-                market_cap = 'N/A'  # ✅ ถ้าลองครบแล้วยังไม่ได้ ใช้ค่า 'N/A'
-    
-    ticker_data['Market Cap'] = market_cap  # กำหนด Market Cap
-
     # รีอินเด็กซ์ให้มีทุกวัน (รวมเสาร์-อาทิตย์)
     ticker_data.index = pd.to_datetime(ticker_data.index)  # แปลงเป็น datetime index
     all_dates = pd.date_range(start=start_date, end=end_date, freq='D')  # ใช้ end_date ที่อัปเดตอัตโนมัติ
     ticker_data = ticker_data.reindex(all_dates)
 
-        # 🔹 ใช้ค่า **วันก่อนหน้า** แทน NaN ก่อนเติม 0
+    # 🔹 ใช้ค่า **วันก่อนหน้า** แทน NaN ก่อนเติม 0
     if ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']].isnull().sum().sum() > 0:
         print(f"⚠️ พบค่า NaN ในข้อมูลของ {ticker}, ใช้ค่าเฉลี่ยย้อนหลังเติมแทน")
 
@@ -71,18 +53,17 @@ for ticker in tickers:
 
     # เติมค่าที่ขาด
     ticker_data['Ticker'] = ticker.replace('.BK', '')  # คงค่า Ticker ในวันที่เพิ่ม
-    ticker_data['Market Cap'] = market_cap  # คงค่า Market Cap
-
+    
     data_list.append(ticker_data)
 
 # รวมข้อมูลทั้งหมดเป็น DataFrame เดียว
 cleaned_data = pd.concat(data_list).reset_index().rename(columns={'index': 'Date'})
 
 # ตั้งลำดับคอลัมน์ให้ถูกต้อง
-cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume', 'Market Cap']]
+cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume']]
 
 # บันทึกข้อมูลเป็นไฟล์ CSV
-cleaned_data.to_csv(os.path.join(BASE_DIR, "Finbert", "stock_data_with_marketcap_thai.csv"), index=False)
+cleaned_data.to_csv(os.path.join(BASE_DIR, "Finbert", "stock_data_thai.csv"), index=False)
 
 # แสดงตัวอย่างข้อมูล
 print(cleaned_data.head())
