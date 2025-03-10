@@ -530,7 +530,7 @@ direction_output = Dense(1, activation="sigmoid", name="direction_output")(x)
 model = Model(inputs=[features_input, ticker_input], outputs=[price_output, direction_output])
 
 # ---------------------- Optimizer & Loss ----------------------
-optimizer = AdamW(learning_rate=1e-3, weight_decay=1e-5)
+optimizer = AdamW(learning_rate=3e-4, weight_decay=1e-6)
 
 model.compile(
     optimizer=optimizer,
@@ -551,7 +551,7 @@ history = model.fit(
     [X_price_train, X_ticker_train],
     {"price_output": y_price_train, "direction_output": y_dir_train},
     epochs=200,
-    batch_size=32,
+    batch_size=16,
     verbose=1,
     shuffle=False,
     validation_split=0.1,
