@@ -905,15 +905,16 @@ app.get("/api/search", (req, res) => {
     return res.status(400).json({ error: "Search query is required" });
   }
 
-  // Trim the query และแปลงให้เป็นตัวพิมพ์เล็ก
+  // Trim ค่าที่ค้นหาและแปลงเป็นตัวพิมพ์เล็ก
   const searchValue = `%${query.trim().toLowerCase()}%`;
 
-  // SQL query เพื่อค้นหาข้อมูลจาก Stock และ StockDetail
+  // SQL query ค้นหาหุ้นและรายละเอียดหุ้นล่าสุด
   const searchSql = `
     SELECT 
         s.StockSymbol, 
         s.Market, 
         s.CompanyName, 
+        sd.StockDetailID,  -- ✅ เพิ่ม StockDetailID
         sd.Date, 
         sd.ClosePrice
     FROM Stock s
@@ -940,6 +941,7 @@ app.get("/api/search", (req, res) => {
       if (existingStock) {
         // ถ้ามีอยู่แล้ว เพิ่มข้อมูล ClosePrice เข้าไปในรายการราคา
         existingStock.prices.push({
+          StockDetailID: stock.StockDetailID, // ✅ เพิ่ม StockDetailID
           date: stock.Date,
           close_price: stock.ClosePrice,
         });
@@ -952,6 +954,7 @@ app.get("/api/search", (req, res) => {
           prices: stock.Date
             ? [
                 {
+                  StockDetailID: stock.StockDetailID, // ✅ เพิ่ม StockDetailID
                   date: stock.Date,
                   close_price: stock.ClosePrice,
                 },
@@ -966,6 +969,7 @@ app.get("/api/search", (req, res) => {
     res.json({ results: groupedResults });
   });
 });
+
 
 
 // ---- Profile ---- //
