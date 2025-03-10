@@ -50,7 +50,7 @@ def walk_forward_validation_multi_task(
 
         # ✅ ดึงข้อมูลย้อนหลัง 10 วันล่าสุดจาก StockDetail
         query_stock = f"""
-            SELECT Date, OpenPrice, HighPrice, LowPrice, ClosePrice, Volume, TotalRevenue, QoQGrowth, EPS,ROE, NetProfitMarginNetProfitMargin,DebtToEquity,PERatio,
+            SELECT Date, OpenPrice, HighPrice, LowPrice, ClosePrice, Volume, TotalRevenue, QoQGrowth, EPS,ROE, NetProfitMarginNetProfitMargin,DebtToEquity,PERatio,DividendYield
             FROM StockDetail 
             WHERE StockSymbol = '{ticker}' 
             ORDER BY Date DESC 
