@@ -345,7 +345,7 @@ feature_columns = [
     'P/BV Ratio ', 'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
     'Bollinger_High', 'Bollinger_Low','SMA_50', 'SMA_200'
 ]
-
+joblib.dump(feature_columns, 'feature_columns.pkl')
 # สร้าง Direction = 1 ถ้าพรุ่งนี้ราคาสูงขึ้น, 0 ถ้าลงหรือนิ่ง
 df['Direction'] = (df['Close'].shift(-1) > df['Close']).astype(int)
 
@@ -359,6 +359,7 @@ df.dropna(subset=['Direction', 'TargetPrice'], inplace=True)
 ticker_encoder = LabelEncoder()
 df['Ticker_ID'] = ticker_encoder.fit_transform(df['Ticker'])
 num_tickers = len(ticker_encoder.classes_)
+joblib.dump(ticker_encoder, 'ticker_encoder.pkl')
 
 # แยก Train / Test
 sorted_dates = df['Date'].unique()
