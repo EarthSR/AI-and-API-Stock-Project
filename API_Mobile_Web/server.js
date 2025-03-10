@@ -2051,6 +2051,14 @@ app.get("/api/most-held-th-stocks", async (req, res) => {
 
 //-----------------------------------------------------------------------------------------------------------------------------------------------//
 
+// API ให้ React ดึง Secure Embed URL ไปใช้
+app.get("/get-embed-url", (req, res) => {
+  res.json({
+    embedUrl:
+      "https://app.powerbi.com/view?r=eyJrIjoiOGU0ZjNhMjktYjJiZC00ODA1LWIzM2EtNzNkNDg0NzhhMzVkIiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
+  });
+});
+
 //Admin//
 app.post("/api/admin/login", async (req, res) => {
   try {
@@ -2060,10 +2068,7 @@ app.post("/api/admin/login", async (req, res) => {
       return res.status(400).json({ error: "กรุณากรอกอีเมลและรหัสผ่าน" });
     }
 
-    // ดึง IP ของผู้ใช้
-    const ipAddress = req.headers["x-forwarded-for"] || req.connection.remoteAddress;
-
-    // ตรวจสอบว่าผู้ใช้เป็น Admin และ Active
+    // ค้นหาผู้ใช้ที่เป็น Admin และมีสถานะ Active
     const sql = "SELECT * FROM User WHERE Email = ? AND Status = 'active' AND Role = 'admin'";
     pool.query(sql, [email], (err, results) => {
       if (err) {
@@ -2072,21 +2077,12 @@ app.post("/api/admin/login", async (req, res) => {
       }
 
       if (results.length === 0) {
-        return res.status(404).json({ message: "ไม่พบบัญชีแอดมินนี้ หรืออาจถูกระงับ" });
+        return res.status(404).json({ message: "ไม่พบบัญชีแอดมิน หรืออาจถูกระงับ" });
       }
 
       const user = results[0];
 
-      // ตรวจสอบจำนวนครั้งที่ล็อกอินผิดพลาด
-      if (user.FailedAttempts >= 5) {
-        const now = Date.now();
-        const timeSinceLastAttempt = now - new Date(user.LastFailedAttempt).getTime();
-        if (timeSinceLastAttempt < 300000) { // 5 นาที
-          return res.status(429).json({ message: "คุณล็อกอินผิดพลาดหลายครั้ง โปรดลองอีกครั้งใน 5 นาที" });
-        }
-      }
-
-      // เปรียบเทียบรหัสผ่านกับค่า Hash ในฐานข้อมูล
+      // ตรวจสอบรหัสผ่าน
       bcrypt.compare(password, user.Password, (err, isMatch) => {
         if (err) {
           console.error("Password comparison error:", err);
@@ -2094,43 +2090,23 @@ app.post("/api/admin/login", async (req, res) => {
         }
 
         if (!isMatch) {
-          // เพิ่มจำนวนครั้งที่ล็อกอินผิดพลาด
-          const updateFailSql = "UPDATE User SET FailedAttempts = FailedAttempts + 1, LastFailedAttempt = NOW() WHERE UserID = ?";
-          pool.query(updateFailSql, [user.UserID], (err) => {
-            if (err) console.error("Error logging failed login attempt:", err);
-          });
-
-          const remainingAttempts = 5 - (user.FailedAttempts + 1);
-          return res.status(401).json({
-            message: `อีเมลหรือรหัสผ่านไม่ถูกต้อง คุณมีโอกาสอีก ${remainingAttempts} ครั้งก่อนถูกระงับชั่วคราว`
-          });
+          return res.status(401).json({ message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
         }
 
-        // รีเซ็ต FailedAttempts ถ้าล็อกอินสำเร็จ
-        const resetFailSql = "UPDATE User SET FailedAttempts = 0, LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?";
-        pool.query(resetFailSql, [ipAddress, user.UserID], (err) => {
-          if (err) {
-            console.error("Error resetting failed attempts or updating login time:", err);
-            return res.status(500).json({ error: "เกิดข้อผิดพลาดระหว่างอัปเดตข้อมูลล็อกอิน" });
-          }
+        // ✅ สร้าง JWT Token (ไม่มี LastLogin / LastLoginIP)
+        const token = jwt.sign({ id: user.UserID, role: user.Role }, JWT_SECRET, { expiresIn: "7d" });
 
-          // สร้าง JWT Token สำหรับแอดมิน
-          const token = jwt.sign({ id: user.UserID, role: user.Role }, JWT_SECRET, { expiresIn: "7d" });
-
-          // ส่ง Response กลับไปยังผู้ใช้
-          res.status(200).json({
-            message: "เข้าสู่ระบบแอดมินสำเร็จ",
-            token,
-            user: {
-              id: user.UserID,
-              email: user.Email,
-              username: user.Username,
-              profile_image: user.ProfileImageURL,
-              role: user.Role,
-              last_login: user.LastLogin,
-              last_login_ip: ipAddress
-            },
-          });
+        // ✅ ส่งข้อมูล Response
+        res.status(200).json({
+          message: "เข้าสู่ระบบแอดมินสำเร็จ",
+          token,
+          user: {
+            id: user.UserID,
+            email: user.Email,
+            username: user.Username,
+            profile_image: user.ProfileImageURL,
+            role: user.Role
+          },
         });
       });
     });
@@ -2139,6 +2115,7 @@ app.post("/api/admin/login", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 
 
