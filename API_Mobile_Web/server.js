@@ -1527,6 +1527,7 @@ app.get("/api/news-detail", async (req, res) => {
   }
 });
 
+<<<<<<< HEAD
 // ฟังก์ชันดึงค่าเงิน USD → THB จาก API ภายนอก
 async function getExchangeRate() {
   try {
@@ -1540,6 +1541,12 @@ async function getExchangeRate() {
 }
 
 // API ดึงรายละเอียดหุ้น
+=======
+
+
+
+
+>>>>>>> d5359fd (add)
 app.get("/api/stock-detail/:symbol", async (req, res) => {
   try {
     const { symbol } = req.params;
@@ -2249,6 +2256,7 @@ app.delete("/api/admin/users/:id", verifyToken, (req, res) => {
 
 
 
+<<<<<<< HEAD
 
 
 
@@ -2269,6 +2277,8 @@ app.delete("/api/admin/users/:id", verifyToken, (req, res) => {
 
 
 
+=======
+>>>>>>> d5359fd (add)
 // Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
