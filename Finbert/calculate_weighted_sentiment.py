@@ -5,7 +5,13 @@ import os
 # ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
-def calculate_weighted_sentiment(csv_file_path, output_folder="D:\\Stock_Project\\AI-and-API-Stock-Project\\Finbert"):
+# ✅ กำหนด BASE_DIR เป็น path หลักของไฟล์ปัจจุบัน
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ✅ ตั้งค่าโฟลเดอร์ปลายทางแบบ dynamic
+OUTPUT_FOLDER = os.path.join(BASE_DIR, "Finbert")
+
+def calculate_weighted_sentiment(csv_file_path, output_folder=OUTPUT_FOLDER):
     # ✅ โหลดข้อมูลจากไฟล์ CSV
     df = pd.read_csv(csv_file_path)
 

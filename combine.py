@@ -28,6 +28,11 @@ financial_us_df.columns = financial_us_df.columns.str.strip()
 financial_thai_df.rename(columns={"EV / EBITDA": "EVEBITDA"}, inplace=True)
 financial_us_df.rename(columns={"EV / EBITDA": "EVEBITDA"}, inplace=True)
 
+# เปลี่ยนชื่อคอลัมน์ Sentiment Category เป็น Sentiment
+sentiment_df_th.rename(columns={'Sentiment Category': 'Sentiment'}, inplace=True)
+sentiment_df_us.rename(columns={'Sentiment Category': 'Sentiment'}, inplace=True)
+
+
 # ✅ ตรวจสอบอีกครั้งว่าชื่อคอลัมน์ถูกต้อง
 print("📌 คอลัมน์ใน Financial_Thai_Quarter.csv (หลัง Rename):", financial_thai_df.columns.tolist())
 print("📌 คอลัมน์ใน Financial_America_Quarter.csv (หลัง Rename):", financial_us_df.columns.tolist())
@@ -73,10 +78,11 @@ sentiment_df_us["date"] = pd.to_datetime(sentiment_df_us["date"])
 stock_df_th["Date"] = pd.to_datetime(stock_df_th["Date"])
 stock_df_us["Date"] = pd.to_datetime(stock_df_us["Date"])
 
-
-# เปลี่ยนชื่อคอลัมน์ Sentiment Category เป็น Sentiment
-sentiment_df_th.rename(columns={'Sentiment Category': 'Sentiment'}, inplace=True)
-sentiment_df_us.rename(columns={'Sentiment Category': 'Sentiment'}, inplace=True)
+# ✅ ตรวจสอบว่ามี 'Sentiment Category' ในไฟล์ CSV หรือไม่
+if 'Sentiment Category' not in sentiment_df_th.columns:
+    sentiment_df_th['Sentiment Category'] = 'Neutral'  # ถ้าไม่มี ให้สร้างขึ้นมา
+if 'Sentiment Category' not in sentiment_df_us.columns:
+    sentiment_df_us['Sentiment Category'] = 'Neutral'
 
 # แปลงคอลัมน์ Quarter ให้เป็นรูปแบบ 2024Q4
 financial_thai_df['Quarter'] = financial_thai_df['Quarter'].apply(fix_quarter_format)
@@ -86,22 +92,22 @@ financial_us_df['Quarter'] = financial_us_df['Quarter'].apply(fix_quarter_format
 financial_thai_df['Quarter Date'] = financial_thai_df['Quarter'].apply(quarter_to_announcement_date)
 financial_us_df['Quarter Date'] = financial_us_df['Quarter'].apply(quarter_to_announcement_date)
 
-# รวมข้อมูลโดยใช้ Date เป็นตัวเชื่อม
+# ✅ รวมข้อมูลโดยใช้ Date เป็นตัวเชื่อม พร้อมเก็บ 'Sentiment Category'
 merged_df_th = stock_df_th.merge(
-    sentiment_df_th[['date', 'Sentiment']],
+    sentiment_df_th[['date', 'Sentiment', 'Sentiment Category']], 
     left_on='Date',
     right_on='date',
     how='left'
 )
 
 merged_df_us = stock_df_us.merge(
-    sentiment_df_us[['date', 'Sentiment']],
+    sentiment_df_us[['date', 'Sentiment', 'Sentiment Category']], 
     left_on='Date',
     right_on='date',
     how='left'
 )
 
-# ลบคอลัมน์ 'date' ที่ซ้ำกันออก
+# ✅ ลบคอลัมน์ 'date' ที่ซ้ำกันออก
 merged_df_th.drop(columns=['date'], inplace=True)
 merged_df_us.drop(columns=['date'], inplace=True)
 
@@ -132,8 +138,15 @@ merged_df = merged_df.merge(
 if 'MarketCap' not in merged_df.columns:
     print("❌ ไม่พบคอลัมน์ MarketCap ใน merged_df")
 
-# เติมค่า 'Neutral' ในช่องที่เป็น NaN ในคอลัมน์ 'Sentiment'
-merged_df = merged_df.assign(Sentiment=merged_df['Sentiment'].fillna('Neutral'))
+# ✅ ถ้า 'Sentiment' เป็น NaN ให้ใช้ 'Sentiment Category' แทน
+merged_df['Sentiment'] = merged_df['Sentiment'].fillna(merged_df['Sentiment Category'])
+
+# ✅ ถ้ายังมี NaN ให้เติมค่า "Neutral"
+merged_df['Sentiment'] = merged_df['Sentiment'].fillna("Neutral")
+
+# ✅ ลบคอลัมน์ 'Sentiment Category' ทิ้งหลังจากรวมค่าเสร็จ
+merged_df.drop(columns=['Sentiment Category'], inplace=True)
+
 
 # เช็คคอลัมน์ที่ลงท้ายด้วย '_x' ถ้ามี NaN ให้ไปเติมค่าในคอลัมน์ที่ลงท้ายด้วย '_y'
 for col in merged_df.columns:
