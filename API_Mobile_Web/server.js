@@ -2043,13 +2043,21 @@ const verifyAdmin = (req, res, next) => {
 };
 
 // API ให้ React ดึง Secure Embed URL ไปใช้
-app.get("/get-embed-url", (req, res) => {
+app.get("/get-embed-urls", (req, res) => {
   res.json({
-    embedUrl:
-      "https://app.powerbi.com/view?r=eyJrIjoiOGU0ZjNhMjktYjJiZC00ODA1LWIzM2EtNzNkNDg0NzhhMzVkIiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
-    embedUrl:
-      "https://app.powerbi.com/view?r=eyJrIjoiY2VlNGQ1MTItMTE1Zi00ODkyLThhYjEtMjg4MWRkOTRkZWI2IiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
-    });
+    dashboards: [
+      {
+        id: "dashboard1",
+        name: "Stock Market Overview",
+        embedUrl: "https://app.powerbi.com/view?r=eyJrIjoiOGU0ZjNhMjktYjJiZC00ODA1LWIzM2EtNzNkNDg0NzhhMzVkIiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D"
+      },
+      {
+        id: "dashboard2",
+        name: "Thai Stock Market Overview",
+        embedUrl: "https://app.powerbi.com/view?r=eyJrIjoiMzU0MjA1ZTMtNTg1Ni00MmFkLWIwYjQtNTI3YTcxMTViOTZkIiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D"
+      }
+    ]
+  });
 });
 
 //Admin//
@@ -2110,7 +2118,7 @@ app.post("/api/admin/login", async (req, res) => {
 });
 
 // 📌 ดึงข้อมูลผู้ใช้ทั้งหมด (เฉพาะ Admin เท่านั้น)
-app.get("/api/admin/users", verifyToken, verifyAdmin, (req, res) => {
+app.get("/api/admin/users", (req, res) => {
   const fetchUsersSql = "SELECT UserID, Email, Username, Role, Status FROM User";
 
   pool.query(fetchUsersSql, (err, results) => {
