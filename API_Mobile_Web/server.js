@@ -40,23 +40,26 @@ const pool = mysql.createPool({
 
   // ฟังก์ชันสำหรับตรวจสอบ JWT token
 const verifyToken = (req, res, next) => {
-  const token = req.headers['authorization'];
+  const token = req.headers["authorization"];
 
   if (!token) {
     return res.status(403).json({ message: "Token is required" });
   }
 
-  // ตัดคำว่า "Bearer" ออกจาก token
-  const bearerToken = token.split(' ')[1];
+  // ตัดคำว่า "Bearer" ออก
+  const bearerToken = token.split(" ")[1];
 
   jwt.verify(bearerToken, JWT_SECRET, (err, decoded) => {
     if (err) {
       return res.status(401).json({ message: "Invalid token" });
     }
-    req.userId = decoded.id; // เก็บ userId จาก token ใน request object
-    next(); // ส่งต่อให้กับ middleware หรือ route handler ถัดไป
+
+    req.userId = decoded.id;  // ✅ เก็บ userId
+    req.role = decoded.role;  // ✅ เก็บ role ไว้ใช้ต่อใน verifyAdmin
+    next();
   });
 };
+
 
 module.exports = verifyToken; // เพื่อให้สามารถนำไปใช้ในไฟล์อื่นได้
 
@@ -2036,7 +2039,7 @@ app.get("/api/most-held-th-stocks", async (req, res) => {
 
 // Middleware to verify admin role
 const verifyAdmin = (req, res, next) => {
-  if (req.role !== "admin") {
+  if (req.role !== "admin") {  // ✅ ตอนนี้ req.role จะมีค่าแน่นอน
     return res.status(403).json({ error: "Unauthorized access" });
   }
   next();
