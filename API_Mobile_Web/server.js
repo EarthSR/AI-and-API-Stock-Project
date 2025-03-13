@@ -596,141 +596,96 @@ app.post("/api/resend-otp/reset-password", async (req, res) => {
 app.post("/api/login", async (req, res) => {
   try {
     const { email, password, googleId } = req.body;
-
-    // รับ IP Address ของผู้ใช้
     const ipAddress = req.headers["x-forwarded-for"] || req.connection.remoteAddress;
 
-    // ค้นหาผู้ใช้จากฐานข้อมูล
-    pool.query("SELECT * FROM User WHERE Email = ?", [email], (err, results) => {
-      if (err) return res.status(500).json({ error: "Database error" });
+    if (!email) {
+      return res.status(400).json({ message: "กรุณากรอกอีเมล" });
+    }
 
-      if (results.length === 0) {
-        return res.status(404).json({ message: "ไม่พบบัญชีนี้" });
+    // ค้นหาผู้ใช้ในฐานข้อมูล
+    const [rows] = await pool.promise().query("SELECT * FROM User WHERE Email = ?", [email]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "ไม่พบบัญชีนี้" });
+    }
+
+    const user = rows[0];
+
+    // เช็คสถานะบัญชี
+    if (user.Status !== "active") {
+      return res.status(403).json({ message: "บัญชีถูกระงับการใช้งาน" });
+    }
+
+    // ถ้าใช้ Google Login
+    if (googleId) {
+      if (user.GoogleID && user.GoogleID !== googleId) {
+        return res.status(400).json({ message: "บัญชีนี้ถูกลงทะเบียนด้วยอีเมลแล้ว โปรดเข้าสู่ระบบด้วยอีเมลและรหัสผ่าน" });
       }
 
-      const user = results[0];
-
-      // ตรวจสอบว่าสถานะบัญชีเป็น Active หรือไม่
-      if (user.Status !== "active") {
-        return res.status(403).json({ message: "บัญชีถูกระงับการใช้งาน" });
+      if (!user.GoogleID) {
+        // อัปเดต GoogleID ในบัญชีที่มีอยู่
+        await pool.promise().query("UPDATE User SET GoogleID = ? WHERE UserID = ?", [googleId, user.UserID]);
       }
 
-      if (googleId) {
-        // ค้นหาผู้ใช้จาก GoogleID
-        pool.query("SELECT * FROM User WHERE GoogleID = ?", [googleId], (err, results) => {
-          if (err) {
-            return res.status(500).json({ message: "เกิดข้อผิดพลาดในระบบ" });
-          }
-      
-          if (results.length > 0) {
-            // ผู้ใช้เคยล็อกอินด้วย Google แล้ว
-            const user = results[0];
-      
-            // สร้าง JWT Token และเพิ่ม Role
-            const token = jwt.sign({ id: user.UserID, email: user.Email }, JWT_SECRET);
-      
-            // อัปเดตข้อมูลล็อกอินล่าสุด
-            pool.query("UPDATE User SET LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?", [ipAddress, user.UserID]);
+      const token = jwt.sign({ id: user.UserID, email: user.Email }, JWT_SECRET);
+      await pool.promise().query("UPDATE User SET LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?", [ipAddress, user.UserID]);
 
-            console.log(`User logged in: ${user.Email}, Role: ${user.Role}`);
-      
-            return res.status(200).json({
-              message: "เข้าสู่ระบบด้วย Google สำเร็จ",
-              token,
-              user: {
-                id: user.UserID,
-                email: user.Email,
-                username: user.Username,
-                role: user.Role, // ✅ ส่ง Role กลับไปด้วย
-              },
-            });
-          } else {
-            // ล็อกอินครั้งแรก → ลงทะเบียนบัญชีใหม่
-            pool.query(
-              "INSERT INTO User (GoogleID, Email, Username, Role, LastLogin, LastLoginIP) VALUES (?, ?, ?, 'user', NOW(), ?)",
-              [googleId, email, "", ipAddress],
-              (err, result) => {
-                if (err) {
-                  return res.status(500).json({ message: "เกิดข้อผิดพลาดในการสร้างบัญชี" });
-                }
-      
-                const newUserId = result.insertId;
-                const token = jwt.sign({ id: newUserId, role: "user" }, JWT_SECRET);
-
-                console.log(`New user registered: ${email}, Role: user`);
-      
-                return res.status(201).json({
-                  message: "สมัครสมาชิกและเข้าสู่ระบบด้วย Google สำเร็จ",
-                  token,
-                  user: {
-                    id: newUserId,
-                    email: email,
-                    username: "",
-                    role: "user", // ✅ ตั้งค่า Role เป็น "user" สำหรับ Google Register
-                  },
-                });
-              }
-            );
-          }
-        });
-      }
-      
-
-      // 📌 ถ้าผู้ใช้ล็อกอินด้วย Email + Password
-      if (!password) {
-        return res.status(400).json({ message: "กรุณากรอกรหัสผ่าน" });
-      }
-
-      // ถ้าผู้ใช้ลงทะเบียนด้วย Google ให้แจ้งให้ใช้ Google Login
-      if (user.GoogleID !== null) {
-        return res.status(400).json({ message: "กรุณาเข้าสู่ระบบด้วย Google" });
-      }
-
-      // ตรวจสอบจำนวนครั้งที่ล็อกอินผิดพลาด
-      if (user.FailedAttempts >= 5 && user.LastFailedAttempt) {
-        const now = Date.now();
-        const timeSinceLastAttempt = now - new Date(user.LastFailedAttempt).getTime();
-        if (timeSinceLastAttempt < 300000) { // 5 นาที
-          return res.status(429).json({ message: "คุณล็อกอินผิดพลาดหลายครั้ง โปรดลองอีกครั้งใน 5 นาที" });
-        }
-      }
-
-      // ตรวจสอบรหัสผ่าน (bcrypt)
-      bcrypt.compare(password, user.Password, (err, isMatch) => {
-        if (err) return res.status(500).json({ error: "Error comparing passwords" });
-
-        if (!isMatch) {
-          // บันทึกความล้มเหลวของการล็อกอิน
-          pool.query("UPDATE User SET FailedAttempts = FailedAttempts + 1, LastFailedAttempt = NOW() WHERE UserID = ?", [user.UserID]);
-          return res.status(401).json({ message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
-        }
-
-        // รีเซ็ตจำนวนครั้งที่ล็อกอินผิดพลาด
-        pool.query("UPDATE User SET FailedAttempts = 0, LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?", [ipAddress, user.UserID]);
-
-        // สร้าง JWT Token และเพิ่ม Role
-        const token = jwt.sign({ id: user.UserID, email: user.Email }, JWT_SECRET, { expiresIn: "7d" });
-
-        console.log(`User logged in: ${user.Email}, Role: ${user.Role}`);
-
-        // ส่งข้อมูลกลับไปให้ผู้ใช้
-        res.status(200).json({
-          message: "เข้าสู่ระบบสำเร็จ",
-          token,
-          user: {
-            id: user.UserID,
-            email: user.Email,
-            username: user.Username,
-            role: user.Role, // ✅ เพิ่ม Role ให้ Response
-          },
-        });
+      console.log(`User logged in with Google: ${user.Email}, Role: ${user.Role}`);
+      return res.status(200).json({
+        message: "เข้าสู่ระบบด้วย Google สำเร็จ",
+        token,
+        user: {
+          id: user.UserID,
+          email: user.Email,
+          username: user.Username,
+          role: user.Role,
+        },
       });
+    }
+
+    // ถ้าไม่ได้ใส่รหัสผ่าน
+    if (!password) {
+      return res.status(400).json({ message: "กรุณากรอกรหัสผ่าน" });
+    }
+
+    // ป้องกันการล็อกอินผิดพลาดบ่อย
+    if (user.FailedAttempts >= 5 && user.LastFailedAttempt) {
+      const timeSinceLastAttempt = Date.now() - new Date(user.LastFailedAttempt).getTime();
+      if (timeSinceLastAttempt < 300000) {
+        return res.status(429).json({ message: "คุณล็อกอินผิดพลาดหลายครั้ง โปรดลองอีกครั้งใน 5 นาที" });
+      }
+    }
+
+    // ตรวจสอบรหัสผ่าน
+    const isMatch = await bcrypt.compare(password, user.Password);
+    if (!isMatch) {
+      await pool.promise().query("UPDATE User SET FailedAttempts = FailedAttempts + 1, LastFailedAttempt = NOW() WHERE UserID = ?", [user.UserID]);
+      return res.status(401).json({ message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
+    }
+
+    // รีเซ็ต FailedAttempts และอัปเดตการเข้าสู่ระบบ
+    await pool.promise().query("UPDATE User SET FailedAttempts = 0, LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?", [ipAddress, user.UserID]);
+
+    // สร้าง JWT Token
+    const token = jwt.sign({ id: user.UserID, role: user.Role }, JWT_SECRET, { expiresIn: "7d" });
+
+    console.log(`User logged in: ${user.Email}, Role: ${user.Role}`);
+    res.status(200).json({
+      message: "เข้าสู่ระบบสำเร็จ",
+      token,
+      user: {
+        id: user.UserID,
+        email: user.Email,
+        username: user.Username,
+        role: user.Role,
+      },
     });
   } catch (error) {
     console.error("Internal error:", error.message);
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 
 // Set Profile และ Login อัตโนมัติหลังจากตั้งโปรไฟล์เสร็จ
