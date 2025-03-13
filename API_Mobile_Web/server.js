@@ -286,7 +286,7 @@ app.post("/api/register/set-password", async (req, res) => {
 
       // อัปเดตรหัสผ่านในตาราง User แต่ยังไม่เปลี่ยนเป็น 'active'
       pool.query(
-        "UPDATE User SET Password = ?, Status = 'pending' WHERE UserID = ?",
+        "UPDATE User SET Password = ?, Status = 'active' WHERE UserID = ?",
         [hash, userId],
         (err, results) => {
           if (err) {
@@ -1527,7 +1527,6 @@ app.get("/api/news-detail", async (req, res) => {
   }
 });
 
-<<<<<<< HEAD
 // ฟังก์ชันดึงค่าเงิน USD → THB จาก API ภายนอก
 async function getExchangeRate() {
   try {
@@ -1541,12 +1540,6 @@ async function getExchangeRate() {
 }
 
 // API ดึงรายละเอียดหุ้น
-=======
-
-
-
-
->>>>>>> d5359fd (add)
 app.get("/api/stock-detail/:symbol", async (req, res) => {
   try {
     const { symbol } = req.params;
@@ -2043,6 +2036,7 @@ app.get("/api/most-held-th-stocks", async (req, res) => {
 
 
 //-----------------------------------------------------------------------------------------------------------------------------------------------//
+<<<<<<< HEAD
 
 // Middleware to verify admin role
 const verifyAdmin = (req, res, next) => {
@@ -2254,31 +2248,86 @@ app.delete("/api/admin/users/:id", verifyToken, (req, res) => {
 
 
 
-
-
-<<<<<<< HEAD
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 =======
->>>>>>> d5359fd (add)
+>>>>>>> acc5817 (fix server.js)
+
+// Middleware to verify admin role
+const verifyAdmin = (req, res, next) => {
+  if (req.role !== "admin") {
+    return res.status(403).json({ error: "Unauthorized access" });
+  }
+  next();
+};
+
+// API ให้ React ดึง Secure Embed URL ไปใช้
+app.get("/get-embed-url", (req, res) => {
+  res.json({
+    embedUrl:
+      "https://app.powerbi.com/view?r=eyJrIjoiOGU0ZjNhMjktYjJiZC00ODA1LWIzM2EtNzNkNDg0NzhhMzVkIiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
+    embedUrl:
+      "https://app.powerbi.com/view?r=eyJrIjoiY2VlNGQ1MTItMTE1Zi00ODkyLThhYjEtMjg4MWRkOTRkZWI2IiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
+    });
+});
+
+//Admin//
+app.post("/api/admin/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "กรุณากรอกอีเมลและรหัสผ่าน" });
+    }
+
+    // ค้นหาผู้ใช้ที่เป็น Admin และมีสถานะ Active
+    const sql = "SELECT * FROM User WHERE Email = ? AND Status = 'active' AND Role = 'admin'";
+    pool.query(sql, [email], (err, results) => {
+      if (err) {
+        console.error("Database error during admin login:", err);
+        return res.status(500).json({ error: "เกิดข้อผิดพลาดระหว่างการเข้าสู่ระบบ" });
+      }
+
+      if (results.length === 0) {
+        return res.status(404).json({ message: "ไม่พบบัญชีแอดมิน หรืออาจถูกระงับ" });
+      }
+
+      const user = results[0];
+
+      // ตรวจสอบรหัสผ่าน
+      bcrypt.compare(password, user.Password, (err, isMatch) => {
+        if (err) {
+          console.error("Password comparison error:", err);
+          return res.status(500).json({ error: "เกิดข้อผิดพลาดในการตรวจสอบรหัสผ่าน" });
+        }
+
+        if (!isMatch) {
+          return res.status(401).json({ message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
+        }
+
+        // ✅ สร้าง JWT Token (ไม่มี LastLogin / LastLoginIP)
+        const token = jwt.sign({ id: user.UserID, role: user.Role }, JWT_SECRET, { expiresIn: "7d" });
+
+        // ✅ ส่งข้อมูล Response
+        res.status(200).json({
+          message: "เข้าสู่ระบบแอดมินสำเร็จ",
+          token,
+          user: {
+            id: user.UserID,
+            email: user.Email,
+            username: user.Username,
+            profile_image: user.ProfileImageURL,
+            role: user.Role
+          },
+        });
+      });
+    });
+  } catch (error) {
+    console.error("Internal error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+
 // Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
