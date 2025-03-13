@@ -627,7 +627,13 @@ app.post("/api/login", async (req, res) => {
         await pool.promise().query("UPDATE User SET GoogleID = ? WHERE UserID = ?", [googleId, user.UserID]);
       }
 
-      const token = jwt.sign({ id: user.UserID, email: user.Email }, JWT_SECRET);
+      // ตรวจสอบว่าอีเมลจาก Google ตรงกับฐานข้อมูลหรือไม่
+      if (user.Email !== email) {
+        return res.status(400).json({ message: "อีเมลนี้ไม่ตรงกับข้อมูลในระบบ" });
+      }
+
+      // สร้าง Token และบันทึกการเข้าสู่ระบบ
+      const token = jwt.sign({ id: user.UserID, email: user.Email, role: user.Role }, JWT_SECRET);
       await pool.promise().query("UPDATE User SET LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?", [ipAddress, user.UserID]);
 
       console.log(`User logged in with Google: ${user.Email}, Role: ${user.Role}`);
@@ -685,6 +691,7 @@ app.post("/api/login", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 
 
