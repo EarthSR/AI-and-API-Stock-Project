@@ -3,6 +3,7 @@ import urllib.parse
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
+import mysql.connector  # ✅ เพิ่มการเชื่อมต่อฐานข้อมูล
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -13,62 +14,86 @@ from bs4 import BeautifulSoup
 from webdriver_manager.chrome import ChromeDriverManager
 from concurrent.futures import ThreadPoolExecutor
 import sys
+from dotenv import load_dotenv
 
-# ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
+# ✅ ป้องกัน UnicodeEncodeError
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
-# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+# ✅ โหลดค่าจาก .env และตรวจสอบว่าถูกต้องหรือไม่
+load_dotenv()
+DB_HOST = os.getenv("DB_HOST")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
 
-# 🔹 ตั้งค่าหมวดหมู่ข่าวที่ต้องการดึง
+if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]):
+    raise ValueError("❌ ขาดค่าการตั้งค่าฐานข้อมูลในไฟล์ .env")
+
+# ✅ เชื่อมต่อฐานข้อมูล
+conn = mysql.connector.connect(
+    host=DB_HOST,
+    user=DB_USER,
+    password=DB_PASSWORD,
+    database=DB_NAME,
+    autocommit=True
+)
+cursor = conn.cursor()
+print("✅ เชื่อมต่อฐานข้อมูลสำเร็จ!")
+
+# ✅ ดึงวันที่ล่าสุดจากฐานข้อมูล
+def get_latest_news_date_from_db():
+    query = "SELECT MAX(PublishedDate) FROM News WHERE Source = 'BangkokPost'"
+    cursor.execute(query)
+    latest_date = cursor.fetchone()[0]
+
+    if latest_date:
+        latest_date = latest_date.date()
+        print(f"🗓️ ข่าวล่าสุดในฐานข้อมูลคือวันที่: {latest_date}")
+        return latest_date
+    else:
+        print("⚠️ ไม่มีข่าวในฐานข้อมูล เริ่มดึงข่าวย้อนหลัง 7 วัน")
+        return datetime.now().date() - timedelta(days=7)
+
+latest_date = get_latest_news_date_from_db()
+
+# ✅ ตั้งค่าหมวดหมู่ข่าวที่ต้องการดึง
 NEWS_CATEGORIES = {
-    "Business": "https://search.bangkokpost.com/search/result?publishedDate=&q=&category=news&sort=newest&rows=10&refinementFilter=AQhidXNpbmVzcwxjaGFubmVsYWxpYXMBAV4BJA%3D%3D",
-    "Investment": "https://search.bangkokpost.com/search/result?publishedDate=&q=&category=news&sort=newest&rows=10&refinementFilter=AQppbnZlc3RtZW50DGNoYW5uZWxhbGlhcwEBXgEk",
-    "Motoring": "https://search.bangkokpost.com/search/result?publishedDate=&q=&category=news&sort=newest&rows=10&refinementFilter=AQhtb3RvcmluZwxjaGFubmVsYWxpYXMBAV4BJA%3D%3D",
-    "General": "https://search.bangkokpost.com/search/result?publishedDate=&q=&category=news&sort=newest&rows=10&refinementFilter=AQdnZW5lcmFsDGNoYW5uZWxhbGlhcwEBXgEk"
+    "Business": "https://search.bangkokpost.com/search/result?category=news&sort=newest&rows=10&refinementFilter=AQhidXNpbmVzcwxjaGFubmVsYWxpYXMBAV4BJA%3D%3D",
+    "Investment": "https://search.bangkokpost.com/search/result?category=news&sort=newest&rows=10&refinementFilter=AQppbnZlc3RtZW50DGNoYW5uZWxhbGlhcwEBXgEk",
 }
 
-# 🔹 ไฟล์ CSV
-RAW_CSV_FILE = os.path.join(BASE_DIR, "BangkokPost_Folder", "Thai_News.csv")
-CLEAN_CSV_FILE = os.path.join(BASE_DIR, "BangkokPost_Folder", "Thai_News.csv")
+# ✅ ใช้โฟลเดอร์ปัจจุบัน
+CURRENT_DIR = os.getcwd()
+NEWS_FOLDER = os.path.join(CURRENT_DIR, "News")
+os.makedirs(NEWS_FOLDER, exist_ok=True)
 
-# 🔹 ตั้งค่าวันที่เมื่อวาน (เริ่มที่ 00:00:00)
-yesterday_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+# ✅ ไฟล์ CSV
+RAW_CSV_FILE = os.path.join(NEWS_FOLDER, "Thai_News.csv")
 
-# 🔹 ตั้งค่า Selenium Driver ให้ใช้ ChromeDriver ล่าสุด
+# ✅ ตั้งค่า Selenium Driver
 def setup_driver():
     options = Options()
     options.add_argument('--disable-gpu')
     options.add_argument('--no-sandbox')
-    options.add_argument('--headless=new')  # ✅ ใช้ headless mode (new API)
+    options.add_argument('--headless=new')
 
-    # 🔹 ระบุพาธของ ChromeDriver ที่ติดตั้งใหม่
     chromedriver_path = ChromeDriverManager().install()
     service = Service(chromedriver_path)
 
     return webdriver.Chrome(service=service, options=options)
 
-
-# 🔹 แปลงรูปแบบวันที่และเวลา
+# ✅ แปลงรูปแบบวันที่
 def parse_and_format_datetime(date_str):
-    date_formats = [
-        "%d %b %Y at %H:%M",
-        "%Y-%m-%d %H:%M:%S",
-        "%b %d, %Y at %H:%M",
-        "%d/%m/%Y %H:%M:%S",
-        "%B %d, %Y"
-    ]
-
+    date_formats = ["%d %b %Y at %H:%M", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"]
     for date_format in date_formats:
         try:
             parsed_date = datetime.strptime(date_str.strip(), date_format)
             return parsed_date.strftime("%Y-%m-%d %H:%M:%S")
         except ValueError:
             continue
+    return None
 
-    return None  # ถ้าแปลงไม่ได้
-
-# 🔹 ดึงเนื้อหาข่าว
+# ✅ ดึงเนื้อหาข่าว
 def fetch_news_content(real_link):
     try:
         response = requests.get(real_link, timeout=5)
@@ -107,10 +132,8 @@ def scrape_all_news():
     else:
         print("⚠️ ไม่มีข่าวให้บันทึก! ตรวจสอบว่าเว็บโหลดถูกต้องหรือไม่")
 
-    # 🔹 ทำความสะอาดข้อมูล
-    clean_and_process_data()
 
-# 🔹 ดึงข่าวจากแต่ละหมวด
+# ✅ ดึงข่าวจากแต่ละหมวด
 def scrape_news_from_category(category_name, url):
     print(f" [START] ดึงข่าวจาก {category_name}")
 
@@ -140,12 +163,8 @@ def scrape_news_from_category(category_name, url):
                 date, full_content = fetch_news_content(real_link)
                 formatted_datetime = parse_and_format_datetime(date)
 
-                if not formatted_datetime:
-                    continue
-
-                news_datetime = datetime.strptime(formatted_datetime, "%Y-%m-%d %H:%M:%S")
-                if news_datetime < yesterday_start:
-                    print(f"[STOP] พบข่าวเก่ากว่า {yesterday_start} → หยุดดึง {category_name}")
+                if formatted_datetime and datetime.strptime(formatted_datetime, "%Y-%m-%d %H:%M:%S").date() <= latest_date:
+                    print(f"[STOP] พบข่าวที่มีอยู่แล้ว ({latest_date}), หยุดดึง {category_name}")
                     driver.quit()
                     return news_data
 
@@ -154,34 +173,23 @@ def scrape_news_from_category(category_name, url):
             except Exception:
                 continue
 
-        next_page = soup.find('a', string='Next')
-        if next_page and 'href' in next_page.attrs:
-            driver.get(next_page['href'])
-        else:
-            break
+        driver.quit()
+        return news_data
 
-    driver.quit()
-    print(f"📌 ดึงข่าวจาก {category_name} ได้ {len(news_data)} ข่าว")  # ✅ Debug จำนวนข่าวที่ดึงมา
-    return news_data
+# ✅ ฟังก์ชันหลัก
+def scrape_all_news():
+    print(" [START] เริ่มต้นดึงข่าว...")
+    all_news_data = []
 
-# 🔹 ✅ เช็คปัญหาก่อนบันทึก CSV
-def clean_and_process_data():
-    if not os.path.exists(RAW_CSV_FILE):
-        print("⚠️ ไม่มีไฟล์ CSV ให้ clean")
-        return
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(scrape_news_from_category, name, url): name for name, url in NEWS_CATEGORIES.items()}
+        for future in futures:
+            result = future.result()
+            all_news_data.extend(result)
 
-    df = pd.read_csv(RAW_CSV_FILE, encoding='utf-8')
-    print(f"📊 ตรวจสอบข่าวที่โหลดมา: {len(df)} ข่าว")  # ✅ Debug ก่อน clean
+    df = pd.DataFrame(all_news_data)
+    df.to_csv(RAW_CSV_FILE, index=False, encoding='utf-8')
+    print(f"[SAVED] ข่าวทั้งหมด {len(all_news_data)} ข่าวถูกบันทึกเรียบร้อย!")
 
-    df['date'] = pd.to_datetime(df['date'], errors='coerce')
-    df = df[(df['date'] >= yesterday_start) & (df['date'] < (yesterday_start + timedelta(days=1)))]
-
-    if len(df) > 0:
-        df.to_csv(CLEAN_CSV_FILE, index=False, encoding='utf-8')
-        print(f"✅ [CLEANED] เหลือเฉพาะข่าวของเมื่อวาน {yesterday_start.strftime('%Y-%m-%d')}")
-    else:
-        print("⚠️ ไม่มีข่าวของเมื่อวานให้บันทึก!")
-
-# 🔹 เรียกใช้งานฟังก์ชันหลัก
 if __name__ == "__main__":
     scrape_all_news()

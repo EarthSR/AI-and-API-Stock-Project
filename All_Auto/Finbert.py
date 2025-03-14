@@ -10,7 +10,7 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
 # ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+CURRENT_DIR = os.getcwd()
 
 # ✅ ตรวจสอบ GPU
 if torch.cuda.is_available():
@@ -24,8 +24,8 @@ else:
 
 print(f"Using device: {device}")
 
-PARTIAL_RESULTS_PATH = os.path.join(BASE_DIR, "Finbert", "partial_results_gpu.csv")
-FINAL_RESULTS_PATH = os.path.join(BASE_DIR, "Finbert", "news_with_sentiment_gpu.csv")
+PARTIAL_RESULTS_PATH = os.path.join(CURRENT_DIR, "News", "partial_results_gpu.csv")
+FINAL_RESULTS_PATH = os.path.join(CURRENT_DIR, "News", "news_with_sentiment_gpu.csv")
 
 def load_model():
     """ โหลดโมเดล FinBERT """
@@ -54,7 +54,7 @@ def main():
     )
 
     # ✅ โหลดข้อมูลข่าว
-    input_file_path = os.path.join(BASE_DIR, "news_data", "Final_News.csv")
+    input_file_path = os.path.join(CURRENT_DIR, "News", "Final_News.csv")
 
     if not os.path.exists(input_file_path):
         raise FileNotFoundError(f"❌ ไม่พบไฟล์: {input_file_path}")

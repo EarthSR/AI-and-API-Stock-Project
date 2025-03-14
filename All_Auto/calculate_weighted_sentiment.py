@@ -102,5 +102,5 @@ def calculate_weighted_sentiment(csv_file_path, output_folder=OUTPUT_FOLDER):
         save_to_csv(daily_sentiment_by_source[source], source_output_file)
 
 # ✅ กำหนดพาธไฟล์ CSV ที่ต้องการวิเคราะห์
-csv_file_path = "D:\\Stock_Project\\AI-and-API-Stock-Project\\Finbert\\news_with_sentiment_gpu.csv"
+csv_file_path = "./news_with_sentiment_gpu.csv"
 calculate_weighted_sentiment(csv_file_path)
