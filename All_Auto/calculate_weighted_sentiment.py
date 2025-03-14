@@ -6,10 +6,10 @@ import os
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
 # ✅ กำหนด BASE_DIR เป็น path หลักของไฟล์ปัจจุบัน
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CURRENT_DIR = os.getcwd()
 
 # ✅ ตั้งค่าโฟลเดอร์ปลายทางแบบ dynamic
-OUTPUT_FOLDER = os.path.join(BASE_DIR, "Finbert")
+OUTPUT_FOLDER = os.path.join(CURRENT_DIR, "News")
 
 def calculate_weighted_sentiment(csv_file_path, output_folder=OUTPUT_FOLDER):
     # ✅ โหลดข้อมูลจากไฟล์ CSV
@@ -102,5 +102,5 @@ def calculate_weighted_sentiment(csv_file_path, output_folder=OUTPUT_FOLDER):
         save_to_csv(daily_sentiment_by_source[source], source_output_file)
 
 # ✅ กำหนดพาธไฟล์ CSV ที่ต้องการวิเคราะห์
-csv_file_path = "./news_with_sentiment_gpu.csv"
+csv_file_path = "./News/news_with_sentiment_gpu.csv"
 calculate_weighted_sentiment(csv_file_path)

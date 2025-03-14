@@ -6,16 +6,16 @@ import os
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
 # โหลดข้อมูล Sentiment
-sentiment_df_th = pd.read_csv("./Finbert/daily_sentiment_result_th.csv")
-sentiment_df_us = pd.read_csv("./Finbert/daily_sentiment_result_us.csv")
+sentiment_df_th = pd.read_csv("./News/daily_sentiment_result_th.csv")
+sentiment_df_us = pd.read_csv("./News/daily_sentiment_result_us.csv")
 
 # โหลดข้อมูลหุ้น
-stock_df_th = pd.read_csv("./Finbert/stock_data_thai.csv")
-stock_df_us = pd.read_csv("./Finbert/stock_data_usa.csv")
+stock_df_th = pd.read_csv("./Stock/stock_data_thai.csv")
+stock_df_us = pd.read_csv("./Stock/stock_data_usa.csv")
 
 # โหลดข้อมูลการเงิน
-financial_thai_df = pd.read_csv("./Finbert/Financial_Thai_Quarter.csv")
-financial_us_df = pd.read_csv("./Finbert/Financial_America_Quarter.csv")
+financial_thai_df = pd.read_csv("./Stock/Financial_Thai_Quarter.csv")
+financial_us_df = pd.read_csv("./Stock/Financial_America_Quarter.csv")
 
 print("🔍 คอลัมน์ใน Financial_Thai_Quarter.csv:", financial_thai_df.columns.tolist())
 print("🔍 คอลัมน์ใน Financial_America_Quarter.csv:", financial_us_df.columns.tolist())

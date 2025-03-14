@@ -13,12 +13,12 @@ sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 load_dotenv()
 
 # ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+CURRENT_DIR = os.getcwd()
 
 # ✅ กำหนดพาธของไฟล์ CSV
-MERGED_CSV_PATH = os.path.join(BASE_DIR, "merged_stock_sentiment_financial.csv")
-STOCK_CSV_PATH = os.path.join(BASE_DIR, "Stock.csv")
-STOCK_DETAIL_CSV_PATH = os.path.join(BASE_DIR, "StockDetail.csv")
+MERGED_CSV_PATH = os.path.join(CURRENT_DIR, "merged_stock_sentiment_financial.csv")
+STOCK_CSV_PATH = os.path.join(CURRENT_DIR, "Stock.csv")
+STOCK_DETAIL_CSV_PATH = os.path.join(CURRENT_DIR, "StockDetail.csv")
 
 # ✅ โหลดข้อมูลจาก merged_stock_sentiment_financial.csv
 print("📥 กำลังโหลดไฟล์ merged_stock_sentiment_financial.csv ...")
