@@ -22,19 +22,19 @@ def run_all_scripts():
     write_log(f"\n🚀 เริ่มต้นรันสคริปต์ ณ เวลา: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     scripts = [
-        ["ANT_Final/Thai_News_Database.py"],  # Step 1 - ข่าวไทย
-        ["ANT_Final/America_News_Database.py"],  # Step 2 - ข่าว Investing.com
-        ["ANT_Final/Final_News_Merge.py"],  # Step 3 - รวมข่าว
-        ["Finbert/Finbert.py"],  # Step 4 - วิเคราะห์ Sentiment
-        ["Finbert/calculate_weighted_sentiment.py"],  # Step 5 - ทำ daily sentiment
-        ["ANT_Final/News_Database.py"],  # Step 6 - บันทึกลง Database
-        ["ANT_Final/Financial_America_Quarter.py"],  # Step 7 - บันทึก Financial USA
-        ["ANT_Final/Financial_Thai_Quarter.py"],  # Step 8 - บันทึก Financial Thai
-        ["American_stocks/GetdataAmericanStock.py"],  # Step 9 - บันทึก USA Stock
-        ["Thai_stocks/GetdataThaiStocks.py"],  # Step 10 - บันทึก Thai Stock
-        ["combine.py"],  # Step 11 - รวมข้อมูลทำ AI
-        ["ANT_Final/Stock_Database.py"],  # Step 12 - บันทึกลง Stock ลง Database
-        ["ANT_Final/GDP_Database.py"],  # Step 13 - บันทึกลง GDP ลง Database
+        ["./Thai_News_Database.py"],  # Step 1 - ข่าวไทย
+        ["./America_News_Database.py"],  # Step 2 - ข่าว Investing.com
+        ["./Final_News_Merge.py"],  # Step 3 - รวมข่าว
+        ["./Finbert.py"],  # Step 4 - วิเคราะห์ Sentiment
+        ["./calculate_weighted_sentiment.py"],  # Step 5 - ทำ daily sentiment
+        ["./News_Database.py"],  # Step 6 - บันทึกลง Database
+        ["./Financial_America_Quarter.py"],  # Step 7 - บันทึก Financial USA
+        ["./Financial_Thai_Quarter.py"],  # Step 8 - บันทึก Financial Thai
+        ["./GetdataAmericanStock.py"],  # Step 9 - บันทึก USA Stock
+        ["./GetdataThaiStocks.py"],  # Step 10 - บันทึก Thai Stock
+        ["./combine.py"],  # Step 11 - รวมข้อมูลทำ AI
+        ["./Stock_Database.py"],  # Step 12 - บันทึกลง Stock ลง Database
+        ["./GDP_Database.py"],  # Step 13 - บันทึกลง GDP ลง Database
     ]
 
     def is_script_exist(script_path):

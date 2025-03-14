@@ -3,19 +3,59 @@ import pandas as pd
 import datetime
 import sys
 import os
+import mysql.connector
+from dotenv import load_dotenv
 
 # ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
 # ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+CURRENT_DIR = os.getcwd()
 
-# กำหนดรายชื่อหุ้นอเมริกา
+# ✅ โหลดค่าจาก .env
+load_dotenv()
+DB_HOST = os.getenv("DB_HOST")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
+
+if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]):
+    raise ValueError("❌ ขาดค่าการตั้งค่าฐานข้อมูลในไฟล์ .env")
+
+# ✅ เชื่อมต่อฐานข้อมูล
+conn = mysql.connector.connect(
+    host=DB_HOST,
+    user=DB_USER,
+    password=DB_PASSWORD,
+    database=DB_NAME,
+    autocommit=True
+)
+cursor = conn.cursor()
+print("✅ เชื่อมต่อฐานข้อมูลสำเร็จ!")
+
+# ✅ กำหนดรายชื่อหุ้นอเมริกา
 tickers = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
 
-# กำหนดวันที่เริ่มต้นและสิ้นสุด
-start_date = '2018-01-01'
-end_date = datetime.datetime.today().strftime('%Y-%m-%d')  # ได้วันที่ปัจจุบันในรูปแบบ YYYY-MM-DD
+# ✅ ตรวจสอบวันที่ล่าสุดจากฐานข้อมูล
+latest_dates = {}
+end_date = datetime.datetime.today().strftime('%Y-%m-%d')
+
+for ticker in tickers:
+    cursor.execute("SELECT MAX(Date) FROM StockDetail WHERE StockSymbol = %s", (ticker,))
+    result = cursor.fetchone()[0]
+
+    if result is None:
+        latest_dates[ticker] = "2018-01-01"  # ถ้าไม่มีข้อมูลให้เริ่มจาก 2018-01-01
+    else:
+        latest_dates[ticker] = (result + datetime.timedelta(days=1)).strftime('%Y-%m-%d')  # เริ่มจากวันถัดไป
+
+# ✅ ปิดการเชื่อมต่อฐานข้อมูล
+cursor.close()
+conn.close()
+print("🔹 ปิดการเชื่อมต่อฐานข้อมูลแล้ว")
+
+# ✅ กำหนดวันที่เริ่มต้นและสิ้นสุด (ใช้วันที่ล่าสุดจากฐานข้อมูล)
+start_date = min(latest_dates.values())  # ใช้วันที่ที่เก่าสุดของหุ้นทั้งหมด
 
 # ดึงข้อมูลราคาหุ้นจาก yfinance
 max_retries = 3  # ✅ ลองใหม่ได้ 3 ครั้ง
@@ -43,7 +83,7 @@ for ticker in tickers:
     
     # รีอินเด็กซ์ให้มีทุกวัน (รวมเสาร์-อาทิตย์)
     ticker_data.index = pd.to_datetime(ticker_data.index)  # แปลงเป็น datetime index
-    all_dates = pd.date_range(start=start_date, end=end_date, freq='D')  # ใช้ end_date ที่อัปเดตอัตโนมัติ
+    all_dates = pd.date_range(start=latest_dates[ticker], end=end_date, freq='D')  # ใช้ start_date ที่อัปเดตจากฐานข้อมูล
     ticker_data = ticker_data.reindex(all_dates)
 
     # 🔹 ใช้ค่า **วันก่อนหน้า** แทน NaN ก่อนเติม 0
@@ -68,7 +108,7 @@ cleaned_data = pd.concat(data_list).reset_index().rename(columns={'index': 'Date
 cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume']]
 
 # บันทึกข้อมูลเป็นไฟล์ CSV
-cleaned_data.to_csv(os.path.join(BASE_DIR, "Finbert", "stock_data_usa.csv"), index=False)
+cleaned_data.to_csv(os.path.join(CURRENT_DIR, "Stock", "stock_data_usa.csv"), index=False)
 
 # แสดงตัวอย่างข้อมูล
 print(cleaned_data.head())

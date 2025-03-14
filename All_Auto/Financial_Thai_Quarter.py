@@ -16,7 +16,7 @@ import os
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
 # ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+CURRENT_DIR = os.getcwd()
 
 # 🔹 ตั้งค่า Chrome options
 options = Options()
@@ -206,7 +206,7 @@ for stock in stocks:
 final_df = pd.concat(all_dfs, ignore_index=True)
 
 # ✅ บันทึกข้อมูลลง CSV
-final_df.to_csv(os.path.join(BASE_DIR, "Finbert", "Financial_Thai_Quarter.csv"), index=False)
+final_df.to_csv(os.path.join(CURRENT_DIR, "Stock", "Financial_Thai_Quarter.csv"), index=False)
 print("✅ บันทึกข้อมูลลง 'Financial_Thai_Quarter.csv' สำเร็จ!")
 
 # ✅ ปิด WebDriver

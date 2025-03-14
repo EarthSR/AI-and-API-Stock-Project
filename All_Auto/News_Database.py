@@ -9,13 +9,13 @@ import os
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
 # ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
+CURRENT_DIR = os.getcwd()
 
 # ✅ โหลดตัวแปรจาก .env
 load_dotenv()
 
 # 🔹 ตั้งค่าพาธไฟล์ CSV
-CSV_FILE_PATH = os.path.join(BASE_DIR, "Finbert", "news_with_sentiment_gpu.csv")
+CSV_FILE_PATH = os.path.join(CURRENT_DIR, "Stock", "news_with_sentiment_gpu.csv")
 
 # 🔹 โหลดข้อมูลจาก news_with_sentiment_gpu.csv
 print("📥 กำลังโหลดไฟล์ news_with_sentiment_gpu.csv ...")
