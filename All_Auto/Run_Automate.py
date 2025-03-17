@@ -53,23 +53,38 @@ def run_script(script_path):
 
     try:
         write_log(f"🔄 กำลังรัน `{script_path}`...")
-        process = subprocess.run(
+        process = subprocess.Popen(
             [sys.executable, script_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
-            errors="ignore",
-            timeout=600
+            errors="ignore"
         )
-        write_log(f"📌 Output จาก `{script_path}`:\n{process.stdout}")
+
+        try:
+            stdout, stderr = process.communicate(timeout=600)  # ป้องกันค้าง
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()  # ดึง log หลังจาก kill
+            write_log(f"⚠️ `{script_path}` ค้างเกิน 10 นาที → ข้ามไป")
+        except Exception as e:
+            write_log(f"❌ `{script_path}` ล้มเหลว: {e}")
+            return
+
+        # ✅ เขียน log
+        write_log(f"📌 Output จาก `{script_path}`:\n{stdout}")
+        if stderr:
+            write_log(f"⚠️ Error จาก `{script_path}`:\n{stderr}")
+
         if process.returncode != 0:
-            write_log(f"⚠️ Error จาก `{script_path}` (รหัสผิดพลาด {process.returncode}):\n{process.stderr or 'ไม่มีรายละเอียด'}")
+            write_log(f"⚠️ `{script_path}` จบด้วยรหัสผิดพลาด ({process.returncode})")
+
         write_log(f"✅ `{script_path}` เสร็จสมบูรณ์")
-    except subprocess.TimeoutExpired:
-        write_log(f"⚠️ `{script_path}` ค้างเกิน 10 นาที → ข้ามไป")
-    except subprocess.CalledProcessError as e:
+
+    except Exception as e:
         write_log(f"❌ `{script_path}` ล้มเหลว: {e}")
+
 
 # ✅ ฟังก์ชันรันสคริปต์เฉพาะตลาดที่กำหนด
 def run_scripts_for_market(market):
