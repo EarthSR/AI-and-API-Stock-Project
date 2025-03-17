@@ -115,11 +115,14 @@ update_yfinance()
 check_libraries()
 
 # ✅ ลูปรันสคริปต์ทุกวันสองรอบ (ตลาดไทย + อเมริกา)
-while True:
-    now = datetime.now()
-    if now.hour < 12:  # ถ้ายังเป็นช่วงเช้า รันตลาดไทย
-        run_scripts_for_market("ไทย")
-    else:  # ถ้าเป็นช่วงบ่ายไปแล้ว รันตลาดอเมริกา
-        run_scripts_for_market("อเมริกา")
+try:
+    while True:
+        now = datetime.now()
+        if now.hour < 12:  # ถ้ายังเป็นช่วงเช้า รันตลาดไทย
+            run_scripts_for_market("ไทย")
+        else:  # ถ้าเป็นช่วงบ่ายไปแล้ว รันตลาดอเมริกา
+            run_scripts_for_market("อเมริกา")
 
-    wait_until_next_run()
+        wait_until_next_run()
+except KeyboardInterrupt:
+    write_log("❌ ถูกตัดการทำงานโดย `KeyboardInterrupt` → หยุดลูปหลัก")
