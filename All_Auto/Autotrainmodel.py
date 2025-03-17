@@ -14,13 +14,8 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # ------------------------- 1) CONFIG -------------------------
 DB_CONNECTION = "mysql+pymysql://trademine:trade789@10.10.50.62:3306/TradeMine"
-MODEL_LSTM_PATH = "../LSTM_model/best_multi_task_model.keras"
-MODEL_GRU_PATH = "../GRU_Model/best_multi_task_model.keras"
-# ✅ โหลดโมเดล XGBoost และ RandomForest ที่ถูก Train แล้ว
-xgb_model = joblib.load("../Ensemble_Model/xgb_model_price.pkl")
-rf_model = joblib.load("../Ensemble_Model/rf_model_price.pkl")
-# ✅ โหลด Scaler ที่เคยใช้
-scaler_target = joblib.load("../Ensemble_Model/scaler_target.pkl")
+MODEL_LSTM_PATH = "./best_multi_task_model_GRU.keras"
+MODEL_GRU_PATH = "./best_multi_task_model_LSTM.keras"
 SEQ_LENGTH = 10
 RETRAIN_FREQUENCY = 1
 w_lstm, w_gru = 0.5, 0.5  # ✅ ใช้ Weighted Stacking ระหว่าง LSTM และ GRU
