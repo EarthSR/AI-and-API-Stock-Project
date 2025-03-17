@@ -53,10 +53,18 @@ def run_script(script_path):
 
     try:
         write_log(f"🔄 กำลังรัน `{script_path}`...")
-        process = subprocess.run([sys.executable, script_path], capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=600)
+        process = subprocess.run(
+            [sys.executable, script_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=600
+        )
         write_log(f"📌 Output จาก `{script_path}`:\n{process.stdout}")
-        if process.stderr:
-            write_log(f"⚠️ Error จาก `{script_path}`:\n{process.stderr}")
+        if process.returncode != 0:
+            write_log(f"⚠️ Error จาก `{script_path}` (รหัสผิดพลาด {process.returncode}):\n{process.stderr or 'ไม่มีรายละเอียด'}")
         write_log(f"✅ `{script_path}` เสร็จสมบูรณ์")
     except subprocess.TimeoutExpired:
         write_log(f"⚠️ `{script_path}` ค้างเกิน 10 นาที → ข้ามไป")
