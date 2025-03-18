@@ -5,29 +5,69 @@ import os
 # ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
-# โหลดข้อมูล Sentiment
-sentiment_df_th = pd.read_csv("./News/daily_sentiment_result_th.csv")
-sentiment_df_us = pd.read_csv("./News/daily_sentiment_result_us.csv")
+# ✅ กำหนด Path ของไฟล์หุ้นไทยและหุ้นอเมริกา
+thai_stock_path = "./Stock/stock_data_thai.csv"
+us_stock_path = "./Stock/stock_data_usa.csv"
 
-# ✅ ถ้าไฟล์ข่าวไม่มีข้อมูล ให้สร้าง DataFrame เปล่า พร้อมเติมค่า Neutral
-if sentiment_df_th.empty:
+# ✅ โหลดข้อมูลถ้าไฟล์มีอยู่ หรือสร้าง DataFrame เปล่าถ้าไม่มีไฟล์
+if os.path.exists(thai_stock_path):
+    stock_df_th = pd.read_csv(thai_stock_path)
+else:
+    print("⚠️ ไฟล์หุ้นไทยไม่มี! ใช้ DataFrame ว่างแทน")
+    stock_df_th = pd.DataFrame(columns=['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume'])
+
+if os.path.exists(us_stock_path):
+    stock_df_us = pd.read_csv(us_stock_path)
+else:
+    print("⚠️ ไฟล์หุ้นอเมริกาไม่มี! ใช้ DataFrame ว่างแทน")
+    stock_df_us = pd.DataFrame(columns=['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume'])
+
+# ✅ โหลดข้อมูล Sentiment
+sentiment_th_path = "./News/daily_sentiment_result_th.csv"
+sentiment_us_path = "./News/daily_sentiment_result_us.csv"
+
+if os.path.exists(sentiment_th_path):
+    sentiment_df_th = pd.read_csv(sentiment_th_path)
+else:
+    print("⚠️ ไฟล์ข่าวไทยไม่มี! ใช้ DataFrame ว่างแทน")
     sentiment_df_th = pd.DataFrame(columns=['date', 'Sentiment', 'Sentiment Category'])
-    sentiment_df_th['Sentiment'] = 'Neutral'
-    sentiment_df_th['Sentiment Category'] = 'Neutral'
+    sentiment_df_th[['Sentiment', 'Sentiment Category']] = 'Neutral'
 
-if sentiment_df_us.empty:
+if os.path.exists(sentiment_us_path):
+    sentiment_df_us = pd.read_csv(sentiment_us_path)
+else:
+    print("⚠️ ไฟล์ข่าวอเมริกาไม่มี! ใช้ DataFrame ว่างแทน")
     sentiment_df_us = pd.DataFrame(columns=['date', 'Sentiment', 'Sentiment Category'])
-    sentiment_df_us['Sentiment'] = 'Neutral'
-    sentiment_df_us['Sentiment Category'] = 'Neutral'
+    sentiment_df_us[['Sentiment', 'Sentiment Category']] = 'Neutral'
 
+# ✅ โหลดข้อมูลการเงิน
+financial_thai_path = "./Stock/Financial_Thai_Quarter.csv"
+financial_us_path = "./Stock/Financial_America_Quarter.csv"
 
-# โหลดข้อมูลหุ้น
-stock_df_th = pd.read_csv("./Stock/stock_data_thai.csv")
-stock_df_us = pd.read_csv("./Stock/stock_data_usa.csv")
+if os.path.exists(financial_thai_path):
+    financial_thai_df = pd.read_csv(financial_thai_path)
+else:
+    print("⚠️ ไฟล์งบการเงินไทยไม่มี! ใช้ DataFrame ว่างแทน")
+    financial_thai_df = pd.DataFrame()
 
-# โหลดข้อมูลการเงิน
-financial_thai_df = pd.read_csv("./Stock/Financial_Thai_Quarter.csv")
-financial_us_df = pd.read_csv("./Stock/Financial_America_Quarter.csv")
+if os.path.exists(financial_us_path):
+    financial_us_df = pd.read_csv(financial_us_path)
+else:
+    print("⚠️ ไฟล์งบการเงินอเมริกาไม่มี! ใช้ DataFrame ว่างแทน")
+    financial_us_df = pd.DataFrame()
+
+# ✅ ตรวจสอบว่ามีเพียงไฟล์เดียวที่มีข้อมูลหรือไม่
+is_thai_empty = stock_df_th.empty
+is_us_empty = stock_df_us.empty
+
+if is_thai_empty and not is_us_empty:
+    print("⚠️ มีเพียงไฟล์หุ้นอเมริกาที่มีข้อมูล แต่ไฟล์หุ้นไทยไม่มีหรือว่างเปล่า!")
+
+if is_us_empty and not is_thai_empty:
+    print("⚠️ มีเพียงไฟล์หุ้นไทยที่มีข้อมูล แต่ไฟล์หุ้นอเมริกาไม่มีหรือว่างเปล่า!")
+
+print("✅ โหลดข้อมูลหุ้น ข่าว และงบการเงินเสร็จเรียบร้อย!")
+
 
 print("🔍 คอลัมน์ใน Financial_Thai_Quarter.csv:", financial_thai_df.columns.tolist())
 print("🔍 คอลัมน์ใน Financial_America_Quarter.csv:", financial_us_df.columns.tolist())
