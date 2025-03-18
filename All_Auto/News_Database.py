@@ -15,7 +15,7 @@ CURRENT_DIR = os.getcwd()
 load_dotenv()
 
 # 🔹 ตั้งค่าพาธไฟล์ CSV
-CSV_FILE_PATH = os.path.join(CURRENT_DIR, "Stock", "news_with_sentiment_gpu.csv")
+CSV_FILE_PATH = os.path.join(CURRENT_DIR, "News", "news_with_sentiment_gpu.csv")
 
 # 🔹 โหลดข้อมูลจาก news_with_sentiment_gpu.csv
 print("📥 กำลังโหลดไฟล์ news_with_sentiment_gpu.csv ...")

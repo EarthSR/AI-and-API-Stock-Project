@@ -9,6 +9,18 @@ sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 sentiment_df_th = pd.read_csv("./News/daily_sentiment_result_th.csv")
 sentiment_df_us = pd.read_csv("./News/daily_sentiment_result_us.csv")
 
+# ✅ ถ้าไฟล์ข่าวไม่มีข้อมูล ให้สร้าง DataFrame เปล่า พร้อมเติมค่า Neutral
+if sentiment_df_th.empty:
+    sentiment_df_th = pd.DataFrame(columns=['date', 'Sentiment', 'Sentiment Category'])
+    sentiment_df_th['Sentiment'] = 'Neutral'
+    sentiment_df_th['Sentiment Category'] = 'Neutral'
+
+if sentiment_df_us.empty:
+    sentiment_df_us = pd.DataFrame(columns=['date', 'Sentiment', 'Sentiment Category'])
+    sentiment_df_us['Sentiment'] = 'Neutral'
+    sentiment_df_us['Sentiment Category'] = 'Neutral'
+
+
 # โหลดข้อมูลหุ้น
 stock_df_th = pd.read_csv("./Stock/stock_data_thai.csv")
 stock_df_us = pd.read_csv("./Stock/stock_data_usa.csv")
