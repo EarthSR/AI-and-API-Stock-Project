@@ -18,49 +18,39 @@ def write_log(message):
     print(message)  # แสดงผลใน Console ด้วย
 
 # ✅ รายการไลบรารีที่ต้องใช้
-# required_libraries = [
-#     "absl-py", "ace_tools", "astunparse", "attrs", "beautifulsoup4", "betterproto",
-#     "blinker", "Brotli", "bs4", "cachetools", "certifi", "cffi", "charset-normalizer",
-#     "click", "colorama", "contourpy", "cryptography", "cycler", "filelock", "Flask",
-#     "flatbuffers", "fonttools", "frozendict", "fsspec", "gast", "gmpy2", "google-auth",
-#     "google-auth-oauthlib", "google-pasta", "greenlet", "grpcio", "grpclib", "h11", "h2",
-#     "h5py", "hpack", "huggingface-hub", "hyperframe", "idna", "itsdangerous", "Jinja2",
-#     "joblib", "keras", "kiwisolver", "libclang", "lightgbm", "lxml", "Markdown",
-#     "markdown-it-py", "MarkupSafe", "matplotlib", "mdurl", "mkl_fft", "mkl_random",
-#     "mkl-service", "ml-dtypes", "mpmath", "multidict", "multitasking", "mysql",
-#     "mysql-connector-python", "mysqlclient", "namex", "networkx", "ntplib", "numpy",
-#     "oauthlib", "opt_einsum", "optree", "outcome", "packaging", "paho-mqtt", "pandas",
-#     "pandas_ta", "peewee", "pillow", "pip", "platformdirs", "protobuf", "pyasn1",
-#     "pyasn1_modules", "pycparser", "Pygments", "PyMySQL", "pyodbc", "pyparsing",
-#     "PySocks", "pythainlp", "python-dateutil", "python-dotenv", "pytz", "PyYAML",
-#     "regex", "requests", "requests-oauthlib", "rich", "rsa", "safetensors",
-#     "scikit-learn", "scipy", "seaborn", "selenium", "settrade-v2", "setuptools",
-#     "six", "sniffio", "sortedcontainers", "soupsieve", "SQLAlchemy", "stringcase",
-#     "sympy", "ta", "tensorboard", "tensorboard-data-server", "tensorflow",
-#     "tensorflow-addons", "tensorflow-estimator", "tensorflow-intel",
-#     "tensorflow-io-gcs-filesystem", "termcolor", "threadpoolctl", "tokenizers",
-#     "torch", "torchaudio", "torchvision", "tqdm", "transformers", "trio",
-#     "trio-websocket", "typeguard", "typing_extensions", "tzdata",
-#     "undetected-chromedriver", "urllib3", "webdriver-manager", "websocket-client",
-#     "websockets", "Werkzeug", "wheel", "win-inet-pton", "wrapt", "wsproto",
-#     "xgboost", "yfinance"
-# ]
+required_libraries = [
+    "absl-py", "ace_tools", "astunparse", "attrs", "beautifulsoup4", "betterproto",
+    "blinker", "Brotli", "bs4", "cachetools", "certifi", "cffi", "charset-normalizer",
+    "click", "colorama", "contourpy", "cryptography", "cycler", "filelock", "Flask",
+    "flatbuffers", "fonttools", "frozendict", "fsspec", "gast", "gmpy2", "google-auth",
+    "google-auth-oauthlib", "google-pasta", "greenlet", "grpcio", "grpclib", "h11", "h2",
+    "h5py", "hpack", "huggingface-hub", "hyperframe", "idna", "itsdangerous", "Jinja2",
+    "joblib", "keras", "kiwisolver", "libclang", "lightgbm", "lxml", "Markdown",
+    "markdown-it-py", "MarkupSafe", "matplotlib", "mdurl", "mkl_fft", "mkl_random",
+    "mkl-service", "ml-dtypes", "mpmath", "multidict", "multitasking", "mysql",
+    "mysql-connector-python", "mysqlclient", "namex", "networkx", "ntplib", "numpy",
+    "oauthlib", "opt_einsum", "optree", "outcome", "packaging", "paho-mqtt", "pandas",
+    "pandas_ta", "peewee", "pillow", "pip", "platformdirs", "protobuf", "pyasn1",
+    "pyasn1_modules", "pycparser", "Pygments", "PyMySQL", "pyodbc", "pyparsing",
+    "PySocks", "pythainlp", "python-dateutil", "python-dotenv", "pytz", "PyYAML",
+    "regex", "requests", "requests-oauthlib", "rich", "rsa", "safetensors",
+    "scikit-learn", "scipy", "seaborn", "selenium", "settrade-v2", "setuptools",
+    "six", "sniffio", "sortedcontainers", "soupsieve", "SQLAlchemy", "stringcase",
+    "sympy", "ta", "tensorboard", "tensorboard-data-server", "tensorflow",
+    "tensorflow-addons", "tensorflow-estimator", "tensorflow-intel",
+    "tensorflow-io-gcs-filesystem", "termcolor", "threadpoolctl", "tokenizers",
+    "torch", "torchaudio", "torchvision", "tqdm", "transformers", "trio",
+    "trio-websocket", "typeguard", "typing_extensions", "tzdata",
+    "undetected-chromedriver", "urllib3", "webdriver-manager", "websocket-client",
+    "websockets", "Werkzeug", "wheel", "win-inet-pton", "wrapt", "wsproto",
+    "xgboost", "yfinance"
+]
 
 # ✅ ฟังก์ชันอัปเดต `yfinance` เป็นเวอร์ชันล่าสุดทุกครั้งก่อนรัน
 def update_yfinance():
     write_log("🔄 กำลังอัปเดต `yfinance` เป็นเวอร์ชันล่าสุด...")
     subprocess.run(["pip", "install", "--upgrade", "yfinance"], check=True)
     write_log("✅ อัปเดต `yfinance` สำเร็จ")
-
-# ✅ ฟังก์ชันตรวจสอบไลบรารีก่อนรันทุกสคริปต์
-# def check_libraries():
-#     installed_libs = subprocess.run(["pip", "list"], capture_output=True, text=True).stdout.lower()
-
-#     for lib in required_libraries:
-#         if lib.lower() not in installed_libs:
-#             write_log(f"⚠️ ไม่พบ {lib} → กำลังติดตั้ง...")
-#             subprocess.run(["pip", "install", lib], check=True)
-#             write_log(f"✅ ติดตั้ง {lib} สำเร็จ")
 
 # ✅ ฟังก์ชันรันสคริปต์เฉพาะตลาดที่กำหนด
 def run_scripts_for_market(market):
@@ -200,8 +190,6 @@ def wait_until_next_run():
 # ✅ อัปเดต `yfinance` ก่อนเริ่ม
 update_yfinance()
 
-# ✅ เช็คไลบรารีก่อนรัน
-# check_libraries()
 
 # ✅ ลูปรันสคริปต์ทุกวันสองรอบ (ตลาดไทย + อเมริกา)
 while True:
