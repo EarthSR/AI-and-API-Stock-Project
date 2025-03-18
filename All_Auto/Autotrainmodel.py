@@ -196,9 +196,15 @@ from sqlalchemy import create_engine, text
 
 def save_predictions_to_db(predictions_df):
     """
-    บันทึกผลลัพธ์การพยากรณ์ลงในตาราง `StockDetail`
+    บันทึกผลลัพธ์การพยากรณ์ลงในตาราง `StockDetail` โดยใช้เฉพาะวันที่ใหม่ที่สุด
     """
     engine = create_engine(DB_CONNECTION)
+
+    # ✅ ดึงวันที่ใหม่ที่สุด
+    with engine.connect() as connection:
+        latest_date_query = text("SELECT MAX(Date) as LatestDate FROM StockDetail")
+        latest_date_result = connection.execute(latest_date_query).fetchone()
+        latest_date = latest_date_result[0]
 
     with engine.connect() as connection:
         for index, row in predictions_df.iterrows():
@@ -214,11 +220,12 @@ def save_predictions_to_db(predictions_df):
                 "predicted_price": row["PredictionClose"],
                 "predicted_trend": row["PredictionTrend"],
                 "ticker": row["StockSymbol"],
-                "date": row["Date"]
+                "date": latest_date  # ✅ ใช้วันที่ใหม่ที่สุด
             })
 
         connection.commit()  # ✅ ต้อง Commit การเปลี่ยนแปลง
     print("\n✅ บันทึกผลลัพธ์ลงในฐานข้อมูลสำเร็จ!")
+
 
 
 # ------------------------- 7) RUN -------------------------
