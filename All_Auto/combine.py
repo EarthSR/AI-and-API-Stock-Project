@@ -72,9 +72,12 @@ print("✅ โหลดข้อมูลหุ้น ข่าว และง�
 print("🔍 คอลัมน์ใน Financial_Thai_Quarter.csv:", financial_thai_df.columns.tolist())
 print("🔍 คอลัมน์ใน Financial_America_Quarter.csv:", financial_us_df.columns.tolist())
 
-# ✅ ลบช่องว่างและแปลงชื่อคอลัมน์
-financial_thai_df.columns = financial_thai_df.columns.str.strip()
-financial_us_df.columns = financial_us_df.columns.str.strip()
+# ✅ ลบช่องว่างและแปลงชื่อคอลัมน์ (เฉพาะถ้า DataFrame ไม่ว่าง)
+if not financial_thai_df.empty:
+    financial_thai_df.columns = financial_thai_df.columns.astype(str).str.strip()
+
+if not financial_us_df.empty:
+    financial_us_df.columns = financial_us_df.columns.astype(str).str.strip()
 
 # ✅ แปลง EV / EBITDA เป็น EVEBITDA
 financial_thai_df.rename(columns={"EV / EBITDA": "EVEBITDA"}, inplace=True)
