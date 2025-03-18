@@ -134,6 +134,39 @@ def run_scripts_for_market(market):
 
         write_log(f"\n✅ --- Step {step} เสร็จสมบูรณ์ ---\n")
 
+# ✅ ลบไฟล์ทั้งหมดในโฟลเดอร์ Stock News หลังจากรันเสร็จ
+def clear_stock_folder():
+    folder_path = "./Stock"  # เปลี่ยนเป็นพาธที่ถูกต้อง
+    if os.path.exists(folder_path):
+        for file in os.listdir(folder_path):
+            file_path = os.path.join(folder_path, file)
+            try:
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                    write_log(f"🗑 ลบไฟล์: {file_path}")
+            except Exception as e:
+                write_log(f"⚠️ ไม่สามารถลบไฟล์ {file_path}: {e}")
+
+    write_log("✅ ลบไฟล์ในโฟลเดอร์ Stock News สำเร็จ")
+
+def clear_News_folder():
+    folder_path = "./News"  # เปลี่ยนเป็นพาธที่ถูกต้อง
+    if os.path.exists(folder_path):
+        for file in os.listdir(folder_path):
+            file_path = os.path.join(folder_path, file)
+            try:
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                    write_log(f"🗑 ลบไฟล์: {file_path}")
+            except Exception as e:
+                write_log(f"⚠️ ไม่สามารถลบไฟล์ {file_path}: {e}")
+
+    write_log("✅ ลบไฟล์ในโฟลเดอร์ Stock News สำเร็จ")
+
+# ✅ เรียกใช้ฟังก์ชันลบไฟล์หลังจากรันสคริปต์ทั้งหมด
+clear_stock_folder()
+clear_News_folder()
+
 # ✅ ฟังก์ชันรอจนถึงรอบถัดไป (ตลาดไทยหรืออเมริกา)
 def wait_until_next_run():
     now = datetime.now()
