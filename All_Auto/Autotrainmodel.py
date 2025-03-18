@@ -14,8 +14,8 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # ------------------------- 1) CONFIG -------------------------
 DB_CONNECTION = "mysql+pymysql://trademine:trade789@10.10.50.62:3306/TradeMine"
-MODEL_LSTM_PATH = "./best_multi_task_model_GRU.keras"
-MODEL_GRU_PATH = "./best_multi_task_model_LSTM.keras"
+MODEL_LSTM_PATH = "./best_multi_task_model_LSTM.keras"
+MODEL_GRU_PATH = "./best_multi_task_model_GRU.keras"
 SEQ_LENGTH = 10
 RETRAIN_FREQUENCY = 1
 w_lstm, w_gru = 0.5, 0.5  # ✅ ใช้ Weighted Stacking ระหว่าง LSTM และ GRU
@@ -36,9 +36,9 @@ def save_predictions_to_stockdetail(predictions_df):
             # ✅ อัปเดตค่าพยากรณ์ในตาราง `StockDetail` สำหรับวันที่ล่าสุด
             connection.execute(f"""
                 UPDATE StockDetail
-                SET PredictionClos = {predicted_price}, PredictionTren = {predicted_direction}
-                WHERE StockSymbo = '{ticker}' 
-                AND Date = (SELECT MAX(Date) FROM StockDetail WHERE StockSymbo = '{ticker}')
+                SET PredictionClose = {predicted_price}, PredictionTrend = {predicted_direction}
+                WHERE StockSymbol = '{ticker}' 
+                AND Date = (SELECT MAX(Date) FROM StockDetail WHERE StockSymbol = '{ticker}')
             """)
 
     print("\n✅ อัปเดตค่าพยากรณ์ใน `StockDetail` สำเร็จ!")
@@ -101,8 +101,6 @@ def fetch_latest_data():
     df['Bollinger_High'] = bollinger.bollinger_hband()
     df['Bollinger_Low'] = bollinger.bollinger_lband()
     df['Sentiment'] = df['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
-    atr = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=14)
-    df['ATR'] = atr.average_true_range()
 
     keltner = ta.volatility.KeltnerChannel(high=df['High'], low=df['Low'], close=df['Close'], window=20, window_atr=10)
     df['Keltner_High'] = keltner.keltner_channel_hband()
