@@ -10,7 +10,19 @@ import xgboost as xgb
 from sklearn.ensemble import RandomForestRegressor
 import joblib
 import warnings
+from datetime import datetime
 warnings.filterwarnings("ignore", category=UserWarning)
+
+current_hour = datetime.now().hour
+
+if 8 <= current_hour < 18:
+    print("📊 กำลังประมวลผลตลาดหุ้นไทย (SET)...")
+    market_filter = "Thailand"
+elif 19 <= current_hour or current_hour < 5:
+    print("📊 กำลังประมวลผลตลาดหุ้นอเมริกา (NYSE & NASDAQ)...")
+    market_filter = "America"
+else:
+    print("❌ ไม่อยู่ในช่วงเวลาทำการของตลาดหุ้นไทยหรืออเมริกา")
 
 # ------------------------- 1) CONFIG -------------------------
 DB_CONNECTION = "mysql+pymysql://trademine:trade789@10.10.50.62:3306/TradeMine"
@@ -57,33 +69,57 @@ def fetch_latest_data():
     """
     engine = sqlalchemy.create_engine(DB_CONNECTION)
 
-    query = """
+    query = f"""
         SELECT 
-            Date, 
-            StockSymbol, 
-            OpenPrice AS Open, 
-            HighPrice AS High, 
-            LowPrice AS Low, 
-            ClosePrice AS Close, 
-            Volume, 
-            P_BV_Ratio,
-            Sentiment, 
-            Changepercen AS Change_Percent, 
-            TotalRevenue, 
-            QoQGrowth, 
-            EPS, 
-            ROE, 
-            NetProfitMargin, 
-            DebtToEquity, 
-            PERatio, 
-            Dividend_Yield 
+            StockDetail.Date, 
+            StockDetail.StockSymbol, 
+            Stock.Market,  
+            StockDetail.OpenPrice AS Open, 
+            StockDetail.HighPrice AS High, 
+            StockDetail.LowPrice AS Low, 
+            StockDetail.ClosePrice AS Close, 
+            StockDetail.Volume, 
+            StockDetail.P_BV_Ratio,
+            StockDetail.Sentiment, 
+            StockDetail.Changepercen AS Change_Percent, 
+            StockDetail.TotalRevenue, 
+            StockDetail.QoQGrowth, 
+            StockDetail.EPS, 
+            StockDetail.ROE, 
+            StockDetail.NetProfitMargin, 
+            StockDetail.DebtToEquity, 
+            StockDetail.PERatio, 
+            StockDetail.Dividend_Yield 
         FROM StockDetail
-        WHERE Date >= CURDATE() - INTERVAL 365 DAY
-        ORDER BY Date ASC
+        LEFT JOIN Stock ON StockDetail.StockSymbol = Stock.StockSymbol
+        WHERE Stock.Market IN ('{market_filter}')  
+        AND StockDetail.Date >= CURDATE() - INTERVAL 365 DAY
+        ORDER BY StockDetail.Date ASC;
     """
 
     df = pd.read_sql(query, engine)
     engine.dispose()
+
+    # ✅ ถ้าไม่มีข้อมูลหุ้นเลย ให้ return DataFrame ว่าง
+    if df.empty:
+        print("❌ ไม่มีข้อมูลหุ้นสำหรับตลาดที่กำลังเปิดอยู่")
+        return df
+
+    # ✅ ถ้า DataFrame มีขนาดน้อยกว่า 14 แถว → ไม่สามารถคำนวณ ATR ได้
+    if len(df) < 14:
+        print(f"⚠️ ข้อมูลมีขนาดน้อยเกินไป ({len(df)} แถว) ไม่สามารถคำนวณ ATR ได้")
+        return df
+    
+    # ✅ เติมวันที่ที่ขาด
+    df['Date'] = pd.to_datetime(df['Date'])
+    all_dates = pd.date_range(start=df['Date'].min(), end=df['Date'].max(), freq='D')
+
+    df = df.set_index(['StockSymbol', 'Date']).reindex(
+        pd.MultiIndex.from_product([df['StockSymbol'].unique(), all_dates], names=['StockSymbol', 'Date'])
+    ).reset_index()
+
+    # ✅ เติมค่าที่ขาดเป็นค่าเฉลี่ยของวันก่อนหน้า
+    df.fillna(method='ffill', inplace=True)
 
     # ✅ คำนวณฟีเจอร์ทางเทคนิค
     df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
@@ -95,8 +131,12 @@ def fetch_latest_data():
     df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
     df['MACD'] = df['EMA_12'] - df['EMA_26']
     df['MACD_Signal'] = df['MACD'].rolling(window=9).mean()
-    atr = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=14)
-    df['ATR'] = atr.average_true_range()
+
+    # ✅ คำนวณ ATR (ตรวจสอบก่อนว่ามีข้อมูลเพียงพอ)
+    if len(df) >= 14:
+        atr = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=14)
+        df['ATR'] = atr.average_true_range()
+
     bollinger = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
     df['Bollinger_High'] = bollinger.bollinger_hband()
     df['Bollinger_Low'] = bollinger.bollinger_lband()
@@ -106,6 +146,7 @@ def fetch_latest_data():
     df['Keltner_High'] = keltner.keltner_channel_hband()
     df['Keltner_Low'] = keltner.keltner_channel_lband()
     df['Keltner_Middle'] = keltner.keltner_channel_mband()
+
     window_cv = 10
     df['High_Low_Diff'] = df['High'] - df['Low']
     df['High_Low_EMA'] = df['High_Low_Diff'].ewm(span=window_cv, adjust=False).mean()
@@ -116,9 +157,9 @@ def fetch_latest_data():
     df['Donchian_Low'] = df['Low'].rolling(window=window_dc).min()
     psar = ta.trend.PSARIndicator(high=df['High'], low=df['Low'], close=df['Close'], step=0.02, max_step=0.2)
     df['PSAR'] = psar.psar()
-    # ✅ เติมค่าที่ขาด
-    df.fillna(method='ffill', inplace=True)
-    df.fillna(0, inplace=True)
+
+    # ✅ ลบค่าที่ไม่สามารถคำนวณได้ (`NaN`)
+    df.dropna(inplace=True)
 
     return df
 
