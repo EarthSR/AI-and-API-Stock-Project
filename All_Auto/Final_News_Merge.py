@@ -86,7 +86,11 @@ for file in os.listdir(news_data_folder):
         df_temp = pd.read_csv(file_path, encoding='utf-8')
 
         print(f"\n🔍 [DEBUG] ค่าของ 'Source' ใน {file}:")
-        print(df_temp['Source'].value_counts(dropna=False))
+        if 'Source' in df_temp.columns:
+            print(f"\n🔍 [DEBUG] ค่าของ 'Source' ใน {file}:")
+            print(df_temp['Source'].value_counts(dropna=False))
+        else:
+            print(f"⚠️ ไม่มีคอลัมน์ 'Source' ใน {file}, ข้ามไฟล์นี้")
 
         final_dataframes.append(df_temp)
 
