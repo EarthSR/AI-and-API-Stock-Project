@@ -7,11 +7,9 @@ import pandas as pd
 import concurrent.futures
 import threading
 import os
-import mysql.connector
 import gc
 from datetime import datetime, timedelta
 import sys
-from dotenv import load_dotenv
 
 # ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
