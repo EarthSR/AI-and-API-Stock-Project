@@ -13,15 +13,16 @@ from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 import sys
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
-load_dotenv()
-DB_HOST = "localhost"
-DB_USER = "root"
-DB_PASSWORD = "1234"
-DB_NAME = "TradeMine"
+load_dotenv(find_dotenv("../config.env"))
+# 🔹 ตั้งค่าการเชื่อมต่อฐานข้อมูล
+DB_HOST = os.getenv("DB_HOST")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
 
 if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]):
     raise ValueError("❌ ขาดค่าการตั้งค่าฐานข้อมูลในไฟล์ .env")
@@ -65,7 +66,7 @@ def setup_driver():
     options.add_argument('--disable-gpu')
     options.add_argument('--no-sandbox')
     options.add_argument('--headless=new')
-    service = Service("./chromedriver.exe")  # เปลี่ยน path ตรงนี้ถ้าจำเป็น
+    service = Service("../usa/chromedriver")  # เปลี่ยน path ตรงนี้ถ้าจำเป็น
     return webdriver.Chrome(service=service, options=options)
 
 def parse_and_format_datetime(date_str):

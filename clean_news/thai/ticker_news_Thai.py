@@ -83,7 +83,7 @@ def process_news(docs):
 
 # ✅ ประมวลผล
 start_time = time.time()
-batch_size = 32
+batch_size = 10
 
 print(f"🔍 เริ่มประมวลผล NER + Context (Batch size = {batch_size})")
 results = []
