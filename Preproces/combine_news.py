@@ -83,7 +83,8 @@ def clean_and_process_data(input_files, output_file):
 
 # Input and output files
 input_files = [
-    './imf_news_cleaned.csv'
+    './thai/Combined_News_Sentiment.csv',
+    './usa/Combined_News_Sentiment.csv'
 ]  # List of input CSV files
 
 output_file = 'news_cleaned.csv'  # Output CSV file
