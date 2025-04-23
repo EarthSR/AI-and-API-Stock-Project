@@ -80,6 +80,7 @@ def parse_and_format_datetime(date_str):
     return None
 
 
+
 def fetch_news_content(real_link):
     try:
         response = requests.get(real_link, timeout=5)
@@ -98,34 +99,9 @@ def fetch_news_content(real_link):
         return 'No Date', 'Content not found'
 
 
-import requests
-from bs4 import BeautifulSoup
-from datetime import datetime
-import urllib.parse
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-
-# ฟังก์ชันที่ใช้ดึงรูปจากหน้าเต็ม
-def extract_image_from_article(article_url, driver):
-    driver.get(article_url)
-    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, 'article-content')))
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
-    
-    article_div = soup.find('div', class_='article-content')
-    if not article_div:
-        return 'No Image'
-    
-    img_tag = article_div.find('img')
-    if not img_tag:
-        return 'No Image'
-    
-    return img_tag.get('src') or img_tag.get('data-src') or img_tag.get('srcset', '').split(' ')[0] or 'No Image'
-
-
-# ฟังก์ชันดึงข่าวจาก category
-def scrape_news_from_category(category_name, url, driver, latest_date):
+def scrape_news_from_category(category_name, url):
     print(f" [START] ดึงข่าวจาก {category_name}")
+    driver = setup_driver()
     news_data = []
 
     try:
@@ -144,16 +120,10 @@ def scrape_news_from_category(category_name, url, driver, latest_date):
                     title_tag = article.find('h3').find('a')
                     title = title_tag.get_text(strip=True)
                     link = title_tag['href']
-                    img_tag = article.find('img')
+                    img_tag = article.find('img').find()
                     img = img_tag.get('src') or img_tag.get('data-src') if img_tag else 'No Image'
 
-                    # การตรวจสอบลิงก์ให้ถูกต้อง
                     real_link = urllib.parse.parse_qs(urllib.parse.urlparse(link).query).get('href', [link])[0] if 'track/visitAndRedirect' in link else link
-                    
-                    # ดึงข้อมูลจากหน้าเต็ม (full article)
-                    image_url = extract_image_from_article(real_link, driver)
-
-                    # ดึงข้อมูลวันที่และเนื้อหาจากหน้าเต็ม
                     date, full_content = fetch_news_content(real_link)
                     formatted_datetime = parse_and_format_datetime(date)
 
@@ -166,12 +136,11 @@ def scrape_news_from_category(category_name, url, driver, latest_date):
                         "date": formatted_datetime,
                         "link": real_link,
                         "description": full_content,
-                        "image": image_url
+                        "image": img
                     })
                 except Exception as e:
-                    print(f"Error: {e}")
                     continue
-
+            break  # ถ้าต้องการดึงแค่หน้าเดียว ลบ break นี้ออกถ้าอยากไล่หลายหน้า
 
     finally:
         driver.quit()
