@@ -96,53 +96,55 @@ def fetch_news_content(real_link):
     except requests.exceptions.RequestException:
         return 'No Date', 'Content not found'
 
+
 def scrape_news_from_category(category_name, url):
     print(f" [START] ดึงข่าวจาก {category_name}")
     driver = setup_driver()
-    driver.get(url)
     news_data = []
 
-    while True:
-        try:
+    try:
+        driver.get(url)
+
+        while True:
             WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, 'mk-listnew--title')))
-        except Exception:
-            break
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            articles = soup.find_all('div', class_='mk-listnew--title')
 
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        articles = soup.find_all('div', class_='mk-listnew--title')
+            if not articles:
+                break
 
-        if not articles:
-            break
+            for article in articles:
+                try:
+                    title_tag = article.find('h3').find('a')
+                    title = title_tag.get_text(strip=True)
+                    link = title_tag['href']
+                    img_tag = article.find('img')
+                    img = img_tag.get('src') or img_tag.get('data-src') if img_tag else 'No Image'
 
-        for article in articles:
-            try:
-                title_tag = article.find('h3').find('a')
-                title = title_tag.get_text(strip=True)
-                link = title_tag['href']
-                img_tag = article.find('img')
-                img = img_tag['src'] if img_tag else 'No Image'
-                real_link = urllib.parse.parse_qs(urllib.parse.urlparse(link).query).get('href', [link])[0] if 'track/visitAndRedirect' in link else link
-                date, full_content = fetch_news_content(real_link)
-                formatted_datetime = parse_and_format_datetime(date)
+                    real_link = urllib.parse.parse_qs(urllib.parse.urlparse(link).query).get('href', [link])[0] if 'track/visitAndRedirect' in link else link
+                    date, full_content = fetch_news_content(real_link)
+                    formatted_datetime = parse_and_format_datetime(date)
 
-                if formatted_datetime and datetime.strptime(formatted_datetime, "%Y-%m-%d %H:%M:%S").date() <= latest_date:
-                    print(f"[STOP] พบข่าวที่มีอยู่แล้ว ({latest_date}), หยุดดึง {category_name}")
-                    driver.quit()
-                    return news_data
+                    if formatted_datetime and datetime.strptime(formatted_datetime, "%Y-%m-%d %H:%M:%S").date() <= latest_date:
+                        print(f"[STOP] พบข่าวที่มีอยู่แล้ว ({latest_date}), หยุดดึง {category_name}")
+                        return news_data
 
-                news_data.append({
-                    "title": title,
-                    "date": formatted_datetime,
-                    "link": real_link,
-                    "description": full_content,
-                    "image": img
-                })
+                    news_data.append({
+                        "title": title,
+                        "date": formatted_datetime,
+                        "link": real_link,
+                        "description": full_content,
+                        "image": img
+                    })
+                except Exception as e:
+                    continue
+            break  # ถ้าต้องการดึงแค่หน้าเดียว ลบ break นี้ออกถ้าอยากไล่หลายหน้า
 
-            except Exception:
-                continue
-
+    finally:
         driver.quit()
-        return news_data
+
+    return news_data
+
 
 def scrape_all_news():
     print(" [START] เริ่มต้นดึงข่าว...")
