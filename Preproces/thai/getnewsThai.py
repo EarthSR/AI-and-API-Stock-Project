@@ -120,8 +120,9 @@ def scrape_news_from_category(category_name, url):
                     title_tag = article.find('h3').find('a')
                     title = title_tag.get_text(strip=True)
                     link = title_tag['href']
-                    img_tag = article.find('img').find()
+                    img_tag = article.find('figure').find('img') if article.find('figure') else None
                     img = img_tag.get('src') or img_tag.get('data-src') if img_tag else 'No Image'
+
 
                     real_link = urllib.parse.parse_qs(urllib.parse.urlparse(link).query).get('href', [link])[0] if 'track/visitAndRedirect' in link else link
                     date, full_content = fetch_news_content(real_link)
