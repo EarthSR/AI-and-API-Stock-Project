@@ -21,8 +21,8 @@ else:
 
 print(f"Using device: {device}")
 
-PARTIAL_RESULTS_PATH = os.path.join("combined_partial_results.csv")
-FINAL_RESULTS_PATH = os.path.join("Combined_News_Sentiment.csv")
+PARTIAL_RESULTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'usa', 'News', 'USA_News_Hybrid.csv')
+FINAL_RESULTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'usa', 'News', 'USA_News_Sentiment.csv')
 
 def load_model():
     print("Loading FinBERT model...")
@@ -91,7 +91,7 @@ def main():
         lambda row: f"{row.get('title', '')} {row.get('description', '')}", axis=1
     ).tolist()
 
-    processed_data = pd.DataFrame(columns=['title', 'description', 'date', 'link', 'Source', 'MatchedStock', 'Type', 'Sentiment', 'Confidence'])
+    processed_data = pd.DataFrame(columns=['title', 'description', 'date', 'link', 'Source', 'MatchedStock', 'Type', 'Sentiment', 'Confidence','image'])
     processed_data.to_csv(PARTIAL_RESULTS_PATH, index=False, header=True, mode='w')
 
     results = []
@@ -111,13 +111,13 @@ def main():
                                 combined.iloc[idx]['Source'],
                                 combined.iloc[idx]['MatchedStock'],
                                 combined.iloc[idx]['Type'],
-                                sentiment,
-                                confidence))
+                                sentiment,confidence,
+                                combined.iloc[idx]['image']))
 
                 pbar.update(1)
 
                 if len(results) % 100 == 0:
-                    temp_df = pd.DataFrame(results, columns=['title', 'description', 'date', 'link', 'Source', 'MatchedStock', 'Type', 'Sentiment', 'Confidence'])
+                    temp_df = pd.DataFrame(results, columns=['title', 'description', 'date', 'link', 'Source', 'MatchedStock', 'Type', 'Sentiment', 'Confidence','image'])
                     temp_df.to_csv(PARTIAL_RESULTS_PATH, mode='a', index=False, header=not os.path.exists(PARTIAL_RESULTS_PATH))
                     results = []
 
@@ -125,7 +125,7 @@ def main():
             print(f"❌ Error occurred: {e}")
         finally:
             if results:
-                temp_df = pd.DataFrame(results, columns=['title', 'description', 'date', 'link', 'Source', 'MatchedStock', 'Type', 'Sentiment', 'Confidence'])
+                temp_df = pd.DataFrame(results, columns=['title', 'description', 'date', 'link', 'Source', 'MatchedStock', 'Type', 'Sentiment', 'Confidence','image'])
                 temp_df.to_csv(PARTIAL_RESULTS_PATH, mode='a', index=False, header=False)
             print(f"✅ Saved partial results to {PARTIAL_RESULTS_PATH}.")
 

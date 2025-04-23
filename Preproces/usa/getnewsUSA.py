@@ -10,16 +10,19 @@ import os
 import gc
 from datetime import datetime, timedelta
 import sys
-
+import mysql.connector
+from dotenv import load_dotenv
+from pathlib import Path
+import time
 # ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
 
 # ✅ ใช้โฟลเดอร์ปัจจุบันแทน BASE_DIR
-CURRENT_DIR = os.getcwd()
+path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'usa')
 
 # ✅ ตรวจสอบและสร้างโฟลเดอร์ "Investing_Folder" ถ้ายังไม่มี
-News_FOLDER = os.path.join(CURRENT_DIR, "News")
+News_FOLDER = os.path.join(path, "News")
 os.makedirs(News_FOLDER, exist_ok=True)
 
 # ✅ กำหนด path ของไฟล์ CSV
@@ -33,18 +36,60 @@ base_url = "https://www.investing.com/news/stock-market-news"
 # ✅ Lock สำหรับการใช้ Chrome instance
 driver_lock = threading.Lock()
 
-def get_latest_news_date_from_csv():
 
-    last_news_file = os.path.join("Combined_News.csv")
-    df = pd.read_csv(last_news_file)
-    latest_date = df['date'].max()
+# ปิดการทำงานของ __del__ ที่ทำให้เกิด WinError 6
+def patched_del(self):
+    pass
+
+uc.Chrome.__del__ = patched_del
+
+uc.Chrome.__del__ = patched_del
+dotenv_path = Path(__file__).resolve().parents[1] / "config.env"
+load_dotenv(dotenv_path)
+
+db_config = {
+    "host": os.getenv("DB_HOST"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "database": os.getenv("DB_NAME"),
+    "port": os.getenv("DB_PORT")
+}
+
+
+conn = mysql.connector.connect(**db_config)
+cursor = conn.cursor()
+
+
+from datetime import datetime
+
+def get_latest_news_date_from_database():
+    cursor.execute("SELECT MAX(PublishedDate) FROM News WHERE Source = 'investing'")
+    latest_date = cursor.fetchone()[0]
     if latest_date:
-        latest_date = datetime.strptime(latest_date, "%Y-%m-%d %H:%M:%S").date()
+        # ถ้า latest_date เป็น datetime แล้ว ให้ใช้ .date() เพื่อแปลงเป็น datetime.date
+        if isinstance(latest_date, datetime):
+            latest_date = latest_date.date()
+        else:
+            # ถ้าไม่ใช่ datetime (เช่น เป็น string) ค่อยแปลงด้วย strptime
+            latest_date = datetime.strptime(latest_date, "%Y-%m-%d %H:%M:%S").date()
+
         print(f"🗓️ ข่าวล่าสุดคือวันที่: {latest_date}")
         return latest_date
     else:
         print("⚠️ ไม่มีข่าวในฐานข้อมูล เริ่มดึงข่าวตั้งแต่ 7 วันก่อน")
-        return datetime.now().date() - timedelta(days=7)  # ดึงย้อนหลัง 7 วัน
+        return (datetime.now() - timedelta(days=7)).date()  # ดึงย้อนหลัง 7 วัน
+
+# ในส่วนที่ต้องการเปรียบเทียบ news_date กับ latest_date
+news_date = datetime.now().date()  # ตัวอย่าง
+latest_date = get_latest_news_date_from_database()  # รับค่า latest_date จากฐานข้อมูล
+
+if news_date and news_date <= latest_date:
+    print("ข่าวนี้ไม่ใหม่เกินไป")
+else:
+    print("ข่าวนี้ใหม่มากพอที่จะดึงข้อมูล")
+
+
+
 
 def init_driver():
     """สร้าง Chrome driver instance แบบปลอดภัย"""
@@ -52,10 +97,10 @@ def init_driver():
         options = uc.ChromeOptions()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--blink-settings=imagesEnabled=false")
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-extensions")
         driver = uc.Chrome(options=options)
+        driver._keep_alive = False
     return driver
 
 def close_popup(driver):
@@ -69,16 +114,34 @@ def close_popup(driver):
     except Exception:
         pass
 
+def smooth_scroll_to_bottom(driver, step=300, delay=0.3):
+    """เลื่อนหน้าจอลงอย่างช้าๆ จนสุดหน้า"""
+    last_height = driver.execute_script("return document.body.scrollHeight")
+    current_position = 0
+
+    while current_position < last_height:
+        driver.execute_script(f"window.scrollTo(0, {current_position});")
+        time.sleep(delay)
+        current_position += step
+        last_height = driver.execute_script("return document.body.scrollHeight")
+    
+    # เลื่อนถึงสุดท้ายอีกครั้ง เผื่อโหลดช้า
+    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    time.sleep(1.5)
+
+
 def scrape_news(driver):
     """ดึงข่าวจากหน้าเว็บ"""
     soup = BeautifulSoup(driver.page_source, 'html.parser')
     articles = soup.find_all('article', {'data-test': 'article-item'})
     news_list = []
-    
     for article in articles:
         title_tag = article.find('a', {'data-test': 'article-title-link'})
         title = title_tag.get_text(strip=True) if title_tag else 'No Title'
         link = title_tag.get("href", "No Link")
+        
+        img_tag = article.find('img', {'data-test': 'item-image'})
+        img = img_tag.get('src', 'No Image') if img_tag else 'No Image'
 
         description_tag = article.find('p', {'data-test': 'article-description'})
         description = description_tag.get_text(strip=True) if description_tag else 'No Description'
@@ -86,7 +149,7 @@ def scrape_news(driver):
         date_tag = article.find('time', {'data-test': 'article-publish-date'})
         date_str = date_tag.get("datetime", "No Date")
 
-        news_list.append({'title': title, 'link': link, 'description': description, 'date': date_str})
+        news_list.append({'title': title, 'link': link, 'description': description, 'date': date_str, 'image': img})
 
     return news_list
 
@@ -108,18 +171,19 @@ scraped_pages = set()
 def scrape_page(page):
     """Scrape ข่าวจากหน้าเว็บ"""
     global scraped_pages
-
+    
     if page in scraped_pages:
         print(f"⚠️ หน้าที่ {page} ถูกดึงไปแล้ว ข้าม...")
         return []
-
     driver = None
     try:
         driver = init_driver()
         driver.get(f"{base_url}/{page}" if page > 1 else base_url)
-
+        smooth_scroll_to_bottom(driver)
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "article")))
         close_popup(driver)
+        
+        
         news = scrape_news(driver)
 
         print(f"✅ ดึงข่าวจากหน้า {page} ได้ {len(news)} ข่าว")
@@ -133,6 +197,8 @@ def scrape_page(page):
     finally:
         if driver:
             safe_quit(driver)
+            driver = None  # 🔒 ป้องกัน error จาก __del__ ของ undetected_chromedriver
+
 
 def save_to_csv(data, filename, write_header=False):
     """บันทึกข้อมูลลง CSV โดยป้องกันข่าวซ้ำ"""
@@ -160,10 +226,11 @@ def save_to_csv(data, filename, write_header=False):
     else:
         print("✅ ไม่มีข่าวใหม่ให้บันทึก")
 
+
 def main():
-    """ฟังก์ชันหลักที่ดึงข่าวตั้งแต่วันที่ล่าสุดใน Database"""
-    latest_date = get_latest_news_date_from_csv()
-    batch_size = 5
+    """ฟังก์ชันหลักที่ดึงข่าวตั้งแต่วันที่ล่าสุด"""
+    latest_date = get_latest_news_date_from_database()
+    batch_size = 1
     max_pages = 7499
     all_news = []
     is_first_save = True
@@ -190,10 +257,13 @@ def main():
                             news_date = None
 
                         if news_date and news_date <= latest_date:
-                            print(f"⏹️ พบข่าวที่มีอยู่แล้วในฐานข้อมูล ({latest_date}), หยุดดึงข่าวทันที")
+                            print(f"⏹️ พบข่าวที่มีอยู่แล้ว ({latest_date}), หยุดดึงข่าวทันที")
                             save_to_csv(all_news, output_filename, write_header=is_first_save)
                             save_to_csv(all_news, os.path.join("Combined_News.csv"), write_header=False)
                             stop_scraping = True
+                            driver = init_driver()
+                            safe_quit(driver)
+                            driver = None 
                             break
 
                 save_to_csv(all_news, output_filename, write_header=is_first_save)

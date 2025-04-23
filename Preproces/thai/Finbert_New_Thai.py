@@ -21,8 +21,8 @@ else:
 
 print(f"Using device: {device}")
 
-PARTIAL_RESULTS_PATH = os.path.join("combined_partial_results.csv")
-FINAL_RESULTS_PATH = os.path.join("Combined_News_Sentiment.csv")
+PARTIAL_RESULTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'thai', 'News', 'Thai_News_Hybrid.csv')
+FINAL_RESULTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'thai', 'News', 'Thai_News_Sentiment.csv')
 
 def load_model():
     print("Loading FinBERT model...")

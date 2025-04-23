@@ -3,13 +3,12 @@ from spacy.tokens import Span
 from tqdm import tqdm
 import pandas as pd
 import time
+import os
 
 if not spacy.prefer_gpu():
     print("⚠️ ไม่พบ GPU หรือ spaCy ไม่ได้ตั้งค่า GPU")
 else:
     print("🚀 ใช้ GPU:", spacy.prefer_gpu())
-
-spacy.require_gpu()
 
 # ✅ รายชื่อหุ้นและชื่อบริษัท
 stock_entities = {
@@ -50,7 +49,7 @@ for stock, keywords in stock_entities.items():
 ruler.add_patterns(patterns)
 
 # ✅ อ่านข่าว
-file_path = "Combined_News.csv"
+file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'usa', 'News', 'USA_News.csv')
 df = pd.read_csv(file_path)
 
 # ✅ เตรียมข้อความ

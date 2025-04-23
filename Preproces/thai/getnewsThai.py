@@ -17,7 +17,7 @@ from dotenv import load_dotenv, find_dotenv
 
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
-load_dotenv(find_dotenv("../config.env"))
+load_dotenv(find_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.env')))
 # 🔹 ตั้งค่าการเชื่อมต่อฐานข้อมูล
 DB_HOST = os.getenv("DB_HOST")
 DB_USER = os.getenv("DB_USER")
@@ -56,8 +56,8 @@ NEWS_CATEGORIES = {
     "Investment": "https://search.bangkokpost.com/search/result?category=news&sort=newest&rows=10&refinementFilter=AQppbnZlc3RtZW50DGNoYW5uZWxhbGlhcwEBXgEk",
 }
 
-CURRENT_DIR = os.getcwd()
-NEWS_FOLDER = os.path.join(CURRENT_DIR, "News")
+CURRENT_DIR = os.path.abspath("./News")
+NEWS_FOLDER = os.path.join(CURRENT_DIR)
 os.makedirs(NEWS_FOLDER, exist_ok=True)
 RAW_CSV_FILE = os.path.join(NEWS_FOLDER, "Thai_News.csv")
 
@@ -66,7 +66,7 @@ def setup_driver():
     options.add_argument('--disable-gpu')
     options.add_argument('--no-sandbox')
     options.add_argument('--headless=new')
-    service = Service("../usa/chromedriver")  # เปลี่ยน path ตรงนี้ถ้าจำเป็น
+    service = Service(os.path.join(os.path.dirname(os.path.abspath(__file__)),'chromedriver.exe'))  # เปลี่ยน path ตรงนี้ถ้าจำเป็น
     return webdriver.Chrome(service=service, options=options)
 
 def parse_and_format_datetime(date_str):
@@ -86,6 +86,7 @@ def fetch_news_content(real_link):
 
         date_tag = news_soup.find('div', class_='article-info--col')
         date = date_tag.find('p', string=lambda x: x and 'PUBLISHED :' in x).get_text(strip=True).replace('PUBLISHED :', '').strip() if date_tag else 'No Date'
+
 
         content_div = news_soup.find('div', class_='article-content')
         paragraphs = content_div.find_all('p') if content_div else []
@@ -118,7 +119,8 @@ def scrape_news_from_category(category_name, url):
                 title_tag = article.find('h3').find('a')
                 title = title_tag.get_text(strip=True)
                 link = title_tag['href']
-
+                img_tag = article.find('img')
+                img = img_tag['src'] if img_tag else 'No Image'
                 real_link = urllib.parse.parse_qs(urllib.parse.urlparse(link).query).get('href', [link])[0] if 'track/visitAndRedirect' in link else link
                 date, full_content = fetch_news_content(real_link)
                 formatted_datetime = parse_and_format_datetime(date)
@@ -132,7 +134,8 @@ def scrape_news_from_category(category_name, url):
                     "title": title,
                     "date": formatted_datetime,
                     "link": real_link,
-                    "description": full_content
+                    "description": full_content,
+                    "image": img
                 })
 
             except Exception:

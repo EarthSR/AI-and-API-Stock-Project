@@ -503,7 +503,21 @@ model = Model(
     outputs=[price_output, direction_output]
 )
 
-optimizer = AdamW(learning_rate=3e-4, weight_decay=1e-6)
+batch_size = 16
+validation_split = 0.1
+expected_epochs = 50
+
+train_size = int(len(X_price_train) * (1 - validation_split))
+steps_per_epoch = train_size // batch_size
+decay_steps = steps_per_epoch * expected_epochs
+print(f"📉 decay_steps ที่คำนวณได้ = {decay_steps}")
+
+lr_schedule = CosineDecay(
+    initial_learning_rate=2e-4,
+    decay_steps=decay_steps,
+    alpha=1e-5
+)
+optimizer = AdamW(learning_rate=lr_schedule, weight_decay=1e-6)
 
 model.compile(
     optimizer=optimizer,
@@ -529,7 +543,7 @@ callbacks = [early_stopping, lr_scheduler, checkpoint]
 history = model.fit(
     [X_price_train, X_ticker_train, X_market_train],
     {"price_output": y_price_train, "direction_output": y_dir_train},
-    epochs=200,
+    epochs=1000,
     batch_size=16,
     verbose=1,
     shuffle=False,
