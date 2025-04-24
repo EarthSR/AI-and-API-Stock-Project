@@ -56,10 +56,11 @@ NEWS_CATEGORIES = {
     "Investment": "https://search.bangkokpost.com/search/result?category=news&sort=newest&rows=10&refinementFilter=AQppbnZlc3RtZW50DGNoYW5uZWxhbGlhcwEBXgEk",
 }
 
-CURRENT_DIR = os.path.abspath("./News")
-NEWS_FOLDER = os.path.join(CURRENT_DIR)
-os.makedirs(NEWS_FOLDER, exist_ok=True)
-RAW_CSV_FILE = os.path.join(NEWS_FOLDER, "Thai_News.csv")
+path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'thai')
+
+News_FOLDER = os.path.join(path, "News")
+os.makedirs(News_FOLDER, exist_ok=True)
+RAW_CSV_FILE = os.path.join(News_FOLDER, "Thai_News.csv")
 
 def setup_driver():
     options = Options()
@@ -89,14 +90,38 @@ def fetch_news_content(real_link):
         date_tag = news_soup.find('div', class_='article-info--col')
         date = date_tag.find('p', string=lambda x: x and 'PUBLISHED :' in x).get_text(strip=True).replace('PUBLISHED :', '').strip() if date_tag else 'No Date'
 
+        # ดึงรูปภาพ - วิธีที่ 1
+        img_url = "No Image"
+        box_img = news_soup.find('div', class_='box-img')
+        if box_img and box_img.find('figure') and box_img.find('figure').find('img'):
+            img_url = box_img.find('figure').find('img').get('src')
+        
+        # ถ้าวิธีที่ 1 ไม่พบ ลองวิธีที่ 2
+        if img_url == "No Image":
+            article_content = news_soup.find('div', class_='article-content')
+            if article_content:
+                box_img = article_content.find('div', class_='box-img')
+                if box_img and box_img.find('figure') and box_img.find('figure').find('img'):
+                    img_url = box_img.find('figure').find('img').get('src')
+
+        # ถ้าวิธีที่ 2 ยังไม่พบ ลองวิธีที่ 3
+        if img_url == "No Image":
+            img_tags = news_soup.find_all('img', class_='img-fluid')
+            if img_tags and len(img_tags) > 0:
+                for img in img_tags:
+                    src = img.get('src', '')
+                    if 'content' in src and not 'icon' in src.lower():
+                        img_url = src
+                        break
 
         content_div = news_soup.find('div', class_='article-content')
         paragraphs = content_div.find_all('p') if content_div else []
         full_content = '\n'.join([p.get_text(strip=True) for p in paragraphs])
 
-        return date, full_content.replace(',', '').replace('""', '')
-    except requests.exceptions.RequestException:
-        return 'No Date', 'Content not found'
+        return date, full_content.replace(',', '').replace('""', ''), img_url
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching content: {e}")
+        return 'No Date', 'Content not found', 'No Image'
 
 
 def scrape_news_from_category(category_name, url):
@@ -120,12 +145,9 @@ def scrape_news_from_category(category_name, url):
                     title_tag = article.find('h3').find('a')
                     title = title_tag.get_text(strip=True)
                     link = title_tag['href']
-                    img_tag = article.find('figure').find('img') if article.find('figure') else None
-                    img = img_tag.get('src') or img_tag.get('data-src') if img_tag else 'No Image'
-
 
                     real_link = urllib.parse.parse_qs(urllib.parse.urlparse(link).query).get('href', [link])[0] if 'track/visitAndRedirect' in link else link
-                    date, full_content = fetch_news_content(real_link)
+                    date, full_content, img_url = fetch_news_content(real_link)
                     formatted_datetime = parse_and_format_datetime(date)
 
                     if formatted_datetime and datetime.strptime(formatted_datetime, "%Y-%m-%d %H:%M:%S").date() <= latest_date:
@@ -137,9 +159,10 @@ def scrape_news_from_category(category_name, url):
                         "date": formatted_datetime,
                         "link": real_link,
                         "description": full_content,
-                        "image": img
+                        "image": img_url
                     })
                 except Exception as e:
+                    print(f"Error processing article: {e}")
                     continue
             break  # ถ้าต้องการดึงแค่หน้าเดียว ลบ break นี้ออกถ้าอยากไล่หลายหน้า
 

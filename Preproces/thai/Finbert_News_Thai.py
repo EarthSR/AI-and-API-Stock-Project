@@ -8,7 +8,7 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
-CURRENT_DIR = os.getcwd()
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 if torch.cuda.is_available():
     print("✅ CUDA Available:", torch.cuda.is_available())
@@ -50,8 +50,8 @@ def extract_source(link):
 
 
 def prepare_data():
-    related_path = os.path.join(CURRENT_DIR, "Related_News_Hybrid.csv")
-    unrelated_path = os.path.join(CURRENT_DIR, "Unrelated_News_Hybrid.csv")
+    related_path = os.path.join(CURRENT_DIR, '..', 'thai', 'News', "Related_News_Hybrid.csv")
+    unrelated_path = os.path.join(CURRENT_DIR, '..', 'thai', 'News', "Unrelated_News_Hybrid.csv")
 
     if not os.path.exists(related_path) or not os.path.exists(unrelated_path):
         raise FileNotFoundError("❌ ไม่พบไฟล์ Related หรือ Unrelated News")
@@ -66,9 +66,11 @@ def prepare_data():
     unrelated['Type'] = 'Unrelated'
 
     combined = pd.concat([related, unrelated], ignore_index=True)
+    if 'date' in combined.columns:
+        combined.dropna(subset=['date'], inplace=True)
     combined.fillna("", inplace=True)
-
-    combined.to_csv("Combined_News_Hybrid_Thai.csv", index=False)
+    combined_path = os.path.join(CURRENT_DIR, '..', 'thai', 'News', "Combined_News_Hybrid_Thai.csv")
+    combined.to_csv(combined_path, index=False)
     print("✅ รวมข่าวเรียบร้อยแล้ว → Combined_News_Hybrid_Thai.csv")
     return combined
 

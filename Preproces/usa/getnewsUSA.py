@@ -259,7 +259,6 @@ def main():
                         if news_date and news_date <= latest_date:
                             print(f"⏹️ พบข่าวที่มีอยู่แล้ว ({latest_date}), หยุดดึงข่าวทันที")
                             save_to_csv(all_news, output_filename, write_header=is_first_save)
-                            save_to_csv(all_news, os.path.join("Combined_News.csv"), write_header=False)
                             stop_scraping = True
                             driver = init_driver()
                             safe_quit(driver)
@@ -267,7 +266,6 @@ def main():
                             break
 
                 save_to_csv(all_news, output_filename, write_header=is_first_save)
-                save_to_csv(all_news, os.path.join("Combined_News.csv"), write_header=False)
                 total_articles += len(all_news)
                 is_first_save = False
                 all_news = []

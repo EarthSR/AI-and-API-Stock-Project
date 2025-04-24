@@ -199,7 +199,7 @@ else:
 # ------------------------------------------------------------------------------------
 # 1) โหลดและเตรียมข้อมูล
 # ------------------------------------------------------------------------------------
-df = pd.read_csv('../Preproces/merged_stock_sentiment_financial.csv')
+df = pd.read_csv('../GRU_Model/merged_stock_sentiment_financial.csv')
 
 df['Sentiment'] = df['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
 df['Change'] = df['Close'] - df['Open']
@@ -251,6 +251,11 @@ psar = ta.trend.PSARIndicator(
 )
 df['PSAR'] = psar.psar()
 
+us_stock = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
+thai_stock = ['ADVANC', 'INTUCH', 'TRUE', 'DITTO', 'DIF', 
+           'INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
+df['Market_ID'] = df['Ticker'].apply(lambda x: "US" if x in us_stock else "TH" if x in thai_stock else None)
+
 financial_columns = [
     'Total Revenue', 'QoQ Growth (%)', 'Earnings Per Share (EPS)', 'ROE (%)',
     'Net Profit Margin (%)', 'Debt to Equity', 'P/E Ratio',
@@ -268,7 +273,7 @@ df[stock_columns] = df[stock_columns].fillna(method='ffill')
 df.fillna(0, inplace=True)
 
 feature_columns = [
-    'Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment','total_news',
+    'Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment','positive_news','negative_news','neutral_news',
     'Total Revenue', 'QoQ Growth (%)','Earnings Per Share (EPS)','ROE (%)',
     'ATR','Keltner_High','Keltner_Low','Keltner_Middle','Chaikin_Vol','Donchian_High','Donchian_Low','PSAR',
     'Net Profit Margin (%)', 'Debt to Equity', 'P/E Ratio',
@@ -525,7 +530,7 @@ model.compile(
         "price_output": tf.keras.losses.Huber(delta=1.0),
         "direction_output": "binary_crossentropy"
     },
-    loss_weights={"price_output": 0.8, "direction_output": 0.2},
+    loss_weights={"price_output": 0.6, "direction_output": 0.4},
     metrics={
         "price_output": ["mae"],
         "direction_output": ["accuracy"]

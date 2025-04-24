@@ -57,6 +57,7 @@ for stock, keywords in stock_entities.items():
 ruler.add_patterns(patterns)
 
 # ✅ อ่านข่าว
+floder_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'thai', 'News')
 file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'thai', 'News', 'Thai_News.csv')
 df = pd.read_csv(file_path)
 
@@ -111,8 +112,10 @@ print(f"✅ ข่าวที่ไม่เกี่ยวข้อง: {unrel
 print(f"⏱️ ใช้เวลาในการประมวลผล: {elapsed / 60:.2f} นาที\n")
 
 # ✅ บันทึกไฟล์
-related_df.to_csv("Related_News_Hybrid.csv", index=False, encoding='utf-8')
-unrelated_df.to_csv("Unrelated_News_Hybrid.csv", index=False, encoding='utf-8')
+related_path = os.path.join(floder_path, 'Related_News_Hybrid.csv')
+unrelated_path = os.path.join(floder_path, 'Unrelated_News_Hybrid.csv')
+related_df.to_csv(related_path, index=False, encoding='utf-8')
+unrelated_df.to_csv(unrelated_path, index=False, encoding='utf-8')
 
 print(f"💾 บันทึกข่าวที่เกี่ยวข้องที่: Related_News_Hybrid.csv")
 print(f"💾 บันทึกข่าวที่ไม่เกี่ยวข้องที่: Unrelated_News_Hybrid.csv")

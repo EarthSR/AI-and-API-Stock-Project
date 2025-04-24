@@ -51,36 +51,39 @@ def clear_stock_csv():
 
 
 def run_every_2_hours():
+    last_run_hour = None  # เพื่อไม่ให้รันซ้ำในชั่วโมงเดิม
+
     while True:
         now = datetime.datetime.now()
-        if now.hour % 2 == 0:
+        current_hour = now.hour
+
+        if current_hour % 2 == 0 and current_hour != last_run_hour and now.minute == 0:
             print(f"🕒 Running script at {now.strftime('%H:%M:%S')}")
+            last_run_hour = current_hour
             try:
                 run_scripts(get_news_us, "Get News")
                 run_scripts(ticker_news_us, "Match Tickers")
                 run_scripts(finbert_news_us, "FinBERT Sentiment")
                 run_scripts(news_to_database_us, "News to Database")
                 # ถ้าต้องการรันฝั่งไทยด้วย ให้ปลดคอมเมนต์ด้านล่าง
-                # run_scripts(get_news_th, "Get News TH")
-                # run_scripts(ticker_news_th, "Match Tickers TH")
-                # run_scripts(finbert_news_th, "FinBERT Sentiment TH")
-                # run_scripts(news_to_database_th, "News to Database TH")
+                run_scripts(get_news_th, "Get News TH")
+                run_scripts(ticker_news_th, "Match Tickers TH")
+                run_scripts(finbert_news_th, "FinBERT Sentiment TH")
+                run_scripts(news_to_database_th, "News to Database TH")
                 print("🎉 All scripts completed successfully.")
             except subprocess.CalledProcessError as e:
                 print(f"❌ Script failed: {e}")
             except Exception as e:
                 print(f"❌ Unexpected error: {e}")
-            clear_stock_csv()
+
+            # ลบไฟล์ CSV เฉพาะตอนเที่ยงคืน
+            if now.hour == 0:
+                print("🗑️ Clearing stock CSV files...")
+                clear_stock_csv()
+        else:
+            time.sleep(60)  # ตรวจสอบทุกนาทีเผื่อเวลาผ่านไปยังชั่วโมงใหม่
 
 def main():
-    # run_scripts(get_news_us, "Get News")
-    # run_scripts(ticker_news_us, "Match Tickers")
-    # run_scripts(finbert_news_us, "FinBERT Sentiment")
-    # run_scripts(news_to_database_us, "News to Database")
-    run_scripts(get_news_th, "Get News TH")
-    run_scripts(ticker_news_th, "Match Tickers TH")
-    run_scripts(finbert_news_th, "FinBERT Sentiment TH")
-    run_scripts(news_to_database_th, "News to Database TH")
     run_every_2_hours()
 
 if __name__ == "__main__":
