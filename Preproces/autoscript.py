@@ -27,8 +27,16 @@ ticker_news_th = ["./thai/ticker_news_Thai.py"]
 finbert_news_th = ["./thai/Finbert_News_Thai.py"]
 news_to_database_th = ["./thai/news_to_database_TH.py"]
 
+def update_yfinance():
+    print("🔄 กำลังอัปเดต `yfinance` เป็นเวอร์ชันล่าสุด...")
+    subprocess.run(["pip", "install", "--upgrade", "yfinance"], check=True)
+    print("✅ อัปเดต `yfinance` สำเร็จ")
+
+
 def run_scripts(scripts, group_name):
     print(f"\n▶️ Running {group_name}...")
+    # อัปเดต yfinance ก่อนรันสคริปต์
+    update_yfinance()
     for script in scripts:
         print(f"  → Running: {script}")
         subprocess.run([sys.executable, script], check=True)

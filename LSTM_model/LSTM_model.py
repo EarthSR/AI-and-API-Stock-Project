@@ -530,7 +530,7 @@ model.compile(
         "price_output": tf.keras.losses.Huber(delta=1.0),
         "direction_output": "binary_crossentropy"
     },
-    loss_weights={"price_output": 0.6, "direction_output": 0.4},
+    loss_weights={"price_output": 0.5, "direction_output": 0.5},
     metrics={
         "price_output": ["mae"],
         "direction_output": ["accuracy"]
