@@ -50,39 +50,63 @@ def clear_stock_csv():
     print("✅ ลบไฟล์ .csv เรียบร้อยแล้ว")
 
 
+
+
+
 def run_every_2_hours():
-    last_run_hour = None  # เพื่อไม่ให้รันซ้ำในชั่วโมงเดิม
+    last_run_hour = None  
+    print("select mode ")
+    print("1. auto run")
+    print("2. manual run")
+    mode = input("Enter mode (1 or 2): ")
+    if mode == "1":
+        while True:
+            now = datetime.datetime.now()
+            current_hour = now.hour
 
-    while True:
-        now = datetime.datetime.now()
-        current_hour = now.hour
+            if current_hour % 2 == 0 and current_hour != last_run_hour and now.minute == 0:
+                print(f"🕒 Running script at {now.strftime('%H:%M:%S')}")
+                last_run_hour = current_hour
+                try:
+                    run_scripts(get_news_us, "Get News")
+                    run_scripts(ticker_news_us, "Match Tickers")
+                    run_scripts(finbert_news_us, "FinBERT Sentiment")
+                    run_scripts(news_to_database_us, "News to Database")
+                    # ถ้าต้องการรันฝั่งไทยด้วย ให้ปลดคอมเมนต์ด้านล่าง
+                    run_scripts(get_news_th, "Get News TH")
+                    run_scripts(ticker_news_th, "Match Tickers TH")
+                    run_scripts(finbert_news_th, "FinBERT Sentiment TH")
+                    run_scripts(news_to_database_th, "News to Database TH")
+                    print("🎉 All scripts completed successfully.")
+                except subprocess.CalledProcessError as e:
+                    print(f"❌ Script failed: {e}")
+                except Exception as e:
+                    print(f"❌ Unexpected error: {e}")
 
-        if current_hour % 2 == 0 and current_hour != last_run_hour and now.minute == 0:
-            print(f"🕒 Running script at {now.strftime('%H:%M:%S')}")
-            last_run_hour = current_hour
-            try:
-                run_scripts(get_news_us, "Get News")
-                run_scripts(ticker_news_us, "Match Tickers")
-                run_scripts(finbert_news_us, "FinBERT Sentiment")
-                run_scripts(news_to_database_us, "News to Database")
-                # ถ้าต้องการรันฝั่งไทยด้วย ให้ปลดคอมเมนต์ด้านล่าง
-                run_scripts(get_news_th, "Get News TH")
-                run_scripts(ticker_news_th, "Match Tickers TH")
-                run_scripts(finbert_news_th, "FinBERT Sentiment TH")
-                run_scripts(news_to_database_th, "News to Database TH")
-                print("🎉 All scripts completed successfully.")
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Script failed: {e}")
-            except Exception as e:
-                print(f"❌ Unexpected error: {e}")
-
-            # ลบไฟล์ CSV เฉพาะตอนเที่ยงคืน
-            if now.hour == 0:
-                print("🗑️ Clearing stock CSV files...")
-                clear_stock_csv()
-        else:
-            time.sleep(60)  # ตรวจสอบทุกนาทีเผื่อเวลาผ่านไปยังชั่วโมงใหม่
-
+                # ลบไฟล์ CSV เฉพาะตอนเที่ยงคืน
+                if now.hour == 0:
+                    print("🗑️ Clearing stock CSV files...")
+                    clear_stock_csv()
+            else:
+                print(f"⏳ Waiting for the next run at {now.strftime('%H:%M:%S')}...")
+                time.sleep(60)  # ตรวจสอบทุกนาทีเผื่อเวลาผ่านไปยังชั่วโมงใหม่
+    else:
+        try:
+            run_scripts(get_news_us, "Get News")
+            run_scripts(ticker_news_us, "Match Tickers")
+            run_scripts(finbert_news_us, "FinBERT Sentiment")
+            run_scripts(news_to_database_us, "News to Database")
+            # ถ้าต้องการรันฝั่งไทยด้วย ให้ปลดคอมเมนต์ด้านล่าง
+            run_scripts(get_news_th, "Get News TH")
+            run_scripts(ticker_news_th, "Match Tickers TH")
+            run_scripts(finbert_news_th, "FinBERT Sentiment TH")
+            run_scripts(news_to_database_th, "News to Database TH")
+            print("🎉 All scripts completed successfully.")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Script failed: {e}")
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+            
 def main():
     run_every_2_hours()
 
