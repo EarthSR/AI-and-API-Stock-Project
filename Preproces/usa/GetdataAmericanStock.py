@@ -109,7 +109,7 @@ cleaned_data = pd.concat(data_list).reset_index().rename(columns={'index': 'Date
 cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume']]
 
 # บันทึกข้อมูลเป็นไฟล์ CSV
-cleaned_data.to_csv(os.path.join(CURRENT_DIR, "Stock", "stock_data_usa.csv"), index=False)
+cleaned_data.to_csv(os.path.join(os.path.dirname(__file__), "Stock", "stock_data_usa.csv"), index=False)
 
 # แสดงตัวอย่างข้อมูล
 print(cleaned_data.head())

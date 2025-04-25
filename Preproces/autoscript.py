@@ -4,6 +4,7 @@ import time
 import datetime
 import pandas as pd
 import subprocess
+import threading
 
 # ✅ แพตช์ undetected_chromedriver ถ้ามีการใช้งาน
 try:
@@ -27,6 +28,18 @@ ticker_news_th = ["./thai/ticker_news_Thai.py"]
 finbert_news_th = ["./thai/Finbert_News_Thai.py"]
 news_to_database_th = ["./thai/news_to_database_TH.py"]
 
+
+get_stock_us = ["./usa/GetdataAmericanStock.py"]
+get_financial_us = ["./usa/GetFinancialUSA.py"]
+daily_sentiment_us = ["./usa/dailysentiment_USA.py"]
+combine_all_us = ["./usa/combineall_USA.py"]
+stock_to_database_us = ["./usa/stock_to_database_USA.py"]
+daily_sentiment_th = ["./thai/dailysentiment_Thai.py"]
+get_financial_th = ["./thai/GetFinancialThai.py"]
+get_stock_th = ["./thai/GetdataThaiStocks.py"]
+combine_all_thai = ["./thai/combineall_Thai.py"]
+stock_to_database_th = ["./thai/stock_to_database_Thai.py"]
+
 def update_yfinance():
     print("🔄 กำลังอัปเดต `yfinance` เป็นเวอร์ชันล่าสุด...")
     subprocess.run(["pip", "install", "--upgrade", "yfinance"], check=True)
@@ -36,7 +49,6 @@ def update_yfinance():
 def run_scripts(scripts, group_name):
     print(f"\n▶️ Running {group_name}...")
     # อัปเดต yfinance ก่อนรันสคริปต์
-    update_yfinance()
     for script in scripts:
         print(f"  → Running: {script}")
         subprocess.run([sys.executable, script], check=True)
@@ -57,16 +69,43 @@ def clear_stock_csv():
                         print(f"⚠️ ไม่สามารถลบไฟล์ {file_path}: {e}")
     print("✅ ลบไฟล์ .csv เรียบร้อยแล้ว")
 
-
-
-
+def up_to_db():
+    if time.now().hour == 20 and time.now().minute == 0:
+        print("update to database stock...")
+        update_yfinance()
+        run_scripts(get_stock_us, "Get Stock US")
+        run_scripts(get_financial_us, "Get Financial US")
+        run_scripts(daily_sentiment_us, "Daily Sentiment US")
+        run_scripts(combine_all_us, "Combine All US")
+        run_scripts(stock_to_database_us, "Stock to Database")
+        print("✅ อัปเดตข้อมูลในฐานข้อมูลเรียบร้อยแล้ว US")
+    if time.now().hour == 9 and time.now().minute == 30:
+        print("update to database stock...")
+        update_yfinance()
+        run_scripts(get_stock_th, "Get Stock TH")
+        run_scripts(get_financial_th, "Get Financial TH") 
+        run_scripts(daily_sentiment_th, "Daily Sentiment TH")
+        run_scripts(combine_all_thai, "Combine All TH")   
+        run_scripts(stock_to_database_th, "Stock to Database")
+        print("✅ อัปเดตข้อมูลในฐานข้อมูลเรียบร้อยแล้ว TH")
 
 def run_every_2_hours():
-    last_run_hour = None  
+    last_run_hour = None
+    user_input = []
+    def ask_input():
+        user_input.append(input("Enter mode (1 or 2): "))  
     print("select mode ")
     print("1. auto run")
     print("2. manual run")
-    mode = input("Enter mode (1 or 2): ")
+    # สร้าง thread สำหรับ input
+    input_thread = threading.Thread(target=ask_input)
+    input_thread.start()
+    # รอ 10 วินาที
+    input_thread.join(timeout=10)
+    # ถ้าผู้ใช้พิมพ์ทันในเวลา 10 วิ
+    mode = user_input[0] if user_input else "1"
+    print("Selected mode:", mode)
+
     if mode == "1":
         while True:
             now = datetime.datetime.now()
