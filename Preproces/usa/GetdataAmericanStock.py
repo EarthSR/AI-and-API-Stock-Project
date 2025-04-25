@@ -12,8 +12,9 @@ sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 # ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
 CURRENT_DIR = os.getcwd()
 
-# ✅ โหลดค่าจาก .env
-load_dotenv()
+path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.env')
+load_dotenv(path)
+
 DB_HOST = os.getenv("DB_HOST")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
