@@ -135,7 +135,6 @@ def run_every_2_hours():
                 except Exception as e:
                     print(f"❌ Unexpected error: {e}")
             else:
-                print(f"⏳ Waiting for the next run at {now.strftime('%H:%M:%S')}...")
                 time.sleep(60)
     else:
         try:
