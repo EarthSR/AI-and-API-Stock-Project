@@ -129,11 +129,15 @@ def run_every_2_hours():
                     print(f"❌ Script failed: {e}")
                 except Exception as e:
                     print(f"❌ Unexpected error: {e}")
-
+                if time.now().hour == 20 and time.now().minute == 0:
+                    up_to_db()
+                if time.now().hour == 9 and time.now().minute == 30:
+                    up_to_db()
                 # ลบไฟล์ CSV เฉพาะตอนเที่ยงคืน
                 if now.hour == 0:
                     print("🗑️ Clearing stock CSV files...")
                     clear_stock_csv()
+                
             else:
                 print(f"⏳ Waiting for the next run at {now.strftime('%H:%M:%S')}...")
                 time.sleep(60)  # ตรวจสอบทุกนาทีเผื่อเวลาผ่านไปยังชั่วโมงใหม่
