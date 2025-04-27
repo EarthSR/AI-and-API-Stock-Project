@@ -184,7 +184,7 @@ def scrape_all_news():
 
     if len(all_news_data) > 0:
         df = pd.DataFrame(all_news_data)
-        df.to_csv(RAW_CSV_FILE, index=False, encoding='utf-8')
+        df.to_csv(RAW_CSV_FILE, mode='a', header=not os.path.exists(RAW_CSV_FILE), index=False, encoding='utf-8')
         print(f"[SAVED] ข่าวทั้งหมด {len(all_news_data)} ข่าวถูกบันทึกเรียบร้อย!")
     else:
         print("⚠️ ไม่มีข่าวให้บันทึก! ตรวจสอบว่าเว็บโหลดถูกต้องหรือไม่")

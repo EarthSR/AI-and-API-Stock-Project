@@ -113,7 +113,7 @@ def run_every_2_hours():
     input_thread.start()
     input_thread.join(timeout=10)
     mode = user_input[0] if user_input else "1"
-    print("Selected mode:", mode)
+    print("\nSelected mode:", mode)
 
     if mode == "1":
         while True:
