@@ -6,14 +6,15 @@ import numpy as np
 from dotenv import load_dotenv
 import sys
 
+# ปรับ encoding ของ stdout
 sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
-# โหลด env
-path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.env')
+# โหลดไฟล์ env
+path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.env')
 load_dotenv(path)
 
-# พาธ
-MERGED_CSV_PATH = os.path.join(os.path.dirname(__file__), "Stock", "merged_stock_sentiment_financial.csv")
+# กำหนด path
+MERGED_CSV_PATH = "../GRU_Model/merged_stock_sentiment_financial.csv"
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "Stock", "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -24,6 +25,7 @@ try:
     print(df.columns.tolist())
     print(f"✅ โหลดข้อมูลสำเร็จ: {len(df)} แถว")
 
+    # เปลี่ยนชื่อคอลัมน์
     df = df.rename(columns={
         "Ticker": "StockSymbol",
         "Open": "OpenPrice",
@@ -71,27 +73,35 @@ try:
         "AAPL": ("Apple Inc.", "America", "Technology", "Consumer Electronics", "Apple Inc. designs, manufactures, and markets smartphones, personal computers, tablets, wearables, and accessories worldwide. The company offers iPhone, a line of smartphones; Mac, a line of personal computers; iPad, a line of multi-purpose tablets; and wearables, home, and accessories comprising AirPods, Apple TV, Apple Watch, Beats products, and HomePod. It also provides AppleCare support and cloud services; and operates various platforms, including the App Store that allow customers to discover and download applications and digital content, such as books, music, video, games, and podcasts, as well as advertising services include third-party licensing arrangements and its own advertising platforms. In addition, the company offers various subscription-based services, such as Apple Arcade, a game subscription service; Apple Fitness+, a personalized fitness service; Apple Music, which offers users a curated listening experience with on-demand radio stations; Apple News+, a subscription news and magazine service; Apple TV+, which offers exclusive original content; Apple Card, a co-branded credit card; and Apple Pay, a cashless payment service, as well as licenses its intellectual property. The company serves consumers, and small and mid-sized businesses; and the education, enterprise, and government markets. It distributes third-party applications for its products through the App Store. The company also sells its products through its retail and online stores, and direct sales force; and third-party cellular network carriers, wholesalers, retailers, and resellers. Apple Inc. was founded in 1976 and is headquartered in Cupertino, California."),
     }
 
+    # สร้างคอลัมน์ใหม่
     df["Change"] = df["ClosePrice"] - df["OpenPrice"]
     df["Changepercen"] = (df["Change"] / df["OpenPrice"]) * 100
 
+    # เติมข้อมูลบริษัทจาก dict
     df["CompanyName"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[0])
     df["Market"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[1])
     df["Sector"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[2])
     df["Industry"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[3])
     df["Description"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[4])
+
     df["Sentiment"] = df["Sentiment"].fillna("Neutral")
     df = df.where(pd.notna(df), None)
 
+    # เตรียมข้อมูลสำหรับ Stock
     stock_data = df[["StockSymbol", "Market", "CompanyName", "Sector", "Industry", "Description"]].drop_duplicates(subset=["StockSymbol"], keep="last")
 
+    # เตรียมข้อมูลสำหรับ StockDetail
     stock_detail_data = df[[
-        "Date", "StockSymbol", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice", "PERatio", "ROE",
-        "QoQGrowth", "YoYGrowth", "TotalRevenue", "NetProfit", "EPS", "GrossMargin", "NetProfitMargin", "DebtToEquity",
-        "Changepercen", "Volume", "EVEBITDA", "MarketCap", "PBVRatio", "Dividend_Yield", "Sentiment"
+        "Date", "StockSymbol", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice", 
+        "PERatio", "ROE", "QoQGrowth", "YoYGrowth", "TotalRevenue", "NetProfit", 
+        "EPS", "GrossMargin", "NetProfitMargin", "DebtToEquity", "Changepercen", 
+        "Volume", "EVEBITDA", "MarketCap", "PBVRatio", "Dividend_Yield", "Sentiment"
     ]]
 
     stock_detail_data["PredictionTrend"] = None
     stock_detail_data["PredictionClose"] = None
+
+    # จัดการข้อมูลผิดปกติ
     stock_detail_data["YoYGrowth"] = pd.to_numeric(stock_detail_data["YoYGrowth"], errors='coerce').fillna(0)
     stock_detail_data["YoYGrowth"] = np.clip(stock_detail_data["YoYGrowth"], -100, 100)
     stock_detail_data["Volume"] = stock_detail_data["Volume"].replace([np.inf, -np.inf], np.nan).fillna(0).astype(int)
@@ -112,21 +122,19 @@ try:
         def convert_nan_to_none(data_list):
             return [[None if (isinstance(x, float) and np.isnan(x)) else x for x in row] for row in data_list]
 
+        # Query สำหรับ Stock table
         insert_stock_query = """
         INSERT INTO Stock (StockSymbol, Market, CompanyName, Sector, Industry, Description)
         VALUES (%s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE 
-            Market=COALESCE(VALUES(Market), Market),
-            CompanyName=COALESCE(VALUES(CompanyName), CompanyName),
-            Sector=COALESCE(VALUES(Sector), Sector),
-            Industry=COALESCE(VALUES(Industry), Industry),
-            Description=COALESCE(VALUES(Description), Description);
+            Market=VALUES(Market),
+            CompanyName=VALUES(CompanyName),
+            Sector=VALUES(Sector),
+            Industry=VALUES(Industry),
+            Description=VALUES(Description);
         """
 
-        stock_values = convert_nan_to_none(stock_data.values.tolist())
-        cursor.executemany(insert_stock_query, stock_values)
-        print(f"✅ บันทึกข้อมูลลง Stock: {len(stock_values)} รายการ")
-
+        # Query สำหรับ StockDetail table
         insert_stock_detail_query = """
         INSERT INTO StockDetail (
             Date, StockSymbol, OpenPrice, HighPrice, LowPrice, ClosePrice,
@@ -171,15 +179,16 @@ try:
             neutral_news = COALESCE(VALUES(neutral_news), neutral_news);
         """
 
-                # เพิ่มคอลัมน์ข่าวเข้าไป
+        # เพิ่มคอลัมน์ข่าวเข้าไป
         stock_detail_data["positive_news"] = df["positive_news"].fillna(0)
         stock_detail_data["negative_news"] = df["negative_news"].fillna(0)
         stock_detail_data["neutral_news"] = df["neutral_news"].fillna(0)
-        
+
         stock_detail_values = convert_nan_to_none(stock_detail_data.values.tolist())
         batch_size = 1000
         total_rows = len(stock_detail_values)
 
+        # Insert แบบ batch
         for i in range(0, total_rows, batch_size):
             batch = stock_detail_values[i:i+batch_size]
             cursor.executemany(insert_stock_detail_query, batch)

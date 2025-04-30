@@ -49,18 +49,27 @@ def run_scripts(scripts, group_name):
     print(f"\n▶️ Running {group_name}...")
     for script in scripts:
         print(f"  → Running: {script}")
-        subprocess.run([sys.executable, script], check=True)
+        result = subprocess.run([sys.executable, script], check=False)
+        if result.returncode != 0:
+            print(f"❌ Script failed: {script}")
+            return False  # ถ้า script ล้มเหลวให้หยุดการทำงาน
     print(f"✅ Done: {group_name}")
+    return True  # ถ้าผ่านการทำงานทั้งหมด
+
 
 def run_all_news_scripts():
-    run_scripts(get_news_us, "Get News")
-    run_scripts(ticker_news_us, "Match Tickers")
-    run_scripts(finbert_news_us, "FinBERT Sentiment")
-    run_scripts(news_to_database_us, "News to Database")
-    run_scripts(get_news_th, "Get News TH")
-    run_scripts(ticker_news_th, "Match Tickers TH")
-    run_scripts(finbert_news_th, "FinBERT Sentiment TH")
-    run_scripts(news_to_database_th, "News to Database TH")
+    if not run_scripts(get_news_us, "Get News US"):
+        print("❌ Failed to fetch US news.")
+        return
+    run_scripts(ticker_news_us, "Match Tickers US")
+    run_scripts(finbert_news_us, "FinBERT Sentiment US")
+    run_scripts(news_to_database_us, "News to Database US")
+
+    if run_scripts(get_news_th, "Get News TH"):
+        if run_scripts(ticker_news_th, "Match Tickers TH"):
+            if run_scripts(finbert_news_th, "FinBERT Sentiment TH"):
+                run_scripts(news_to_database_th, "News to Database TH")
+
 
 def clear_stock_csv():
     folder_paths = ["./usa/News", "./usa", "./thai/News", "./thai"]
