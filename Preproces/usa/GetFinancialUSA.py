@@ -11,9 +11,9 @@ from webdriver_manager.chrome import ChromeDriverManager  # ใช้ WebDriverM
 import re
 import sys
 import os
+import io
 
-# ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
-sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
 CURRENT_DIR = os.getcwd()

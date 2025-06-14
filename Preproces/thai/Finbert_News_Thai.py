@@ -5,8 +5,9 @@ import os
 import torch
 from multiprocessing import freeze_support
 import sys
+import io
 
-sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 

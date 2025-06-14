@@ -14,8 +14,9 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 import sys
 from dotenv import load_dotenv, find_dotenv
+import io
 
-sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 load_dotenv(find_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.env')))
 # 🔹 ตั้งค่าการเชื่อมต่อฐานข้อมูล
@@ -80,8 +81,6 @@ def parse_and_format_datetime(date_str):
             continue
     return None
 
-
-
 def fetch_news_content(real_link):
     try:
         response = requests.get(real_link, timeout=5)
@@ -122,7 +121,6 @@ def fetch_news_content(real_link):
     except requests.exceptions.RequestException as e:
         print(f"Error fetching content: {e}")
         return 'No Date', 'Content not found', 'No Image'
-
 
 def scrape_news_from_category(category_name, url):
     print(f" [START] ดึงข่าวจาก {category_name}")
@@ -171,6 +169,13 @@ def scrape_news_from_category(category_name, url):
 
     return news_data
 
+def ensure_csv_file_exists():
+    """สร้างไฟล์ CSV ว่างพร้อม header ถ้ายังไม่มี"""
+    if not os.path.exists(RAW_CSV_FILE):
+        # สร้างไฟล์ CSV ว่างพร้อม header
+        empty_df = pd.DataFrame(columns=["title", "date", "link", "description", "image"])
+        empty_df.to_csv(RAW_CSV_FILE, index=False, encoding='utf-8')
+        print(f"[CREATED] สร้างไฟล์ CSV ใหม่: {RAW_CSV_FILE}")
 
 def scrape_all_news():
     print(" [START] เริ่มต้นดึงข่าว...")
@@ -182,14 +187,63 @@ def scrape_all_news():
             result = future.result()
             all_news_data.extend(result)
 
+    # ตรวจสอบว่ามีไฟล์ CSV อยู่หรือไม่ ถ้าไม่มีให้สร้าง
+    ensure_csv_file_exists()
+
     if len(all_news_data) > 0:
         df = pd.DataFrame(all_news_data)
-        df.to_csv(RAW_CSV_FILE, mode='a', header=not os.path.exists(RAW_CSV_FILE), index=False, encoding='utf-8')
+        df.to_csv(RAW_CSV_FILE, mode='a', header=False, index=False, encoding='utf-8')
         print(f"[SAVED] ข่าวทั้งหมด {len(all_news_data)} ข่าวถูกบันทึกเรียบร้อย!")
-        return True
+        return {
+            "status": "success",
+            "count": len(all_news_data),
+            "file_path": RAW_CSV_FILE,
+            "message": f"ดึงข่าวใหม่ {len(all_news_data)} ข่าว"
+        }
     else:
-        print("⚠️ ไม่มีข่าวให้บันทึก! ตรวจสอบว่าเว็บโหลดถูกต้องหรือไม่")
-        return False
+        print("⚠️ ไม่มีข่าวใหม่ให้บันทึก!")
+        return {
+            "status": "no_new_data",
+            "count": 0,
+            "file_path": RAW_CSV_FILE,
+            "message": "ไม่มีข่าวใหม่ แต่ไฟล์ CSV พร้อมใช้งาน"
+        }
+
+def get_scraping_result():
+    """ฟังก์ชันหลักที่จะเรียกใช้ - รับประกันว่าจะมี output เสมอ"""
+    try:
+        result = scrape_all_news()
+        
+        # ตรวจสอบว่าไฟล์ CSV มีอยู่และพร้อมใช้งาน
+        if os.path.exists(RAW_CSV_FILE):
+            file_size = os.path.getsize(RAW_CSV_FILE)
+            result["file_exists"] = True
+            result["file_size"] = file_size
+        else:
+            result["file_exists"] = False
+            result["file_size"] = 0
+            
+        return result
+        
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาด: {e}")
+        # แม้เกิดข้อผิดพลาดก็ยังคืนค่า output
+        ensure_csv_file_exists()
+        return {
+            "status": "error",
+            "count": 0,
+            "file_path": RAW_CSV_FILE,
+            "message": f"เกิดข้อผิดพลาด: {str(e)}",
+            "file_exists": os.path.exists(RAW_CSV_FILE),
+            "file_size": os.path.getsize(RAW_CSV_FILE) if os.path.exists(RAW_CSV_FILE) else 0
+        }
 
 if __name__ == "__main__":
-    scrape_all_news()
+    result = get_scraping_result()
+    print(f"\n📊 ผลลัพธ์การดึงข่าว:")
+    print(f"   สถานะ: {result['status']}")
+    print(f"   จำนวนข่าว: {result['count']}")
+    print(f"   ไฟล์: {result['file_path']}")
+    print(f"   ข้อความ: {result['message']}")
+    print(f"   ไฟล์มีอยู่: {result['file_exists']}")
+    print(f"   ขนาดไฟล์: {result['file_size']} bytes")

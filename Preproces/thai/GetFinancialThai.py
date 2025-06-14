@@ -12,8 +12,9 @@ import re
 import sys
 import os
 
-# ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
-sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+import io
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
 CURRENT_DIR = os.getcwd()

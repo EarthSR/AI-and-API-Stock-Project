@@ -209,13 +209,15 @@ if __name__ == "__main__":
     # 3) Merge ฝั่งไทย
     merged_df_th = merge_stock_financial_sentiment(
         stock_filepath= os.path.join(os.path.dirname(__file__), "Stock", "stock_data_thai.csv"),
-        financial_filepath= os.path.join(os.path.dirname(__file__), "Stock", "financial_data_thai.csv"),
+        financial_filepath= os.path.join(os.path.dirname(__file__), "Stock", "Financial_Thai_Quarter.csv"),
         sentiment_df=sentiment_df,
         country_name="thai"
     )
     
     # 6) บันทึกเป็น CSV ไฟล์สุดท้าย
-    merged_df_th.to_csv("merged_stock_sentiment_financial.csv", index=False)
+    
+    # Assuming merged_df_th is your DataFrame
+    merged_df_th.to_csv(os.path.join(os.path.dirname(__file__), "Stock", "merged_stock_sentiment_financial.csv"), index=False)
     
     # 7) ตรวจสอบตัวอย่าง 10 แถว
     print(merged_df_th.head(10))

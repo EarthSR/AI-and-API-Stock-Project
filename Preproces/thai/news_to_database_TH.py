@@ -5,9 +5,9 @@ from dotenv import load_dotenv
 import sys
 import os
 from tqdm import tqdm
+import io
 
-# ✅ ป้องกัน UnicodeEncodeError (รองรับภาษาไทย/ข้ามอีโมจิ)
-sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # ✅ โหลด .env สำหรับการเชื่อมต่อ MySQL
 path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.env')

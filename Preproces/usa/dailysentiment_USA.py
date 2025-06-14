@@ -1,7 +1,10 @@
 import pandas as pd
 import os
 import pandas as pd
+import io
+import sys
 
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 # ===== STEP 1: Load Dataset =====
 file_path = os.path.join(os.path.dirname(__file__), "News", "USA_News_Hybrid.csv")  # เปลี่ยนเป็น path ที่คุณเก็บไฟล์
 df = pd.read_csv(file_path)

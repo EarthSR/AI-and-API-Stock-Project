@@ -6,8 +6,9 @@ import os
 import mysql.connector
 from dotenv import load_dotenv
 
-# ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
-sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+import io
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # ✅ กำหนดรายชื่อหุ้นอเมริกา (Top 10)
 tickers = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
@@ -47,13 +48,13 @@ for ticker in tickers:
     ticker_data.index = pd.to_datetime(ticker_data.index)
     all_dates = pd.date_range(start=start_date, end=end_date, freq='D')
     ticker_data = ticker_data.reindex(all_dates)
-
+    ticker_data['Changepercen'] = (ticker_data['Close'] - ticker_data['Open']) / ticker_data['Open'] * 100
     # ✅ เติม NaN ด้วย rolling mean จากค่าเดิม
-    if ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']].isnull().sum().sum() > 0:
+    if ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']].isnull().sum().sum() > 0:
         print(f"⚠️ พบค่า NaN ในข้อมูลของ {ticker}, ใช้ค่าเฉลี่ยย้อนหลังเติมแทน")
 
-    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']] = (
-        ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']]
+    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']] = (
+        ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']]
         .ffill()
         .rolling(window=3, min_periods=1).mean()
         .fillna(0)
@@ -64,7 +65,8 @@ for ticker in tickers:
 
 # ✅ รวมเป็น DataFrame เดียว
 cleaned_data = pd.concat(data_list).reset_index().rename(columns={'index': 'Date'})
-cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume']]
+cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume' , 
+                             'Changepercen']]
 
 # ✅ บันทึกเป็น CSV
 output_path = os.path.join(CURRENT_DIR, "Stock", "stock_data_usa.csv")

@@ -4,6 +4,10 @@ from tqdm import tqdm
 import pandas as pd
 import time
 import os
+import io
+import sys
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 if not spacy.prefer_gpu():
     print("⚠️ ไม่พบ GPU หรือ spaCy ไม่ได้ตั้งค่า GPU")

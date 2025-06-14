@@ -5,9 +5,9 @@ import sys
 import os
 import mysql.connector
 from dotenv import load_dotenv
+import io
 
-# ✅ ป้องกัน UnicodeEncodeError (ข้ามอีโมจิที่ไม่รองรับ)
-sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
 CURRENT_DIR = os.getcwd()
@@ -82,13 +82,13 @@ for ticker in tickers:
     ticker_data.index = pd.to_datetime(ticker_data.index)  # แปลงเป็น datetime index
     all_dates = pd.date_range(start=latest_dates[ticker], end=end_date, freq='D')  # ใช้ start_date ที่อัปเดตจากฐานข้อมูล
     ticker_data = ticker_data.reindex(all_dates)
-
+    ticker_data['Changepercen'] = (ticker_data['Close'] - ticker_data['Open']) / ticker_data['Open'] * 100
     # 🔹 ใช้ค่า **วันก่อนหน้า** แทน NaN ก่อนเติม 0
-    if ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']].isnull().sum().sum() > 0:
+    if ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']].isnull().sum().sum() > 0:
         print(f"⚠️ พบค่า NaN ในข้อมูลของ {stock_name}, ใช้ค่าเฉลี่ยย้อนหลังเติมแทน")
 
-    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']] = (
-        ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']]
+    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']] = (
+        ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']]
         .ffill()
         .rolling(window=3, min_periods=1).mean()
         .fillna(0)  # ✅ ถ้า ffill() ยังมีค่า NaN ให้เติม 0
@@ -103,7 +103,8 @@ for ticker in tickers:
 cleaned_data = pd.concat(data_list).reset_index().rename(columns={'index': 'Date'})
 
 # ตั้งลำดับคอลัมน์ให้ถูกต้อง
-cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume']]
+cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume' , 
+                             'Changepercen']]
 
 # บันทึกข้อมูลเป็นไฟล์ CSV
 csv_path = os.path.join(CURRENT_DIR, "Stock", "stock_data_thai.csv")
