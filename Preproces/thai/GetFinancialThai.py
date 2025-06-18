@@ -11,7 +11,6 @@ from webdriver_manager.chrome import ChromeDriverManager  # ใช้ WebDriverM
 import re
 import sys
 import os
-
 import io
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -44,7 +43,7 @@ def clean_year(value):
                 return str(year - 543)  # แปลงจาก พ.ศ. เป็น ค.ศ.
     return value
 
-# ฟังก์ชันแปลงชื่อคอลัมน์จากภาษาไทยเป็นภาษาอังกฤษ
+# ฟังก์ชันสำหรับแปลงชื่อคอลัมน์จากภาษาไทยเป็นภาษาอังกฤษ
 column_translation = {
     "รายได้รวม": "Total Revenue",
     "การเติบโตต่อไตรมาส (%)": "QoQ Growth (%)",
@@ -135,26 +134,25 @@ def fetch_full_financial_data(stock):
             # ✅ สร้าง DataFrame
             df = pd.DataFrame(values_dict, index=[row.find("td").text.strip() for row in rows[1:]]).T
             df.insert(0, "Stock", stock)
-            # ✅ แปลงปีจาก พ.ศ. เป็น ค.ศ. ใน Quarter
+            # ✅ แปลง Quarter ให้เป็น "4Q2024" แทน "4Q2567"
             df.insert(1, "Quarter", df.index.map(lambda x: x[:2] + clean_year(x[2:])))
-            df.reset_index(drop=True, inplace=True)
 
-            # แปลงปีเป็น ค.ศ.
-            df['Quarter'] = df['Quarter'].apply(clean_year)
-            
             # ✅ ดึงค่า 'Year' ออกจาก 'Quarter'
             df["Year"] = df["Quarter"].apply(lambda x: int(x[2:]))
-            all_data.append(df)
 
             # ✅ สร้างตัวเลขลำดับของ Quarter เพื่อช่วยเรียงให้ถูกต้อง
             quarter_map = {"4Q": 4, "3Q": 3, "2Q": 2, "1Q": 1}
             df["Quarter_Order"] = df["Quarter"].apply(lambda x: quarter_map[x[:2]])
-
+            
             # ✅ เรียงลำดับข้อมูลตาม Year ก่อน แล้วตามลำดับ Quarter
             df = df.sort_values(by=["Year", "Quarter_Order"], ascending=[False, False])
 
             # ✅ ลบคอลัมน์ที่ใช้ช่วยเรียง
             df = df.drop(columns=["Year", "Quarter_Order"])
+
+            # แปลงปีเป็น ค.ศ.
+            df['Quarter'] = df['Quarter'].apply(clean_year)
+            all_data.append(df)
 
         # ✅ รวมทุกตารางเข้าด้วยกัน
         full_df = pd.concat(all_data, axis=1).loc[:, ~pd.concat(all_data, axis=1).columns.duplicated()]
@@ -182,7 +180,7 @@ def fetch_full_financial_data(stock):
         # ✅ เรียงปีจากใหม่ไปเก่า
         full_df = full_df.sort_values(by="Quarter", ascending=False)
 
-        # ✅ จัดเรียงคอลัมน์ให้ Stock & Year อยู่ข้างหน้า
+        # ✅ จัดเรียงคอลัมน์ให้ Stock & Quarter อยู่ข้างหน้า
         columns_order = ["Stock", "Quarter"] + [col for col in full_df.columns if col not in ["Stock", "Quarter"]]
         full_df = full_df[columns_order]
 
@@ -207,7 +205,7 @@ for stock in stocks:
 final_df = pd.concat(all_dfs, ignore_index=True)
 
 # ✅ บันทึกข้อมูลลง CSV
-final_df.to_csv(os.path.join("Stock", "Financial_Thai_Quarter.csv"), index=False)
+final_df.to_csv(os.path.join(CURRENT_DIR,"thai", "Stock", "Financial_Thai_Quarter.csv"), index=False)
 print("✅ บันทึกข้อมูลลง 'Financial_Thai_Quarter.csv' สำเร็จ!")
 
 # ✅ ปิด WebDriver

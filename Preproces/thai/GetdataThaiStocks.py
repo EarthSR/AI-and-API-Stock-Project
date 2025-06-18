@@ -107,7 +107,7 @@ cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', '
                              'Changepercen']]
 
 # บันทึกข้อมูลเป็นไฟล์ CSV
-csv_path = os.path.join(CURRENT_DIR, "Stock", "stock_data_thai.csv")
+csv_path = os.path.join(CURRENT_DIR,"thai", "Stock", "stock_data_thai.csv")
 cleaned_data.to_csv(csv_path, index=False)
 
 # แสดงตัวอย่างข้อมูล

@@ -8,8 +8,6 @@ import threading
 import json
 import logging
 import platform
-import subprocess
-import sys
 from plyer import notification  # เพิ่มการนำเข้า plyer สำหรับแจ้งเตือน
 
 # ✅ ตั้งค่า logging
@@ -22,7 +20,17 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
+def safe_notify(title, message, app_name, timeout):
+    max_length = 256
+    if len(message) > max_length:
+        message = message[:max_length-3] + "..."  # ตัดข้อความและเพิ่ม ...
+        logger.warning(f"ข้อความแจ้งเตือนยาวเกิน {max_length} ตัวอักษร ตัดเหลือ: {message}")
+    notification.notify(  # เปลี่ยนจาก safe_notify เป็น notification.notify
+        title=title,
+        message=message,
+        app_name=app_name,
+        timeout=timeout
+    )
 # ✅ แพตช์ undetected_chromedriver ถ้ามีการใช้งาน
 try:
     import undetected_chromedriver as uc
@@ -32,7 +40,7 @@ try:
 
     uc.Chrome.__del__ = patched_del
     logger.info("✅ แพตช์ undetected_chromedriver สำเร็จ")
-    notification.notify(
+    safe_notify(
         title="System Info",
         message="แพตช์ undetected_chromedriver สำเร็จ",
         app_name="Stock Data Updater",
@@ -40,7 +48,7 @@ try:
     )
 except ImportError:
     logger.info("ℹ️ ไม่พบ undetected_chromedriver - ข้าม")
-    notification.notify(
+    safe_notify(
         title="System Info",
         message="ไม่พบ undetected_chromedriver - ข้าม",
         app_name="Stock Data Updater",
@@ -83,7 +91,7 @@ def update_chrome():
     if system == "Windows":
         logger.info("Updating Chrome on Windows...")
         subprocess.run(["powershell", "-Command", "Start-ScheduledTask -TaskName 'GoogleUpdateTaskMachineUA'"], check=True)
-        notification.notify(
+        safe_notify(
             title="Chrome Update",
             message="อัปเดต Chrome บน Windows สำเร็จ",
             app_name="Stock Data Updater",
@@ -94,7 +102,7 @@ def update_chrome():
         logger.info("Updating Chrome on Linux...")
         subprocess.run(["sudo", "apt", "update"], check=True)
         subprocess.run(["sudo", "apt", "--only-upgrade", "install", "google-chrome-stable", "-y"], check=True)
-        notification.notify(
+        safe_notify(
             title="Chrome Update",
             message="อัปเดต Chrome บน Linux สำเร็จ",
             app_name="Stock Data Updater",
@@ -105,7 +113,7 @@ def update_chrome():
         logger.info("Updating Chrome on macOS...")
         subprocess.run(["brew", "update"], check=True)
         subprocess.run(["brew", "upgrade", "--cask", "google-chrome"], check=True)
-        notification.notify(
+        safe_notify(
             title="Chrome Update",
             message="อัปเดต Chrome บน macOS สำเร็จ",
             app_name="Stock Data Updater",
@@ -114,7 +122,7 @@ def update_chrome():
 
     else:
         logger.error("OS not supported.")
-        notification.notify(
+        safe_notify(
             title="Chrome Update Error",
             message="ระบบปฏิบัติการไม่รองรับ",
             app_name="Stock Data Updater",
@@ -134,7 +142,7 @@ def update_yfinance():
         )
         if result.returncode == 0:
             logger.info("✅ อัปเดต yfinance สำเร็จ")
-            notification.notify(
+            safe_notify(
                 title="yfinance Update",
                 message="อัปเดต yfinance สำเร็จ",
                 app_name="Stock Data Updater",
@@ -143,7 +151,7 @@ def update_yfinance():
             return True
         else:
             logger.error(f"❌ อัปเดต yfinance ล้มเหลว: {result.stderr}")
-            notification.notify(
+            safe_notify(
                 title="yfinance Update Error",
                 message=f"อัปเดต yfinance ล้มเหลว: {result.stderr}",
                 app_name="Stock Data Updater",
@@ -152,7 +160,7 @@ def update_yfinance():
             return False
     except subprocess.TimeoutExpired:
         logger.error("❌ อัปเดต yfinance หมดเวลา")
-        notification.notify(
+        safe_notify(
             title="yfinance Update Error",
             message="อัปเดต yfinance หมดเวลา",
             app_name="Stock Data Updater",
@@ -161,7 +169,7 @@ def update_yfinance():
         return False
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในการอัปเดต yfinance: {e}")
-        notification.notify(
+        safe_notify(
             title="yfinance Update Error",
             message=f"เกิดข้อผิดพลาดในการอัปเดต yfinance: {e}",
             app_name="Stock Data Updater",
@@ -173,7 +181,7 @@ def validate_script_exists(script_path):
     """ตรวจสอบว่าไฟล์สคริปต์มีอยู่จริง"""
     if not os.path.exists(script_path):
         logger.warning(f"⚠️ ไม่พบไฟล์: {script_path}")
-        notification.notify(
+        safe_notify(
             title="Script Error",
             message=f"ไม่พบไฟล์สคริปต์: {script_path}",
             app_name="Stock Data Updater",
@@ -183,17 +191,13 @@ def validate_script_exists(script_path):
     return True
 
 def run_scripts(scripts, group_name, critical=True):
-    """
-    รันสคริปต์ตามลำดับ
-    critical: ถ้า True จะหยุดเมื่อเจอข้อผิดพลาด, ถ้า False จะทำต่อ
-    """
     logger.info(f"\n▶️ Running {group_name}...")
     
     for script in scripts:
         if not validate_script_exists(script):
             if critical:
                 logger.error(f"❌ ไม่พบไฟล์สคริปต์: {script}")
-                notification.notify(
+                safe_notify(
                     title="Script Error",
                     message=f"ไม่พบไฟล์สคริปต์: {script}",
                     app_name="Stock Data Updater",
@@ -208,33 +212,34 @@ def run_scripts(scripts, group_name, critical=True):
         
         try:
             result = subprocess.run(
-                [sys.executable, script], 
+                [sys.executable, script],
                 capture_output=True,
                 text=True,
-                encoding="utf-8", 
-                timeout=1800
+                encoding='utf-8',
+                errors='replace',
+                timeout=300  # ตั้ง timeout เป็น 5 นาที
             )
+            if result.stdout.strip():
+                logger.info(f"Output from {script}:\n{result.stdout}")
+            if result.stderr.strip():
+                logger.info(f"Stderr from {script}:\n{result.stderr}")
             
             if result.returncode == 0:
                 logger.info(f"✅ สำเร็จ: {script}")
-                notification.notify(
+                safe_notify(
                     title="Script Success",
                     message=f"สคริปต์ {script} ทำงานสำเร็จ",
                     app_name="Stock Data Updater",
                     timeout=10
                 )
-                if result.stdout.strip():
-                    logger.debug(f"Output: {result.stdout.strip()}")
             else:
-                logger.error(f"❌ Script failed: {script}")
-                logger.error(f"Error: {result.stderr}")
-                notification.notify(
+                logger.error(f"❌ Script failed: {script} (returncode: {result.returncode})")
+                safe_notify(
                     title="Script Failed",
-                    message=f"สคริปต์ {script} ล้มเหลว: {result.stderr}",
+                    message=f"สคริปต์ {script} ล้มเหลว: {result.stderr}"[:253] + "..." if len(result.stderr) > 253 else f"สคริปต์ {script} ล้มเหลว: {result.stderr}",
                     app_name="Stock Data Updater",
                     timeout=10
                 )
-                
                 if critical:
                     return False
                 else:
@@ -242,7 +247,7 @@ def run_scripts(scripts, group_name, critical=True):
                     
         except subprocess.TimeoutExpired:
             logger.error(f"❌ Script timeout: {script}")
-            notification.notify(
+            safe_notify(
                 title="Script Timeout",
                 message=f"สคริปต์ {script} หมดเวลา",
                 app_name="Stock Data Updater",
@@ -252,7 +257,7 @@ def run_scripts(scripts, group_name, critical=True):
                 return False
         except Exception as e:
             logger.error(f"❌ Unexpected error running {script}: {e}")
-            notification.notify(
+            safe_notify(
                 title="Unexpected Error",
                 message=f"เกิดข้อผิดพลาดใน {script}: {e}",
                 app_name="Stock Data Updater",
@@ -262,7 +267,7 @@ def run_scripts(scripts, group_name, critical=True):
                 return False
     
     logger.info(f"✅ Done: {group_name}")
-    notification.notify(
+    safe_notify(
         title="Group Completed",
         message=f"กลุ่ม {group_name} เสร็จสิ้น",
         app_name="Stock Data Updater",
@@ -273,7 +278,7 @@ def run_scripts(scripts, group_name, critical=True):
 def run_all_news_scripts():
     """รันสคริปต์ข่าวทั้งหมด"""
     logger.info("🗞️ เริ่มต้นการดึงข่าว...")
-    notification.notify(
+    safe_notify(
         title="News Update",
         message="เริ่มต้นการดึงข่าว...",
         app_name="Stock Data Updater",
@@ -283,7 +288,7 @@ def run_all_news_scripts():
     # ข่าวสหรัฐ - ถ้าล้มเหลวให้หยุด
     if not run_scripts(SCRIPTS["news_us"]["get_news"], "Get News US", critical=True):
         logger.error("❌ Failed to fetch US news - หยุดการทำงาน")
-        notification.notify(
+        safe_notify(
             title="News Update Error",
             message="ดึงข่าวสหรัฐล้มเหลว - หยุดการทำงาน",
             app_name="Stock Data Updater",
@@ -303,7 +308,7 @@ def run_all_news_scripts():
         run_scripts(SCRIPTS["news_th"]["news_to_database"], "News to Database TH", critical=False)
     else:
         logger.warning("⚠️ ดึงข่าวไทยไม่สำเร็จ - ข้ามการประมวลผล")
-        notification.notify(
+        safe_notify(
             title="News Update Warning",
             message="ดึงข่าวไทยไม่สำเร็จ - ข้ามการประมวลผล",
             app_name="Stock Data Updater",
@@ -320,7 +325,7 @@ def clear_stock_csv():
     for folder in folder_paths:
         if not os.path.exists(folder) or not os.path.isdir(folder):
             logger.warning(f"⚠️ ไม่พบโฟลเดอร์: {folder}")
-            notification.notify(
+            safe_notify(
                 title="Folder Error",
                 message=f"ไม่พบโฟลเดอร์: {folder}",
                 app_name="Stock Data Updater",
@@ -339,7 +344,7 @@ def clear_stock_csv():
                         deleted_count += 1
                 except Exception as e:
                     logger.error(f"⚠️ ไม่สามารถลบไฟล์ {file_path}: {e}")
-                    notification.notify(
+                    safe_notify(
                         title="File Deletion Error",
                         message=f"ไม่สามารถลบไฟล์ {file_path}: {e}",
                         app_name="Stock Data Updater",
@@ -347,7 +352,7 @@ def clear_stock_csv():
                     )
         except Exception as e:
             logger.error(f"❌ ไม่สามารถเข้าถึงโฟลเดอร์ {folder}: {e}")
-            notification.notify(
+            safe_notify(
                 title="Folder Access Error",
                 message=f"ไม่สามารถเข้าถึงโฟลเดอร์ {folder}: {e}",
                 app_name="Stock Data Updater",
@@ -355,7 +360,7 @@ def clear_stock_csv():
             )
     
     logger.info(f"✅ ลบไฟล์ .csv เรียบร้อยแล้ว ({deleted_count} ไฟล์)")
-    notification.notify(
+    safe_notify(
         title="File Deletion",
         message=f"ลบไฟล์ .csv เรียบร้อยแล้ว ({deleted_count} ไฟล์)",
         app_name="Stock Data Updater",
@@ -371,7 +376,7 @@ def load_market_holidays():
                 return json.load(f).get("TH", [])
         else:
             logger.warning(f"⚠️ ไม่พบไฟล์ {holidays_file}")
-            notification.notify(
+            safe_notify(
                 title="Holiday File Error",
                 message=f"ไม่พบไฟล์ {holidays_file}",
                 app_name="Stock Data Updater",
@@ -380,7 +385,7 @@ def load_market_holidays():
             return []
     except Exception as e:
         logger.error(f"❌ โหลดวันหยุด TH ล้มเหลว: {e}")
-        notification.notify(
+        safe_notify(
             title="Holiday File Error",
             message=f"โหลดวันหยุด TH ล้มเหลว: {e}",
             app_name="Stock Data Updater",
@@ -395,7 +400,7 @@ def is_market_open(now, market):
 
     if weekday >= 5:
         logger.info(f"📅 วันนี้เป็นวันหยุดสุดสัปดาห์: {today}")
-        notification.notify(
+        safe_notify(
             title="Market Closed",
             message=f"วันนี้เป็นวันหยุดสุดสัปดาห์: {today}",
             app_name="Stock Data Updater",
@@ -408,7 +413,7 @@ def is_market_open(now, market):
         is_holiday = today.strftime("%Y-%m-%d") in holidays
         if is_holiday:
             logger.info(f"📅 วันนี้เป็นวันหยุดตลาดไทย: {today}")
-            notification.notify(
+            safe_notify(
                 title="Market Closed",
                 message=f"วันนี้เป็นวันหยุดตลาดไทย: {today}",
                 app_name="Stock Data Updater",
@@ -423,7 +428,7 @@ def is_market_open(now, market):
             is_working = cal.is_working_day(today)
             if not is_working:
                 logger.info(f"📅 วันนี้เป็นวันหยุดตลาดสหรัฐ: {today}")
-                notification.notify(
+                safe_notify(
                     title="Market Closed",
                     message=f"วันนี้เป็นวันหยุดตลาดสหรัฐ: {today}",
                     app_name="Stock Data Updater",
@@ -432,7 +437,7 @@ def is_market_open(now, market):
             return is_working
         except ImportError:
             logger.error("❌ ไม่พบ workalendar - ติดตั้งด้วย: pip install workalendar")
-            notification.notify(
+            safe_notify(
                 title="Module Error",
                 message="ไม่พบ workalendar - ติดตั้งด้วย: pip install workalendar",
                 app_name="Stock Data Updater",
@@ -441,7 +446,7 @@ def is_market_open(now, market):
             return weekday < 5
         except Exception as e:
             logger.error(f"❌ ตรวจสอบวันตลาด US ล้มเหลว: {e}")
-            notification.notify(
+            safe_notify(
                 title="Market Check Error",
                 message=f"ตรวจสอบวันตลาด US ล้มเหลว: {e}",
                 app_name="Stock Data Updater",
@@ -453,7 +458,7 @@ def is_market_open(now, market):
 
 def update_stock_data_ignore_time():
     logger.info("🗂 อัปเดตฐานข้อมูลหุ้นสหรัฐ...")
-    notification.notify(
+    safe_notify(
         title="Stock Update",
         message="เริ่มอัปเดตฐานข้อมูลหุ้นสหรัฐ...",
         app_name="Stock Data Updater",
@@ -466,7 +471,7 @@ def update_stock_data_ignore_time():
         run_scripts(SCRIPTS["stock_us"]["combine_all"], "Combine All US", critical=False)
         run_scripts(SCRIPTS["stock_us"]["stock_to_database"], "Stock to Database US", critical=False)
         logger.info("✅ อัปเดตข้อมูลหุ้นสหรัฐเรียบร้อย")
-        notification.notify(
+        safe_notify(
             title="Stock Update Success",
             message="อัปเดตข้อมูลหุ้นสหรัฐเรียบร้อย",
             app_name="Stock Data Updater",
@@ -474,7 +479,7 @@ def update_stock_data_ignore_time():
         )
     
     logger.info("🗂 อัปเดตฐานข้อมูลหุ้นไทย...")
-    notification.notify(
+    safe_notify(
         title="Stock Update",
         message="เริ่มอัปเดตฐานข้อมูลหุ้นไทย...",
         app_name="Stock Data Updater",
@@ -487,67 +492,96 @@ def update_stock_data_ignore_time():
         run_scripts(SCRIPTS["stock_th"]["combine_all"], "Combine All TH", critical=False)
         run_scripts(SCRIPTS["stock_th"]["stock_to_database"], "Stock to Database TH", critical=False)
         logger.info("✅ อัปเดตข้อมูลหุ้นไทยเรียบร้อย")
-        notification.notify(
+        safe_notify(
             title="Stock Update Success",
             message="อัปเดตข้อมูลหุ้นไทยเรียบร้อย",
             app_name="Stock Data Updater",
             timeout=10
         )
 
+
+last_run = {}
+running_scripts = set()  # เก็บสคริปต์ที่กำลังรัน
 def update_stock_data(now, market):
-    """อัปเดตข้อมูลหุ้น"""
+    global running_scripts
     logger.info(f"⏰ Checking market {market} at {now.strftime('%H:%M:%S')} - Open: {is_market_open(now, market)}")
     if not is_market_open(now, market):
         logger.info(f"📅 ตลาด {market} ปิดวันนี้")
         return
-    
-    # ปรับช่วงเวลาให้กว้างขึ้น
-    if market == "US" and now.hour >= 18:  # รันหลัง 18:00
+    if market in last_run and last_run[market].date() == now.date():
+        logger.info(f"⏩ ข้ามการอัปเดต {market} เพราะรันไปแล้ววันนี้")
+        return
+
+    if market == "US" and now.hour >= 20:
         logger.info("🗂 อัปเดตฐานข้อมูลหุ้นสหรัฐ...")
-        notification.notify(
+        safe_notify(
             title="Stock Update",
             message="เริ่มอัปเดตฐานข้อมูลหุ้นสหรัฐ...",
             app_name="Stock Data Updater",
             timeout=10
         )
         if update_yfinance():
-            run_scripts(SCRIPTS["stock_us"]["get_stock"], "Get Stock US", critical=False)
-            run_scripts(SCRIPTS["stock_us"]["get_financial"], "Get Financial US", critical=False)
-            run_scripts(SCRIPTS["stock_us"]["daily_sentiment"], "Daily Sentiment US", critical=False)
-            run_scripts(SCRIPTS["stock_us"]["combine_all"], "Combine All US", critical=False)
-            run_scripts(SCRIPTS["stock_us"]["stock_to_database"], "Stock to Database US", critical=False)
+            for script_group, group_name in [
+                (SCRIPTS["stock_us"]["get_stock"], "Get Stock US"),
+                (SCRIPTS["stock_us"]["get_financial"], "Get Financial US"),
+                (SCRIPTS["stock_us"]["daily_sentiment"], "Daily Sentiment US"),
+                (SCRIPTS["stock_us"]["combine_all"], "Combine All US"),
+                (SCRIPTS["stock_us"]["stock_to_database"], "Stock to Database US")
+            ]:
+                for script in script_group:
+                    if script in running_scripts:
+                        logger.info(f"⏩ ข้าม {script} เพราะกำลังรันอยู่")
+                        continue
+                    running_scripts.add(script)
+                    try:
+                        run_scripts(script_group, group_name, critical=False)
+                    finally:
+                        running_scripts.remove(script)
             logger.info("✅ อัปเดตข้อมูลหุ้นสหรัฐเรียบร้อย")
-            notification.notify(
+            safe_notify(
                 title="Stock Update Success",
                 message="อัปเดตข้อมูลหุ้นสหรัฐเรียบร้อย",
                 app_name="Stock Data Updater",
                 timeout=10
             )
-    
-    elif market == "TH" and now.hour >= 8:  # รันหลัง 08:00
+            last_run[market] = now
+
+    elif market == "TH" and now.hour >= 8:
         logger.info("🗂 อัปเดตฐานข้อมูลหุ้นไทย...")
-        notification.notify(
+        safe_notify(
             title="Stock Update",
             message="เริ่มอัปเดตฐานข้อมูลหุ้นไทย...",
             app_name="Stock Data Updater",
             timeout=10
         )
         if update_yfinance():
-            run_scripts(SCRIPTS["stock_th"]["get_stock"], "Get Stock TH", critical=False)
-            run_scripts(SCRIPTS["stock_th"]["get_financial"], "Get Financial TH", critical=False)
-            run_scripts(SCRIPTS["stock_th"]["daily_sentiment"], "Daily Sentiment TH", critical=False)
-            run_scripts(SCRIPTS["stock_th"]["combine_all"], "Combine All TH", critical=False)
-            run_scripts(SCRIPTS["stock_th"]["stock_to_database"], "Stock to Database TH", critical=False)
+            for script_group, group_name in [
+                (SCRIPTS["stock_th"]["get_stock"], "Get Stock TH"),
+                (SCRIPTS["stock_th"]["get_financial"], "Get Financial TH"),
+                (SCRIPTS["stock_th"]["daily_sentiment"], "Daily Sentiment TH"),
+                (SCRIPTS["stock_th"]["combine_all"], "Combine All TH"),
+                (SCRIPTS["stock_th"]["stock_to_database"], "Stock to Database TH")
+            ]:
+                for script in script_group:
+                    if script in running_scripts:
+                        logger.info(f"⏩ ข้าม {script} เพราะกำลังรันอยู่")
+                        continue
+                    running_scripts.add(script)
+                    try:
+                        run_scripts(script_group, group_name, critical=False)
+                    finally:
+                        running_scripts.remove(script)
             logger.info("✅ อัปเดตข้อมูลหุ้นไทยเรียบร้อย")
-            notification.notify(
+            safe_notify(
                 title="Stock Update Success",
                 message="อัปเดตข้อมูลหุ้นไทยเรียบร้อย",
                 app_name="Stock Data Updater",
                 timeout=10
             )
+            last_run[market] = now
     else:
         logger.info(f"⏰ เวลาไม่ตรงเงื่อนไขสำหรับ {market}: {now.hour}:{now.minute}")
-        notification.notify(
+        safe_notify(
             title="Stock Update Skipped",
             message=f"เวลาไม่ตรงเงื่อนไขสำหรับ {market}: {now.hour}:{now.minute}",
             app_name="Stock Data Updater",
@@ -577,7 +611,7 @@ def get_user_input():
     
     mode = user_input[0] if user_input else "1"
     logger.info(f"mode: {mode}")
-    notification.notify(
+    safe_notify(
         title="Mode Selected",
         message=f"เลือกโหมด: {mode}",
         app_name="Stock Data Updater",
@@ -589,7 +623,7 @@ def run_auto_mode():
     """โหมดอัตโนมัติ"""
     last_run_hour = None
     logger.info("🤖 เริ่มโหมดอัตโนมัติ - กด Ctrl+C เพื่อหยุด")
-    notification.notify(
+    safe_notify(
         title="Auto Mode",
         message="เริ่มโหมดอัตโนมัติ",
         app_name="Stock Data Updater",
@@ -613,12 +647,12 @@ def run_auto_mode():
                 try:
                     run_all_news_scripts()
                     
-                    if now.hour == 0 and now.weekday() == 6:
-                        logger.info("🗑️ ลบไฟล์ CSV รายสัปดาห์...")
-                        # clear_stock_csv()
+                    # if now.hour == 0 and now.weekday() == 6:
+                    #     logger.info("🗑️ ลบไฟล์ CSV รายสัปดาห์...")
+                    #     clear_stock_csv()
                     
                     logger.info("🎉 All scripts completed successfully.")
-                    notification.notify(
+                    safe_notify(
                         title="All Scripts Completed",
                         message="ทุกสคริปต์ทำงานสำเร็จ",
                         app_name="Stock Data Updater",
@@ -627,7 +661,7 @@ def run_auto_mode():
                     
                 except Exception as e:
                     logger.error(f"❌ Unexpected error: {e}")
-                    notification.notify(
+                    safe_notify(
                         title="Unexpected Error",
                         message=f"เกิดข้อผิดพลาด: {e}",
                         app_name="Stock Data Updater",
@@ -638,7 +672,7 @@ def run_auto_mode():
             
     except KeyboardInterrupt:
         logger.info("⏹️ หยุดการทำงานโดยผู้ใช้")
-        notification.notify(
+        safe_notify(
             title="Program Stopped",
             message="หยุดการทำงานโดยผู้ใช้",
             app_name="Stock Data Updater",
@@ -646,7 +680,7 @@ def run_auto_mode():
         )
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในโหมดอัตโนมัติ: {e}")
-        notification.notify(
+        safe_notify(
             title="Auto Mode Error",
             message=f"เกิดข้อผิดพลาดในโหมดอัตโนมัติ: {e}",
             app_name="Stock Data Updater",
@@ -656,7 +690,7 @@ def run_auto_mode():
 def run_manual_mode():
     """โหมดรันครั้งเดียว"""
     logger.info("🔧 เริ่มโหมดรันครั้งเดียว")
-    notification.notify(
+    safe_notify(
         title="Manual Mode",
         message="เริ่มโหมดรันครั้งเดียว",
         app_name="Stock Data Updater",
@@ -666,7 +700,7 @@ def run_manual_mode():
         success = run_all_news_scripts()
         if success:
             logger.info("🎉 All scripts completed successfully.")
-            notification.notify(
+            safe_notify(
                 title="Manual Mode Success",
                 message="ทุกสคริปต์ทำงานสำเร็จ",
                 app_name="Stock Data Updater",
@@ -674,7 +708,7 @@ def run_manual_mode():
             )
         else:
             logger.error("❌ บางสคริปต์ล้มเหลว")
-            notification.notify(
+            safe_notify(
                 title="Manual Mode Error",
                 message="บางสคริปต์ล้มเหลว",
                 app_name="Stock Data Updater",
@@ -682,7 +716,7 @@ def run_manual_mode():
             )
     except Exception as e:
         logger.error(f"❌ Unexpected error: {e}")
-        notification.notify(
+        safe_notify(
             title="Unexpected Error",
             message=f"เกิดข้อผิดพลาด: {e}",
             app_name="Stock Data Updater",
@@ -692,7 +726,7 @@ def run_manual_mode():
 def run_manual_mode_stock():
     """โหมดรันครั้งเดียวสำหรับข้อมูลหุ้น"""
     logger.info("🔧 เริ่มโหมดรันครั้งเดียวสำหรับข้อมูลหุ้น")
-    notification.notify(
+    safe_notify(
         title="Stock Manual Mode",
         message="เริ่มโหมดรันครั้งเดียวสำหรับข้อมูลหุ้น",
         app_name="Stock Data Updater",
@@ -703,7 +737,7 @@ def run_manual_mode_stock():
         update_stock_data(now, "US")
         update_stock_data(now, "TH")
         logger.info("🎉 ข้อมูลหุ้นอัปเดตเรียบร้อย")
-        notification.notify(
+        safe_notify(
             title="Stock Update Success",
             message="ข้อมูลหุ้นอัปเดตเรียบร้อย",
             app_name="Stock Data Updater",
@@ -711,7 +745,7 @@ def run_manual_mode_stock():
         )
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในการอัปเดตข้อมูลหุ้น: {e}")
-        notification.notify(
+        safe_notify(
             title="Stock Update Error",
             message=f"เกิดข้อผิดพลาดในการอัปเดตข้อมูลหุ้น: {e}",
             app_name="Stock Data Updater",
@@ -721,7 +755,7 @@ def run_manual_mode_stock():
 def main():
     """ฟังก์ชันหลัก"""
     logger.info("🚀 เริ่มต้นโปรแกรม")
-    notification.notify(
+    safe_notify(
         title="Program Started",
         message="เริ่มต้นโปรแกรม",
         app_name="Stock Data Updater",
@@ -740,7 +774,7 @@ def main():
             
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในโปรแกรมหลัก: {e}")
-        notification.notify(
+        safe_notify(
             title="Program Error",
             message=f"เกิดข้อผิดพลาดในโปรแกรมหลัก: {e}",
             app_name="Stock Data Updater",
@@ -748,7 +782,7 @@ def main():
         )
     finally:
         logger.info("🔚 จบการทำงาน")
-        notification.notify(
+        safe_notify(
             title="Program Ended",
             message="จบการทำงาน",
             app_name="Stock Data Updater",

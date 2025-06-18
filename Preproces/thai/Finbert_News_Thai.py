@@ -3,6 +3,7 @@ import pandas as pd
 from tqdm import tqdm
 import os
 import torch
+from datasets import Dataset
 from multiprocessing import freeze_support
 import sys
 import io
@@ -11,6 +12,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# ตรวจสอบ GPU
 if torch.cuda.is_available():
     print("✅ CUDA Available:", torch.cuda.is_available())
     print("✅ CUDA Version:", torch.version.cuda)
@@ -83,59 +85,70 @@ def main():
         model=model,
         tokenizer=tokenizer,
         device=0 if torch.cuda.is_available() else -1,
-        batch_size=16,
         truncation=True,
         max_length=512
     )
 
     combined = prepare_data()
 
+    # เตรียมข้อมูลสำหรับการประมวลผลแบบ batch
     financial_news = combined.apply(
         lambda row: f"{row.get('title', '')} {row.get('description', '')}", axis=1
     ).tolist()
 
-    processed_data = pd.DataFrame(columns=['title', 'description', 'date', 'link', 'Source', 'MatchedStock', 'Type', 'Sentiment', 'Confidence'])
-    processed_data.to_csv(PARTIAL_RESULTS_PATH, index=False, header=True, mode='w')
+    # แปลงเป็น Dataset สำหรับการประมวลผลแบบ batch
+    dataset = Dataset.from_dict({"text": financial_news})
 
+    # ประมวลผลข้อมูลเป็น batch
+    batch_size = 16
     results = []
     total_records = len(financial_news)
 
     with tqdm(total=total_records, desc="Processing Combined News") as pbar:
         try:
-            for idx, news in enumerate(financial_news):
-                chunk_results = finbert_sentiment([news])
-                sentiment = chunk_results[0]['label']
-                confidence = chunk_results[0]['score']
+            # ประมวลผล dataset เป็น batch
+            for i in range(0, total_records, batch_size):
+                batch = dataset[i:i + batch_size]["text"]
+                chunk_results = finbert_sentiment(batch)
+                
+                # รวบรวมผลลัพธ์จาก batch
+                for idx, result in enumerate(chunk_results):
+                    global_idx = i + idx
+                    sentiment = result['label']
+                    confidence = result['score']
+                    results.append((
+                        combined.iloc[global_idx]['title'],
+                        combined.iloc[global_idx]['description'],
+                        combined.iloc[global_idx]['date'],
+                        combined.iloc[global_idx]['link'],
+                        combined.iloc[global_idx]['Source'],
+                        combined.iloc[global_idx]['MatchedStock'],
+                        combined.iloc[global_idx]['Type'],
+                        sentiment,
+                        confidence,
+                        combined.iloc[global_idx]['image']
+                    ))
 
-                results.append((combined.iloc[idx]['title'],
-                                combined.iloc[idx]['description'],
-                                combined.iloc[idx]['date'],
-                                combined.iloc[idx]['link'],
-                                combined.iloc[idx]['Source'],
-                                combined.iloc[idx]['MatchedStock'],
-                                combined.iloc[idx]['Type'],
-                                sentiment,
-                                confidence))
+                pbar.update(len(batch))
 
-                pbar.update(1)
-
-                if len(results) % 100 == 0:
-                    temp_df = pd.DataFrame(results, columns=['title', 'description', 'date', 'link', 'Source', 'MatchedStock', 'Type', 'Sentiment', 'Confidence'])
+                # บันทึกผลลัพธ์ทุก 100 records
+                if len(results) >= 100:
+                    temp_df = pd.DataFrame(results, columns=['title', 'description', 'date', 'link', 'Source', 'MatchedStock', 'Type', 'Sentiment', 'Confidence', 'image'])
                     temp_df.to_csv(PARTIAL_RESULTS_PATH, mode='a', index=False, header=not os.path.exists(PARTIAL_RESULTS_PATH))
                     results = []
 
         except Exception as e:
-            print(f"❌ Error occurred: {e}")
+            print(f"❌ เกิดข้อผิดพลาด: {e}")
         finally:
             if results:
-                temp_df = pd.DataFrame(results, columns=['title', 'description', 'date', 'link', 'Source', 'MatchedStock', 'Type', 'Sentiment', 'Confidence'])
-                temp_df.to_csv(PARTIAL_RESULTS_PATH, mode='a', index=False, header=False)
-            print(f"✅ Saved partial results to {PARTIAL_RESULTS_PATH}.")
+                temp_df = pd.DataFrame(results, columns=['title', 'description', 'date', 'link', 'Source', 'MatchedStock', 'Type', 'Sentiment', 'Confidence', 'image'])
+                temp_df.to_csv(PARTIAL_RESULTS_PATH, mode='a', index=False, header=not os.path.exists(PARTIAL_RESULTS_PATH))
+            print(f"✅ บันทึกผลลัพธ์ชั่วคราวที่ {PARTIAL_RESULTS_PATH}")
 
     if os.path.exists(PARTIAL_RESULTS_PATH):
         final_results = pd.read_csv(PARTIAL_RESULTS_PATH)
         final_results.to_csv(FINAL_RESULTS_PATH, index=False, header=True)
-        print(f"✅ Final results saved to {FINAL_RESULTS_PATH}")
+        print(f"✅ บันทึกผลลัพธ์สุดท้ายที่ {FINAL_RESULTS_PATH}")
     else:
         print(f"⚠️ ไม่มีผลลัพธ์ให้บันทึกที่ {PARTIAL_RESULTS_PATH}")
 
