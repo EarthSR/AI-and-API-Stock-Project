@@ -6,12 +6,12 @@ import os
 import mysql.connector
 from dotenv import load_dotenv
 import io
+import time
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-# ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
+# ✅ ตรวจสอบระดับของโฟลเดอร์
 CURRENT_DIR = os.getcwd()
-
 path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.env')
 load_dotenv(path)
 
@@ -35,81 +35,107 @@ cursor = conn.cursor()
 print("✅ เชื่อมต่อฐานข้อมูลสำเร็จ!")
 
 # ✅ กำหนดรายชื่อหุ้นไทย
-tickers = ['ADVANC.BK', 'INTUCH.BK', 'TRUE.BK', 'DITTO.BK', 'DIF.BK', 
+tickers = ['ADVANC.BK', 'TRUE.BK', 'DITTO.BK', 'DIF.BK', 
            'INSET.BK', 'JMART.BK', 'INET.BK', 'JAS.BK', 'HUMAN.BK']
 
 # ✅ ตรวจสอบวันที่ล่าสุดจากฐานข้อมูล
 latest_dates = {}
-end_date = datetime.datetime.today().strftime('%Y-%m-%d')
+today = datetime.datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
+end_date = (today - datetime.timedelta(days=1)).date()  # ใช้เมื่อวานเป็นวันที่สิ้นสุด
 
 for ticker in tickers:
     stock_name = ticker.replace('.BK', '')  # เอา .BK ออกก่อนเช็คในฐานข้อมูล
     cursor.execute("SELECT MAX(Date) FROM StockDetail WHERE StockSymbol = %s", (stock_name,))
     result = cursor.fetchone()[0]
-
     if result is None:
-        latest_dates[ticker] = "2018-01-01"  # ถ้าไม่มีข้อมูลให้เริ่มจาก 2018-01-01
+        latest_dates[ticker] = "2018-01-01"  # Default start date if no data
     else:
-        latest_dates[ticker] = (result + datetime.timedelta(days=1)).strftime('%Y-%m-%d')  # เริ่มจากวันถัดไป
+        next_day = result + datetime.timedelta(days=1)  # วันที่ถัดไป
+        # ใช้ค่าวันที่ที่เร็วกว่าระหว่าง next_day และ end_date
+        latest_dates[ticker] = min(next_day, end_date).strftime('%Y-%m-%d')
 
-# ✅ ปิดการเชื่อมต่อฐานข้อมูล
+# ✅ ปิดการเชื่อมต่อฐานข้อมูล (ชั่วคราว)
 cursor.close()
 conn.close()
 print("🔹 ปิดการเชื่อมต่อฐานข้อมูลแล้ว")
 
-# ✅ กำหนดวันที่เริ่มต้นและสิ้นสุด (ใช้วันที่ล่าสุดจากฐานข้อมูล)
-start_date = min(latest_dates.values())  # ใช้วันที่ที่เก่าสุดของหุ้นทั้งหมด
+# ✅ ตรวจสอบวันที่เริ่มต้นสำหรับแต่ละหุ้น
+valid_tickers = []
+for ticker in tickers:
+    if latest_dates[ticker] < end_date.strftime('%Y-%m-%d'):
+        valid_tickers.append(ticker)
+    else:
+        print(f"⚠️ ข้าม {ticker}: ไม่มีวันที่ใหม่ให้ดึงข้อมูล (start_date {latest_dates[ticker]} >= end_date {end_date})")
 
-# ดึงข้อมูลราคาหุ้นจากวันที่เริ่มต้นถึงวันที่สิ้นสุด
-try:
-    data = yf.download(tickers, start=start_date, end=end_date, group_by='ticker')
-    if data.empty:
-        raise ValueError("❌ ไม่สามารถดึงข้อมูลจาก yfinance ได้")
-except Exception as e:
-    print(f"❌ Error: {e}")
-    sys.exit(1)  # ❌ หยุดการทำงานทันที
+if not valid_tickers:
+    print("❌ ไม่มีหุ้นใดที่มีวันที่ใหม่ให้ดึงข้อมูล")
+    sys.exit(0)
 
-# สร้าง DataFrame สำหรับแต่ละหุ้น
+# ดึงข้อมูลราคาหุ้นจาก yfinance
+max_retries = 3
 data_list = []
 
-for ticker in tickers:
-    # ดึงข้อมูลราคาหุ้น และใช้ .copy() เพื่อป้องกัน SettingWithCopyWarning
-    ticker_data = data[ticker].copy()
-    stock_name = ticker.replace('.BK', '')  # เอา .BK ออกก่อนบันทึกลง DataFrame
+for ticker in valid_tickers:
+    retry_count = 0
+    while retry_count < max_retries:
+        try:
+            # ดึงข้อมูลสำหรับแต่ละหุ้นแยกกัน
+            data = yf.download(ticker, start=latest_dates[ticker], end=end_date.strftime('%Y-%m-%d'), interval='1d')
+            if data.empty:
+                print(f"⚠️ ไม่มีข้อมูลสำหรับ {ticker} ในช่วงวันที่ {latest_dates[ticker]} ถึง {end_date}")
+                break
+            data['Ticker'] = ticker.replace('.BK', '')  # เอา .BK ออกก่อนบันทึก
+            data_list.append(data)
+            break
+        except Exception as e:
+            retry_count += 1
+            print(f"⚠️ Error สำหรับ {ticker}: {e} (ลองใหม่ {retry_count}/{max_retries})")
+            if retry_count == max_retries:
+                print(f"❌ ล้มเหลวในการดึงข้อมูลสำหรับ {ticker}")
+                break
+            time.sleep(1)  # รอเพื่อป้องกัน rate limit
+
+# รวมข้อมูลทั้งหมด
+if not data_list:
+    print("❌ ไม่มีข้อมูลใด ๆ ที่ดึงมาได้")
+    sys.exit(1)
+
+cleaned_data = pd.concat(data_list).reset_index()
+
+# รีอินเด็กซ์และจัดการ NaN
+data_list = []  # รีเซ็ท data_list สำหรับข้อมูลที่รีอินเด็กซ์
+for ticker in valid_tickers:
+    stock_name = ticker.replace('.BK', '')
+    ticker_data = cleaned_data[cleaned_data['Ticker'] == stock_name].copy()
+    if ticker_data.empty:
+        continue
+    ticker_data.index = pd.to_datetime(ticker_data['Date'])
+    all_dates = pd.date_range(start=latest_dates[ticker], end=end_date, freq='D')
+    ticker_data = ticker_data.reindex(all_dates, method='ffill')  # Forward fill เพื่อหลีกเลี่ยงการเติมศูนย์
+    ticker_data['Changepercen'] = (ticker_data['Close'] - ticker_data['Open']) / ticker_data['Open'] * 100
     ticker_data['Ticker'] = stock_name
 
-    # รีอินเด็กซ์ให้มีทุกวัน (รวมเสาร์-อาทิตย์)
-    ticker_data.index = pd.to_datetime(ticker_data.index)  # แปลงเป็น datetime index
-    all_dates = pd.date_range(start=latest_dates[ticker], end=end_date, freq='D')  # ใช้ start_date ที่อัปเดตจากฐานข้อมูล
-    ticker_data = ticker_data.reindex(all_dates)
-    ticker_data['Changepercen'] = (ticker_data['Close'] - ticker_data['Open']) / ticker_data['Open'] * 100
-    # 🔹 ใช้ค่า **วันก่อนหน้า** แทน NaN ก่อนเติม 0
-    if ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']].isnull().sum().sum() > 0:
-        print(f"⚠️ พบค่า NaN ในข้อมูลของ {stock_name}, ใช้ค่าเฉลี่ยย้อนหลังเติมแทน")
-
-    ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']] = (
-        ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']]
-        .ffill()
-        .rolling(window=3, min_periods=1).mean()
-        .fillna(0)  # ✅ ถ้า ffill() ยังมีค่า NaN ให้เติม 0
-    )
-
-    # เติมค่าที่ขาด
-    ticker_data['Ticker'] = stock_name  # คงค่า Ticker ในวันที่เพิ่ม
-    
-    data_list.append(ticker_data)
+    # เติม NaN ด้วยค่าเฉลี่ยย้อนหลัง (ถ้ายังมี NaN หลัง ffill)
+    if ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']].isnull().any().any():
+        print(f"⚠️ พบค่า NaN ในข้อมูลของ {stock_name}, ใช้ค่าเฉลี่ยย้อนหลังเติม")
+        ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']] = (
+            ticker_data[['Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']]
+            .rolling(window=3, min_periods=1).mean()
+            .fillna(0)  # เติม 0 เฉพาะเมื่อจำเป็น
+        )
+    data_list.append(ticker_data.reset_index().rename(columns={'index': 'Date'}))
 
 # รวมข้อมูลทั้งหมดเป็น DataFrame เดียว
-cleaned_data = pd.concat(data_list).reset_index().rename(columns={'index': 'Date'})
+cleaned_data = pd.concat(data_list).reset_index(drop=True)
 
 # ตั้งลำดับคอลัมน์ให้ถูกต้อง
-cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume' , 
-                             'Changepercen']]
+cleaned_data = cleaned_data[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume', 'Changepercen']]
 
 # บันทึกข้อมูลเป็นไฟล์ CSV
-csv_path = os.path.join(CURRENT_DIR,"thai", "Stock", "stock_data_thai.csv")
-cleaned_data.to_csv(csv_path, index=False)
+output_path = os.path.join(CURRENT_DIR, "thai", "Stock", "stock_data_thai.csv")
+os.makedirs(os.path.dirname(output_path), exist_ok=True)  # สร้างโฟลเดอร์ถ้ายังไม่มี
+cleaned_data.to_csv(output_path, index=False)
+print(f"✅ บันทึกข้อมูลลงไฟล์ CSV สำเร็จ: {output_path}")
 
 # แสดงตัวอย่างข้อมูล
-print(f"✅ บันทึกไฟล์ CSV สำเร็จที่: {csv_path}")
 print(cleaned_data.head())

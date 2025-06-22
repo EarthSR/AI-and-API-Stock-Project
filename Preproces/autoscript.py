@@ -190,90 +190,19 @@ def validate_script_exists(script_path):
         return False
     return True
 
-def run_scripts(scripts, group_name, critical=True):
-    logger.info(f"\n▶️ Running {group_name}...")
-    
+def run_scripts(scripts, group_name, critical=False):
+    print(f"\n▶️ Running {group_name}...")
     for script in scripts:
-        if not validate_script_exists(script):
+        print(f"  → Running: {script}")
+        result = subprocess.run([sys.executable, script], check=False)
+        if result.returncode != 0:
+            print(f"❌ Script failed: {script}")
             if critical:
-                logger.error(f"❌ ไม่พบไฟล์สคริปต์: {script}")
-                safe_notify(
-                    title="Script Error",
-                    message=f"ไม่พบไฟล์สคริปต์: {script}",
-                    app_name="Stock Data Updater",
-                    timeout=10
-                )
-                return False
-            else:
-                logger.warning(f"⚠️ ข้ามสคริปต์ที่ไม่พบ: {script}")
-                continue
-        
-        logger.info(f"  → Running: {script}")
-        
-        try:
-            result = subprocess.run(
-                [sys.executable, script],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=300  # ตั้ง timeout เป็น 5 นาที
-            )
-            if result.stdout.strip():
-                logger.info(f"Output from {script}:\n{result.stdout}")
-            if result.stderr.strip():
-                logger.info(f"Stderr from {script}:\n{result.stderr}")
-            
-            if result.returncode == 0:
-                logger.info(f"✅ สำเร็จ: {script}")
-                safe_notify(
-                    title="Script Success",
-                    message=f"สคริปต์ {script} ทำงานสำเร็จ",
-                    app_name="Stock Data Updater",
-                    timeout=10
-                )
-            else:
-                logger.error(f"❌ Script failed: {script} (returncode: {result.returncode})")
-                safe_notify(
-                    title="Script Failed",
-                    message=f"สคริปต์ {script} ล้มเหลว: {result.stderr}"[:253] + "..." if len(result.stderr) > 253 else f"สคริปต์ {script} ล้มเหลว: {result.stderr}",
-                    app_name="Stock Data Updater",
-                    timeout=10
-                )
-                if critical:
-                    return False
-                else:
-                    logger.warning(f"⚠️ ข้ามข้อผิดพลาดและทำต่อ")
-                    
-        except subprocess.TimeoutExpired:
-            logger.error(f"❌ Script timeout: {script}")
-            safe_notify(
-                title="Script Timeout",
-                message=f"สคริปต์ {script} หมดเวลา",
-                app_name="Stock Data Updater",
-                timeout=10
-            )
-            if critical:
-                return False
-        except Exception as e:
-            logger.error(f"❌ Unexpected error running {script}: {e}")
-            safe_notify(
-                title="Unexpected Error",
-                message=f"เกิดข้อผิดพลาดใน {script}: {e}",
-                app_name="Stock Data Updater",
-                timeout=10
-            )
-            if critical:
-                return False
-    
-    logger.info(f"✅ Done: {group_name}")
-    safe_notify(
-        title="Group Completed",
-        message=f"กลุ่ม {group_name} เสร็จสิ้น",
-        app_name="Stock Data Updater",
-        timeout=10
-    )
+                return False  # Stop execution if critical
+            # Optionally continue if not critical
+    print(f"✅ Done: {group_name}")
     return True
+
 
 def run_all_news_scripts():
     """รันสคริปต์ข่าวทั้งหมด"""
@@ -319,7 +248,7 @@ def run_all_news_scripts():
 
 def clear_stock_csv():
     """ลบไฟล์ CSV ในโฟลเดอร์ที่กำหนด"""
-    folder_paths = ["./usa/News", "./usa", "./thai/News", "./thai"]
+    folder_paths = ["./usa/News", "./thai/News"]
     deleted_count = 0
     
     for folder in folder_paths:
@@ -512,7 +441,7 @@ def update_stock_data(now, market):
         logger.info(f"⏩ ข้ามการอัปเดต {market} เพราะรันไปแล้ววันนี้")
         return
 
-    if market == "US" and now.hour >= 20:
+    if market == "US" and now.hour >= 20 and now.hour < 21:
         logger.info("🗂 อัปเดตฐานข้อมูลหุ้นสหรัฐ...")
         safe_notify(
             title="Stock Update",
@@ -546,7 +475,7 @@ def update_stock_data(now, market):
             )
             last_run[market] = now
 
-    elif market == "TH" and now.hour >= 8:
+    elif market == "TH" and now.hour >= 8 and now.hour < 9:
         logger.info("🗂 อัปเดตฐานข้อมูลหุ้นไทย...")
         safe_notify(
             title="Stock Update",
@@ -647,9 +576,9 @@ def run_auto_mode():
                 try:
                     run_all_news_scripts()
                     
-                    # if now.hour == 0 and now.weekday() == 6:
-                    #     logger.info("🗑️ ลบไฟล์ CSV รายสัปดาห์...")
-                    #     clear_stock_csv()
+                    if now.hour == 0 and now.minute == 0 and datetime.date.today().toordinal() % 3 == 0:
+                        logger.info("🗑️ ลบไฟล์ CSV ทุก 3 วัน...")
+                        clear_stock_csv()
                     
                     logger.info("🎉 All scripts completed successfully.")
                     safe_notify(
