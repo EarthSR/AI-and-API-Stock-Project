@@ -205,7 +205,7 @@ for stock in stocks:
 final_df = pd.concat(all_dfs, ignore_index=True)
 
 # ✅ บันทึกข้อมูลลง CSV
-final_df.to_csv(os.path.join(CURRENT_DIR, "Stock", "Financial_America_Quarter.csv"), index=False)
+final_df.to_csv(os.path.join(CURRENT_DIR,"usa", "Stock", "Financial_America_Quarter.csv"), index=False)
 print("✅ บันทึกข้อมูลลง 'Financial_America_Quarter.csv' สำเร็จ!")
 
 # ✅ ปิด WebDriver
