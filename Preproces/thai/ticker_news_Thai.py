@@ -14,8 +14,7 @@ if not spacy.prefer_gpu():
 else:
     print("🚀 ใช้ GPU:", spacy.prefer_gpu())
 
-
-# ✅ รายชื่อหุ้นและชื่อบริษัท (เปลี่ยนเป็นหุ้นไทย)
+# ✅ รายชื่อหุ้นและชื่อบริษัท
 stock_entities = {
     "ADVANC": ["ADVANC", "AIS"],
     "DIF": ["DIF"],
@@ -29,7 +28,7 @@ stock_entities = {
     "TRUE": ["TRUE"]
 }
 
-# ✅ Context Keyword Mapping (ยังไม่มีข้อมูล keyword เฉพาะ สามารถเติมเพิ่มได้)
+# ✅ Context Keyword Mapping
 context_mapping = [
     {"Keywords": ["mobile", "5G", "network", "internet", "broadband", "AIS", "cellular", "telecom"], "Stocks": ["ADVANC"]},
     {"Keywords": ["infrastructure fund", "telecom assets", "tower lease", "fiber optic"], "Stocks": ["DIF"]},
@@ -42,7 +41,6 @@ context_mapping = [
     {"Keywords": ["retail", "mobile store", "finance service", "Jaymart", "consumer loan", "mobile retail"], "Stocks": ["JMART"]},
     {"Keywords": ["mobile", "5G", "network", "broadband", "TRUE ID", "telecom", "True Corporation"], "Stocks": ["TRUE"]}
 ]
-
 
 # ✅ โหลด spaCy Transformer Model
 nlp = spacy.load("en_core_web_trf")
@@ -61,9 +59,28 @@ for stock, keywords in stock_entities.items():
 ruler.add_patterns(patterns)
 
 # ✅ อ่านข่าว
-floder_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'thai', 'News')
+folder_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'thai', 'News')
 file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'thai', 'News', 'Thai_News.csv')
 df = pd.read_csv(file_path)
+
+# ✅ ตรวจสอบว่าไฟล์ว่างหรือไม่
+if df.empty:
+    print("⚠️ ไฟล์ Thai_News.csv ไม่มีข้อมูล (มีแค่ header)")
+    # สร้าง DataFrame ว่างที่มีคอลัมน์ MatchedStock
+    df["MatchedStock"] = None
+    # สร้างไฟล์ output ว่าง
+    related_path = os.path.join(folder_path, 'Related_News_Hybrid.csv')
+    unrelated_path = os.path.join(folder_path, 'Unrelated_News_Hybrid.csv')
+    df[df["MatchedStock"].notnull()].to_csv(related_path, index=False, encoding='utf-8')
+    df[df["MatchedStock"].isnull()].to_csv(unrelated_path, index=False, encoding='utf-8')
+    print(f"💾 สร้างไฟล์ว่าง: {related_path}")
+    print(f"💾 สร้างไฟล์ว่าง: {unrelated_path}")
+    print("\n📊 Hybrid Model Summary")
+    print(f"✅ ข่าวทั้งหมด: 0")
+    print(f"✅ ข่าวที่เกี่ยวข้อง: 0 (0.00%)")
+    print(f"✅ ข่าวที่ไม่เกี่ยวข้อง: 0 (0.00%)")
+    print(f"⏱️ ใช้เวลาในการประมวลผล: 0.00 นาที")
+    sys.exit(0)
 
 # ✅ เตรียมข้อความ
 texts = df.apply(lambda row: f"{row.get('title', '')} {row.get('description', '')}", axis=1)
@@ -104,7 +121,7 @@ related_df = df[df["MatchedStock"].notnull()]
 unrelated_df = df[df["MatchedStock"].isnull()]
 related_news = len(related_df)
 unrelated_news = len(unrelated_df)
-percentage = (related_news / total_news) * 100
+percentage = (related_news / total_news) * 100 if total_news > 0 else 0
 
 end_time = time.time()
 elapsed = end_time - start_time
@@ -116,10 +133,10 @@ print(f"✅ ข่าวที่ไม่เกี่ยวข้อง: {unrel
 print(f"⏱️ ใช้เวลาในการประมวลผล: {elapsed / 60:.2f} นาที\n")
 
 # ✅ บันทึกไฟล์
-related_path = os.path.join(floder_path, 'Related_News_Hybrid.csv')
-unrelated_path = os.path.join(floder_path, 'Unrelated_News_Hybrid.csv')
+related_path = os.path.join(folder_path, 'Related_News_Hybrid.csv')
+unrelated_path = os.path.join(folder_path, 'Unrelated_News_Hybrid.csv')
 related_df.to_csv(related_path, index=False, encoding='utf-8')
 unrelated_df.to_csv(unrelated_path, index=False, encoding='utf-8')
 
-print(f"💾 บันทึกข่าวที่เกี่ยวข้องที่: Related_News_Hybrid.csv")
-print(f"💾 บันทึกข่าวที่ไม่เกี่ยวข้องที่: Unrelated_News_Hybrid.csv")
+print(f"💾 บันทึกข่าวที่เกี่ยวข้องที่: {related_path}")
+print(f"💾 บันทึกข่าวที่ไม่เกี่ยวข้องที่: {unrelated_path}")

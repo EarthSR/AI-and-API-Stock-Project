@@ -1,13 +1,13 @@
 import time
 import pandas as pd
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.firefox.service import Service  
+from selenium.webdriver.firefox.options import Options 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
-from webdriver_manager.chrome import ChromeDriverManager  # ใช้ WebDriverManager
+from webdriver_manager.firefox import GeckoDriverManager  # ใช้ WebDriverManager
 import re
 import sys
 import os
@@ -27,10 +27,10 @@ options.add_argument('--no-sandbox')
 options.add_argument('--disable-dev-shm-usage')
 options.add_argument('--blink-settings=imagesEnabled=false')  # ปิดการโหลดรูปภาพ
 
-# 🔹 เริ่มต้น Chrome driver อัตโนมัติ
+# 🔹 เริ่มต้น Firefox driver อัตโนมัติ
 print("🚀 กำลังเปิด WebDriver...")
-service = Service(ChromeDriverManager().install())
-driver = webdriver.Chrome(service=service, options=options)
+service = Service(GeckoDriverManager().install())
+driver = webdriver.Firefox(service=service, options=options)
 print("✅ WebDriver เปิดสำเร็จ!")
 
 # ฟังก์ชันสำหรับแปลงปีจาก พ.ศ. เป็น ค.ศ.
