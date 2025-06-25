@@ -385,54 +385,53 @@ def is_market_open(now, market):
 
     return False
 
-def update_stock_data_ignore_time():
-    logger.info("🗂 อัปเดตฐานข้อมูลหุ้นสหรัฐ...")
-    safe_notify(
-        title="Stock Update",
-        message="เริ่มอัปเดตฐานข้อมูลหุ้นสหรัฐ...",
-        app_name="Stock Data Updater",
-        timeout=10
-    )
-    if update_yfinance():
-        run_scripts(SCRIPTS["stock_us"]["get_stock"], "Get Stock US", critical=False)
-        run_scripts(SCRIPTS["stock_us"]["get_financial"], "Get Financial US", critical=False)
-        run_scripts(SCRIPTS["stock_us"]["daily_sentiment"], "Daily Sentiment US", critical=False)
-        run_scripts(SCRIPTS["stock_us"]["combine_all"], "Combine All US", critical=False)
-        run_scripts(SCRIPTS["stock_us"]["stock_to_database"], "Stock to Database US", critical=False)
-        logger.info("✅ อัปเดตข้อมูลหุ้นสหรัฐเรียบร้อย")
-        safe_notify(
-            title="Stock Update Success",
-            message="อัปเดตข้อมูลหุ้นสหรัฐเรียบร้อย",
-            app_name="Stock Data Updater",
-            timeout=10
-        )
-    
-    logger.info("🗂 อัปเดตฐานข้อมูลหุ้นไทย...")
-    safe_notify(
-        title="Stock Update",
-        message="เริ่มอัปเดตฐานข้อมูลหุ้นไทย...",
-        app_name="Stock Data Updater",
-        timeout=10
-    )
-    if update_yfinance():
-        run_scripts(SCRIPTS["stock_th"]["get_stock"], "Get Stock TH", critical=False)
-        run_scripts(SCRIPTS["stock_th"]["get_financial"], "Get Financial TH", critical=False)
-        run_scripts(SCRIPTS["stock_th"]["daily_sentiment"], "Daily Sentiment TH", critical=False)
-        run_scripts(SCRIPTS["stock_th"]["combine_all"], "Combine All TH", critical=False)
-        run_scripts(SCRIPTS["stock_th"]["stock_to_database"], "Stock to Database TH", critical=False)
-        logger.info("✅ อัปเดตข้อมูลหุ้นไทยเรียบร้อย")
-        safe_notify(
-            title="Stock Update Success",
-            message="อัปเดตข้อมูลหุ้นไทยเรียบร้อย",
-            app_name="Stock Data Updater",
-            timeout=10
-        )
+# Initialize running_scripts
+running_scripts = set()  # Stores running scripts
 
+# Path for JSON file
+LAST_RUN_FILE = "last_run.json"
 
-last_run = {}
-running_scripts = set()  # เก็บสคริปต์ที่กำลังรัน
+def initialize_last_run_file():
+    """Initialize last_run.json if it doesn't exist or is invalid."""
+    if not os.path.exists(LAST_RUN_FILE) or os.path.getsize(LAST_RUN_FILE) == 0:
+        with open(LAST_RUN_FILE, 'w') as f:
+            json.dump({}, f)
+        logger.info(f"Initialized empty {LAST_RUN_FILE}")
+
+def load_last_run():
+    """Load last_run data from JSON file."""
+    initialize_last_run_file()  # Ensure file exists
+    try:
+        with open(LAST_RUN_FILE, 'r') as f:
+            data = json.load(f)
+            # Convert string dates back to datetime, including microseconds
+            return {k: datetime.datetime.strptime(v, '%Y-%m-%dT%H:%M:%S.%f') for k, v in data.items()}
+    except json.JSONDecodeError as e:
+        logger.error(f"Error reading {LAST_RUN_FILE}: {e}")
+        # Return empty dict if JSON is invalid
+        return {}
+    except ValueError as e:
+        logger.error(f"Invalid datetime format in {LAST_RUN_FILE}: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Unexpected error reading {LAST_RUN_FILE}: {e}")
+        return {}
+
+def save_last_run(last_run):
+    """Save last_run data to JSON file."""
+    try:
+        # Convert datetime to ISO format string for JSON serialization
+        data = {k: v.isoformat() for k, v in last_run.items()}
+        with open(LAST_RUN_FILE, 'w') as f:
+            json.dump(data, f)
+        logger.info(f"Saved last_run to {LAST_RUN_FILE}")
+    except Exception as e:
+        logger.error(f"Error saving {LAST_RUN_FILE}: {e}")
+
 def update_stock_data(now, market):
     global running_scripts
+    last_run = load_last_run()
+    
     logger.info(f"⏰ Checking market {market} at {now.strftime('%H:%M:%S')} - Open: {is_market_open(now, market)}")
     if not is_market_open(now, market):
         logger.info(f"📅 ตลาด {market} ปิดวันนี้")
@@ -474,6 +473,7 @@ def update_stock_data(now, market):
                 timeout=10
             )
             last_run[market] = now
+            save_last_run(last_run)
 
     elif market == "TH" and now.hour >= 8 and now.hour < 9:
         logger.info("🗂 อัปเดตฐานข้อมูลหุ้นไทย...")
@@ -508,6 +508,7 @@ def update_stock_data(now, market):
                 timeout=10
             )
             last_run[market] = now
+            save_last_run(last_run)
     else:
         logger.info(f"⏰ เวลาไม่ตรงเงื่อนไขสำหรับ {market}: {now.hour}:{now.minute}")
         safe_notify(
@@ -516,6 +517,69 @@ def update_stock_data(now, market):
             app_name="Stock Data Updater",
             timeout=10
         )
+        
+def update_stock_data_ignore_time():
+    logger.info("🗂 อัปเดตฐานข้อมูลหุ้นสหรัฐ...")
+    safe_notify(
+        title="Stock Update",
+        message="เริ่มอัปเดตฐานข้อมูลหุ้นสหรัฐ...",
+        app_name="Stock Data Updater",
+        timeout=10
+    )
+    last_run = load_last_run()
+    now = datetime.datetime.now()
+    market = "US"
+    if not is_market_open(now, market):
+        logger.info(f"📅 ตลาด {market} ปิดวันนี้")
+        return
+    if market in last_run and last_run[market].date() == now.date():
+        logger.info(f"⏩ ข้ามการอัปเดต {market} เพราะรันไปแล้ววันนี้")
+        return
+    if update_yfinance():
+        run_scripts(SCRIPTS["stock_us"]["get_stock"], "Get Stock US", critical=False)
+        run_scripts(SCRIPTS["stock_us"]["get_financial"], "Get Financial US", critical=False)
+        run_scripts(SCRIPTS["stock_us"]["daily_sentiment"], "Daily Sentiment US", critical=False)
+        run_scripts(SCRIPTS["stock_us"]["combine_all"], "Combine All US", critical=False)
+        run_scripts(SCRIPTS["stock_us"]["stock_to_database"], "Stock to Database US", critical=False)
+        logger.info("✅ อัปเดตข้อมูลหุ้นสหรัฐเรียบร้อย")
+        safe_notify(
+            title="Stock Update Success",
+            message="อัปเดตข้อมูลหุ้นสหรัฐเรียบร้อย",
+            app_name="Stock Data Updater",
+            timeout=10
+        )
+        last_run[market] = now
+        save_last_run(last_run)
+    
+    logger.info("🗂 อัปเดตฐานข้อมูลหุ้นไทย...")
+    safe_notify(
+        title="Stock Update",
+        message="เริ่มอัปเดตฐานข้อมูลหุ้นไทย...",
+        app_name="Stock Data Updater",
+        timeout=10
+    )
+    market = "TH"
+    if not is_market_open(now, market):
+        logger.info(f"📅 ตลาด {market} ปิดวันนี้")
+        return
+    if market in last_run and last_run[market].date() == now.date():
+        logger.info(f"⏩ ข้ามการอัปเดต {market} เพราะรันไปแล้ววันนี้")
+        return
+    if update_yfinance():
+        run_scripts(SCRIPTS["stock_th"]["get_stock"], "Get Stock TH", critical=False)
+        run_scripts(SCRIPTS["stock_th"]["get_financial"], "Get Financial TH", critical=False)
+        run_scripts(SCRIPTS["stock_th"]["daily_sentiment"], "Daily Sentiment TH", critical=False)
+        run_scripts(SCRIPTS["stock_th"]["combine_all"], "Combine All TH", critical=False)
+        run_scripts(SCRIPTS["stock_th"]["stock_to_database"], "Stock to Database TH", critical=False)
+        logger.info("✅ อัปเดตข้อมูลหุ้นไทยเรียบร้อย")
+        safe_notify(
+            title="Stock Update Success",
+            message="อัปเดตข้อมูลหุ้นไทยเรียบร้อย",
+            app_name="Stock Data Updater",
+            timeout=10
+        )
+        last_run[market] = now
+        save_last_run(last_run)
 
 def get_user_input():
     """รับ input จากผู้ใช้พร้อม timeout"""
@@ -648,35 +712,6 @@ def run_manual_mode():
         safe_notify(
             title="Unexpected Error",
             message=f"เกิดข้อผิดพลาด: {e}",
-            app_name="Stock Data Updater",
-            timeout=10
-        )
-
-def run_manual_mode_stock():
-    """โหมดรันครั้งเดียวสำหรับข้อมูลหุ้น"""
-    logger.info("🔧 เริ่มโหมดรันครั้งเดียวสำหรับข้อมูลหุ้น")
-    safe_notify(
-        title="Stock Manual Mode",
-        message="เริ่มโหมดรันครั้งเดียวสำหรับข้อมูลหุ้น",
-        app_name="Stock Data Updater",
-        timeout=10
-    )
-    try:
-        now = datetime.datetime.now()
-        update_stock_data(now, "US")
-        update_stock_data(now, "TH")
-        logger.info("🎉 ข้อมูลหุ้นอัปเดตเรียบร้อย")
-        safe_notify(
-            title="Stock Update Success",
-            message="ข้อมูลหุ้นอัปเดตเรียบร้อย",
-            app_name="Stock Data Updater",
-            timeout=10
-        )
-    except Exception as e:
-        logger.error(f"❌ เกิดข้อผิดพลาดในการอัปเดตข้อมูลหุ้น: {e}")
-        safe_notify(
-            title="Stock Update Error",
-            message=f"เกิดข้อผิดพลาดในการอัปเดตข้อมูลหุ้น: {e}",
             app_name="Stock Data Updater",
             timeout=10
         )
