@@ -16,7 +16,7 @@ import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
-CURRENT_DIR = os.getcwd()
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 🔹 ตั้งค่า Chrome options
 options = Options()
@@ -205,8 +205,10 @@ for stock in stocks:
 final_df = pd.concat(all_dfs, ignore_index=True)
 
 # ✅ บันทึกข้อมูลลง CSV
-final_df.to_csv(os.path.join(CURRENT_DIR,"usa", "Stock", "Financial_America_Quarter.csv"), index=False)
-print("✅ บันทึกข้อมูลลง 'Financial_America_Quarter.csv' สำเร็จ!")
+output_path = os.path.join(SCRIPT_DIR, "Stock", "Financial_America_Quarter.csv")
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+final_df.to_csv(output_path, index=False)
+print(f"✅ บันทึกข้อมูลลง '{os.path.basename(output_path)}' สำเร็จ!")
 
 # ✅ ปิด WebDriver
 driver.quit()

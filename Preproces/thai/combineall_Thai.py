@@ -1,7 +1,6 @@
 import pandas as pd
 from datetime import datetime
 import os
-import pandas as pd
 
 # ---------------------------
 # 1) ฟังก์ชัน merge หลัก
@@ -25,8 +24,8 @@ def merge_stock_financial_sentiment(
     # --------------------
     # (a) เตรียม DataFrame stock
     # --------------------
-    # ให้ Date เป็น datetime
-    stock_df["Date"] = pd.to_datetime(stock_df["Date"], errors="coerce")
+    # ให้ Date เป็น datetime และลบ timezone ถ้ามี
+    stock_df["Date"] = pd.to_datetime(stock_df["Date"], errors="coerce").dt.tz_localize(None)
     
     # ถ้ายังไม่มีคอลัมน์ Quarter ก็สร้างจาก Date
     if "Quarter" not in stock_df.columns:
@@ -77,9 +76,7 @@ def merge_stock_financial_sentiment(
     # --------------------
     # (c) รวม sentiment เข้ากับ stock
     # --------------------
-    # ที่นี่เราจะ Merge ด้วยคีย์ ["Ticker","Date"] แทน 
-    # (ต้องมั่นใจว่า sentiment_df ก็มี Ticker และ Date ในรูปแบบเดียวกัน)
-    
+    # Merge ด้วยคีย์ ["Ticker","Date"]
     merged_df = stock_df.merge(
         sentiment_df,   # เอาคอลัมน์ sentiment ทั้งหมดติดมาได้เลย
         on=["Ticker","Date"],  
@@ -100,7 +97,6 @@ def merge_stock_financial_sentiment(
     # (d) merge financial เข้ากับ merged_df
     # --------------------
     # โดยใช้ [Ticker, Quarter] เทียบกับ [Stock, Quarter]
-    # ต้องมั่นใจว่า Ticker ใน stock_df กับ Stock ใน financial_df สะกดตรงกัน
     merged_df = merged_df.merge(
         financial_df,
         left_on=["Ticker", "Quarter"],
@@ -175,7 +171,7 @@ def merge_stock_financial_sentiment(
     
     us_stock = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
     thai_stock = ['ADVANC', 'INTUCH', 'TRUE', 'DITTO', 'DIF', 
-           'INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
+                  'INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
     
     merged_df["Market_ID"] = merged_df["Ticker"].apply(
         lambda x: "US" if x in us_stock else "TH" if x in thai_stock else None
@@ -203,20 +199,18 @@ if __name__ == "__main__":
         "date": "Date"
     }, inplace=True)
     
-    # แปลง Date เป็น datetime
-    sentiment_df["Date"] = pd.to_datetime(sentiment_df["Date"], errors="coerce")
+    # แปลง Date เป็น datetime และลบ timezone ถ้ามี
+    sentiment_df["Date"] = pd.to_datetime(sentiment_df["Date"], errors="coerce").dt.tz_localize(None)
 
     # 3) Merge ฝั่งไทย
     merged_df_th = merge_stock_financial_sentiment(
-        stock_filepath= os.path.join(os.path.dirname(__file__), "Stock", "stock_data_thai.csv"),
-        financial_filepath= os.path.join(os.path.dirname(__file__), "Stock", "Financial_Thai_Quarter.csv"),
+        stock_filepath=os.path.join(os.path.dirname(__file__), "Stock", "stock_data_thai.csv"),
+        financial_filepath=os.path.join(os.path.dirname(__file__), "Stock", "Financial_Thai_Quarter.csv"),
         sentiment_df=sentiment_df,
         country_name="thai"
     )
     
     # 6) บันทึกเป็น CSV ไฟล์สุดท้าย
-    
-    # Assuming merged_df_th is your DataFrame
     merged_df_th.to_csv(os.path.join(os.path.dirname(__file__), "Stock", "merged_stock_sentiment_financial.csv"), index=False)
     
     # 7) ตรวจสอบตัวอย่าง 10 แถว

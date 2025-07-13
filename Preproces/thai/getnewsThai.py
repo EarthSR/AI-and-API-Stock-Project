@@ -1,4 +1,5 @@
 import os
+import threading
 import urllib.parse
 import pandas as pd
 import requests
@@ -6,7 +7,7 @@ from datetime import datetime, timedelta
 import mysql.connector
 from selenium import webdriver
 from selenium.webdriver.firefox.service import Service  
-from selenium.webdriver.firefox.options import Options  
+from selenium.webdriver.firefox.options import Options as FirefoxOptions 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -15,7 +16,9 @@ from concurrent.futures import ThreadPoolExecutor
 import sys
 from dotenv import load_dotenv, find_dotenv
 import io
-
+import random
+from webdriver_manager.firefox import GeckoDriverManager
+import time
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 load_dotenv(find_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.env')))
@@ -61,14 +64,34 @@ path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'thai')
 News_FOLDER = os.path.join(path, "News")
 os.makedirs(News_FOLDER, exist_ok=True)
 RAW_CSV_FILE = os.path.join(News_FOLDER, "Thai_News.csv")
+driver_lock = threading.Lock()
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:127.0) Gecko/20100101 Firefox/127.0"
+]
 
-def setup_driver():
-    options = Options()
-    options.add_argument('--disable-gpu')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--headless')  # เปลี่ยนเป็น --headless (Firefox ใช้ headless แบบนี้)
-    service = Service(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'geckodriver.exe'))  # เปลี่ยนเป็น geckodriver.exe
-    return webdriver.Firefox(service=service, options=options)  # เปลี่ยนเป็น webdriver.Firefox
+def init_driver():
+    """สร้าง Firefox driver instance แบบปลอดภัย"""
+    with driver_lock:
+        options = FirefoxOptions()
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--headless")  # ใช้ headless mode ถ้าต้องการ
+        options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
+        # ถ้ามี proxy ใช้งาน ให้ uncomment
+        # options.add_argument("--proxy-server=http://your_proxy:port")
+        try:
+            service = Service(GeckoDriverManager().install())
+            driver = webdriver.Firefox(service=service, options=options)
+            driver.set_page_load_timeout(30)
+            time.sleep(2)
+            print(f"Firefox version: {driver.capabilities['browserVersion']}")
+            return driver
+        except Exception as e:
+            print(f"❌ ไม่สามารถเริ่ม GeckoDriver: {e}")
+            return None
 
 def parse_and_format_datetime(date_str):
     date_formats = ["%d %b %Y at %H:%M", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"]
@@ -120,7 +143,7 @@ def fetch_news_content(real_link):
 
 def scrape_news_from_category(category_name, url):
     print(f" [START] ดึงข่าวจาก {category_name}")
-    driver = setup_driver()
+    driver = init_driver()
     news_data = []
 
     try:

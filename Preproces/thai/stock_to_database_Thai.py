@@ -85,6 +85,12 @@ try:
     df["Industry"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[3])
     df["Description"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[4])
     df["Sentiment"] = df["Sentiment"].fillna("Neutral")
+    if df["Sentiment"] == 0:
+        df["Sentiment"] = "Neutral"
+    if df["Sentiment"] == 1:
+        df["Sentiment"] = "Positive"
+    if df["Sentiment"] == -1:
+        df["Sentiment"] = "Negative"
     df = df.where(pd.notna(df), None)
 
     # Prepare stock data for Stock table
