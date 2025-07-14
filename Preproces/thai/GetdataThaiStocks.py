@@ -3,12 +3,17 @@ import pandas as pd
 import datetime
 import sys
 import os
-import mysql.connector
 from dotenv import load_dotenv
+import io
 from pandas_market_calendars import get_calendar
+try:
+    import mysql.connector
+except ImportError:
+    print("⚠️ mysql-connector-python not installed. Skipping database operations.")
+    mysql = None
 
 # ✅ ป้องกัน UnicodeEncodeError
-sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='ignore')
 
 # ✅ ตรวจสอบระดับของโฟลเดอร์
 CURRENT_DIR = os.getcwd()
@@ -21,78 +26,99 @@ DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
 
-if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]):
+if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]) and mysql:
     raise ValueError("❌ ขาดค่าการตั้งค่าฐานข้อมูลในไฟล์ .env")
 
-# ✅ เชื่อมต่อฐานข้อมูล
-conn = mysql.connector.connect(
-    host=DB_HOST,
-    user=DB_USER,
-    password=DB_PASSWORD,
-    database=DB_NAME,
-    autocommit=True
-)
-cursor = conn.cursor()
-print("✅ เชื่อมต่อฐานข้อมูลสำเร็จ!")
-
-# ✅ กำหนดรายชื่อหุ้นไทย
-tickers = ['ADVANC.BK', 'TRUE.BK', 'DITTO.BK', 'DIF.BK', 
-           'INSET.BK', 'JMART.BK', 'INET.BK', 'JAS.BK', 'HUMAN.BK']
-
-# ✅ ฟังก์ชันตรวจสอบวันหยุด
-def is_holiday(date, trading_days):
-    return pd.Timestamp(date) not in trading_days
-
-# ✅ ฟังก์ชันเติมข้อมูลวันหยุดด้วย Rolling Mean
-def impute_holiday_data(ticker_data, window=3):
-    ticker_data = ticker_data.copy()
-    ticker_data.index = pd.to_datetime(ticker_data.index)
-    all_dates = pd.date_range(start=ticker_data.index.min(), end=ticker_data.index.max(), freq='D')
-    ticker_data = ticker_data.reindex(all_dates)
-
-    # ตรวจสอบข้อมูลที่ขาดหาย
-    missing_percentage = ticker_data[['Open', 'High', 'Low', 'Close', 'Volume']].isnull().mean() * 100
-    if missing_percentage.sum() > 20:
-        print(f"⚠️ Warning: Excessive missing data ({missing_percentage.sum():.2f}%).")
-
-    # เติมข้อมูลด้วย Rolling Mean เฉพาะราคา
-    ticker_data[['Open', 'High', 'Low', 'Close']] = (
-        ticker_data[['Open', 'High', 'Low', 'Close']]
-        .ffill(limit=2)  # Forward Fill สำหรับช่องว่างสั้น ๆ
-        .rolling(window=window, min_periods=1).mean()
-    )
-
-    # ตั้ง Volume และ Changepercent สำหรับวันหยุด
-    ticker_data['Volume'] = ticker_data['Volume'].fillna(0)
-    ticker_data['Changepercent'] = (ticker_data['Close'] - ticker_data['Open']) / ticker_data['Open'] * 100
-    ticker_data['Changepercent'] = ticker_data['Changepercent'].fillna(0)
-
-    return ticker_data
+# ✅ ตรวจสอบโครงสร้างตารางฐานข้อมูล (เพื่อดึงวันที่ล่าสุด)
+def check_table_structure():
+    if not mysql:
+        return False
+    try:
+        conn = mysql.connector.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME
+        )
+        cursor = conn.cursor()
+        cursor.execute("SHOW COLUMNS FROM StockDetail")
+        columns = [col[0] for col in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        expected_columns = ['Date', 'StockSymbol']
+        missing_columns = [col for col in expected_columns if col not in columns]
+        if missing_columns:
+            print(f"❌ Missing columns in StockDetail: {missing_columns}")
+            print("⚠️ Using default start date (2018-01-01) due to table issues.")
+            return False
+        print("✅ Table structure is sufficient for date checking")
+        return True
+    except Exception as e:
+        print(f"❌ Error checking table structure: {e}")
+        print("⚠️ Using default start date (2018-01-01) due to table issues.")
+        return False
 
 # ✅ ตรวจสอบวันที่ล่าสุดจากฐานข้อมูล
 latest_dates = {}
-end_date = datetime.datetime.today().strftime('%Y-%m-%d')  # วันที่ปัจจุบัน
+tickers = ['ADVANC.BK', 'TRUE.BK', 'DITTO.BK', 'DIF.BK', 
+           'INSET.BK', 'JMART.BK', 'INET.BK', 'JAS.BK', 'HUMAN.BK']
+has_valid_table = False
+today = datetime.datetime.now()
+current_date = (today - datetime.timedelta(days=1)).strftime('%Y-%m-%d')  # 13 กรกฎาคม 2025
 
-for ticker in tickers:
-    stock_name = ticker.replace('.BK', '')
-    cursor.execute("SELECT MAX(Date) FROM StockDetail WHERE StockSymbol = %s", (stock_name,))
-    result = cursor.fetchone()[0]
-    if result is None:
+if all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]) and mysql:
+    try:
+        conn = mysql.connector.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+            autocommit=True
+        )
+        cursor = conn.cursor()
+        print("✅ เชื่อมต่อฐานข้อมูลสำเร็จ!")
+        has_valid_table = check_table_structure()
+        
+        if has_valid_table:
+            for ticker in tickers:
+                stock_name = ticker.replace('.BK', '')
+                try:
+                    cursor.execute("SELECT MAX(Date) FROM StockDetail WHERE StockSymbol = %s", (stock_name,))
+                    result = cursor.fetchone()[0]
+                    if result is None:
+                        latest_dates[ticker] = "2018-01-01"
+                    elif result > today.date():
+                        print(f"⚠️ Future date found for {ticker}: {result}. Using default start date (2018-01-01)")
+                        latest_dates[ticker] = "2018-01-01"
+                    else:
+                        latest_dates[ticker] = (result + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+                except Exception as e:
+                    print(f"⚠️ Error fetching latest date for {ticker}: {e}")
+                    latest_dates[ticker] = "2018-01-01"
+        else:
+            for ticker in tickers:
+                latest_dates[ticker] = "2018-01-01"
+        
+        cursor.close()
+        conn.close()
+        print("🔹 ปิดการเชื่อมต่อฐานข้อมูลแล้ว")
+    except Exception as e:
+        print(f"❌ Failed to connect to database: {e}")
+        for ticker in tickers:
+            latest_dates[ticker] = "2018-01-01"
+else:
+    print("⚠️ Missing database configuration or mysql-connector-python, using default start date (2018-01-01)")
+    for ticker in tickers:
         latest_dates[ticker] = "2018-01-01"
-    else:
-        latest_dates[ticker] = (result + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
 
-# ✅ ปิดการเชื่อมต่อฐานข้อมูล
-cursor.close()
-conn.close()
-print("🔹 ปิดการเชื่อมต่อฐานข้อมูลแล้ว")
-
-# ✅ กำหนดวันที่เริ่มต้น
-start_date = min(latest_dates.values())
+# ✅ กำหนดวันที่เริ่มต้นและสิ้นสุด
+start_date_db = min(latest_dates.values())
+start_date = (pd.to_datetime(min(latest_dates.values())) + datetime.timedelta(days=1)).strftime('%Y-%m-%d')  # เริ่มหลังวันที่ล่าสุด (เช่น 2025-07-12)
+end_date = current_date  # 13 กรกฎาคม 2025
 
 # ตรวจสอบว่ามีข้อมูลใหม่ให้ดึงหรือไม่
-if start_date > end_date:
-    print(f"❌ ไม่มีข้อมูลใหม่ให้ดึง (start_date: {start_date} > end_date: {end_date})")
+if start_date >= end_date:
+    print(f"❌ ไม่มีข้อมูลใหม่ให้ดึง (start_date: {start_date} >= end_date: {end_date})")
     sys.exit(0)
 
 print(f"🔹 ดึงข้อมูลจาก {start_date} ถึง {end_date}")
@@ -101,28 +127,71 @@ print(f"🔹 ดึงข้อมูลจาก {start_date} ถึง {end_da
 set_calendar = get_calendar('XBKK')
 trading_days = set_calendar.schedule(start_date=start_date, end_date=end_date).index
 
+# ✅ ฟังก์ชันตรวจสอบว่าเป็นวันหยุดหรือไม่
+def is_holiday(date, trading_days):
+    return pd.Timestamp(date) not in trading_days
+
+# ✅ ฟังก์ชันเติมข้อมูลวันหยุดด้วย Forward Fill และ Rolling Mean
+def impute_holiday_data(ticker_data, all_dates, ticker, window=3):
+    ticker_data = ticker_data.copy()
+    required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+    if not all(col in ticker_data.columns for col in required_columns):
+        print(f"❌ Missing required columns for {ticker}: {required_columns}")
+        return pd.DataFrame()
+    
+    ticker_data.index = pd.to_datetime(ticker_data.index).tz_localize(None)
+    ticker_data = ticker_data.reindex(all_dates, method=None)
+    
+    missing_percentage = ticker_data[required_columns].isnull().mean() * 100
+    print(f"🔍 Missing data for {ticker}: {missing_percentage.to_dict()}")
+    if missing_percentage.sum() > 20:
+        print(f"⚠️ Warning: Excessive missing data for {ticker} ({missing_percentage.sum():.2f}%).")
+
+    ticker_data[['Open', 'High', 'Low', 'Close']] = (
+        ticker_data[['Open', 'High', 'Low', 'Close']]
+        .ffill(limit=2)
+        .bfill(limit=2)
+        .rolling(window=window, min_periods=1).mean()
+    )
+    ticker_data['Volume'] = ticker_data['Volume'].fillna(0)
+    ticker_data['Changepercent'] = (ticker_data['Close'] - ticker_data['Open']) / ticker_data['Open'] * 100
+    ticker_data['Changepercent'] = ticker_data['Changepercent'].fillna(0)
+
+    return ticker_data
+
+# ✅ สร้างช่วงวันที่ทั้งหมด (รวมวันหยุด)
+all_dates = pd.date_range(start=start_date, end=end_date, freq='D')
+
 # ✅ ดึงข้อมูลด้วย yfinance
 max_retries = 3
-retry_count = 0
 data_dict = {}
 
-while retry_count < max_retries:
-    try:
-        for ticker in tickers:
+for ticker in tickers:
+    retry_count = 0
+    while retry_count < max_retries:
+        try:
             stock = yf.Ticker(ticker)
             ticker_data = stock.history(start=start_date, end=end_date, interval='1d')
             if not ticker_data.empty:
+                print(f"✅ Retrieved data for {ticker}: {len(ticker_data)} rows")
+                print(f"📋 Sample data for {ticker}:\n{ticker_data.head()}")
+                ticker_data = impute_holiday_data(ticker_data, all_dates, ticker, window=3)
+                stock_name = ticker.replace('.BK', '')
+                ticker_data['Ticker'] = stock_name
                 data_dict[ticker] = ticker_data
-        if not data_dict:
-            print("⚠️ ไม่มีข้อมูลใหม่จาก yfinance")
-            sys.exit(0)
-        break
-    except Exception as e:
-        retry_count += 1
-        print(f"⚠️ Error: {e} (ลองใหม่ {retry_count}/{max_retries})")
-        if retry_count == max_retries:
-            print("❌ ไม่สามารถดึงข้อมูลจาก yfinance ได้")
-            sys.exit(1)
+            else:
+                print(f"⚠️ No data retrieved for {ticker}")
+            break
+        except Exception as e:
+            retry_count += 1
+            print(f"⚠️ Error for {ticker}: {e} (ลองใหม่ {retry_count}/{max_retries})")
+            if retry_count == max_retries:
+                print(f"❌ Failed to retrieve data for {ticker} after {max_retries} attempts")
+                break
+
+if not data_dict:
+    print("⚠️ ไม่มีข้อมูลใหม่จาก yfinance")
+    sys.exit(0)
 
 # ✅ ประมวลผลข้อมูลและเติมวันหยุด
 data_list = []
@@ -130,20 +199,11 @@ for ticker, ticker_data in data_dict.items():
     if ticker_data.empty:
         print(f"⚠️ ไม่มีข้อมูลสำหรับ {ticker}")
         continue
-    
-    # ✅ Reindex เป็น freq='D' และใช้ Rolling Mean
-    ticker_data = impute_holiday_data(ticker_data, window=3)
-    stock_name = ticker.replace('.BK', '')
-    ticker_data['Ticker'] = stock_name
-    
-    # ✅ แจ้งเตือนสำหรับวันหยุด
     for date in ticker_data.index:
         if is_holiday(date, trading_days):
             print(f"⚠️ Note: Data for {ticker} on {date.strftime('%Y-%m-%d')} is imputed using Rolling Mean.")
-
     data_list.append(ticker_data)
 
-# ตรวจสอบว่ามีข้อมูลหรือไม่
 if not data_list:
     print("❌ ไม่มีข้อมูลใด ๆ ที่ดึงมาได้")
     sys.exit(1)
@@ -151,28 +211,7 @@ if not data_list:
 # รวมข้อมูลทั้งหมดเป็น DataFrame เดียว
 cleaned_data = pd.concat(data_list).reset_index()
 
-# ✅ Merge กับข้อมูล Sentiment (สมมติว่ามีไฟล์ daily_sentiment_summary.csv)
-try:
-    sentiment_df = pd.read_csv(os.path.join(os.path.dirname(__file__), "thai", "Stock", "daily_sentiment_summary.csv"))
-    sentiment_df['Date'] = pd.to_datetime(sentiment_df['Date'])
-    sentiment_df = sentiment_df.set_index(['Date', 'Ticker']).reindex(
-        pd.MultiIndex.from_product([cleaned_data['Date'].unique(), [t.replace('.BK', '') for t in tickers]], 
-                                  names=['Date', 'Ticker'])
-    ).reset_index()
-    sentiment_df[['net_sentiment_score', 'Sentiment']] = sentiment_df[['net_sentiment_score', 'Sentiment']].ffill()
-
-    cleaned_data = cleaned_data.merge(
-        sentiment_df[['Date', 'Ticker', 'net_sentiment_score', 'Sentiment']],
-        on=['Date', 'Ticker'],
-        how='left'
-    )
-    print("✅ Merge ข้อมูล Sentiment สำเร็จ")
-except FileNotFoundError:
-    print("⚠️ ไม่พบไฟล์ daily_sentiment_summary.csv ข้ามการ Merge ข้อมูล Sentiment")
-    cleaned_data['net_sentiment_score'] = pd.NA
-    cleaned_data['Sentiment'] = pd.NA
-
-# ✅ เปลี่ยนชื่อคอลัมน์ให้ตรงกับฐานข้อมูล
+# ✅ เปลี่ยนชื่อคอลัมน์ให้ตรงกับ CSV
 cleaned_data = cleaned_data.rename(columns={
     'index': 'Date',
     'Ticker': 'Ticker',
@@ -187,21 +226,19 @@ cleaned_data = cleaned_data.rename(columns={
 cleaned_data['Date'] = pd.to_datetime(cleaned_data['Date']).dt.strftime('%Y-%m-%d')
 
 # ✅ จัดเรียงคอลัมน์
-columns_to_keep = ['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume', 'Changepercent', 'net_sentiment_score', 'Sentiment']
+columns_to_keep = ['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume', 'Changepercent']
 cleaned_data = cleaned_data[columns_to_keep]
 
-# ✅ กรองข้อมูลที่ไม่ถูกต้อง
+# ✅ กรองข้อมูลที่ไม่ถูกต้องและตัดวันที่
 print("🔹 กรองข้อมูลที่ไม่ถูกต้องออก...")
 before_filter = len(cleaned_data)
 cleaned_data = cleaned_data[
-    (cleaned_data['Open'] > 0) &
-    (cleaned_data['High'] > 0) &
-    (cleaned_data['Low'] > 0) &
-    (cleaned_data['Close'] > 0) &
     (cleaned_data['Open'].notna()) &
     (cleaned_data['High'].notna()) &
     (cleaned_data['Low'].notna()) &
-    (cleaned_data['Close'].notna())
+    (cleaned_data['Close'].notna()) &
+    (cleaned_data['Date'] >= start_date_db) &    # เพิ่มเงื่อนไขนี้
+    (cleaned_data['Date'] <= end_date)
 ]
 after_filter = len(cleaned_data)
 print(f"🔹 กรองข้อมูลแล้ว: {before_filter} -> {after_filter} แถว")
@@ -218,7 +255,7 @@ if len(cleaned_data) < initial_rows:
     print(f"🔹 ลบข้อมูลของวันนี้ ({today}) แล้ว")
 
 # ✅ บันทึกข้อมูลเป็นไฟล์ CSV
-csv_path = os.path.join(CURRENT_DIR, "thai", "Stock", "stock_data_thai.csv")
+csv_path = os.path.join(os.path.dirname(__file__), "Stock", "stock_data_thai.csv")
 os.makedirs(os.path.dirname(csv_path), exist_ok=True)
 cleaned_data.to_csv(csv_path, index=False)
 print(f"✅ บันทึกไฟล์ CSV สำเร็จที่: {csv_path}")
@@ -236,5 +273,3 @@ if not cleaned_data.empty:
 else:
     print("❌ ไม่มีข้อมูลที่ถูกต้องในช่วงวันที่ที่กำหนด")
 
-# ✅ เพิ่มการแจ้งเตือนสำหรับการใช้งานจริง
-print("\n⚠️ Warning: This data includes imputed prices for non-trading days (e.g., weekends, holidays) using a 3-day Rolling Mean, as required by the LSTM/GRU model trained with freq='D'. Use with caution for real-world trading decisions.")
