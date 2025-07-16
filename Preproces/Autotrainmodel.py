@@ -15,6 +15,7 @@ import mysql.connector
 from dotenv import load_dotenv
 import xgboost as xgb
 import lightgbm as lgb
+from tensorflow.keras.optimizers import Adam
 
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -40,8 +41,8 @@ current_hour = datetime.now().hour
 #     print("❌ ไม่อยู่ในช่วงเวลาทำการของตลาดหุ้นไทยหรืออเมริกา")
 #     exit()
 market_filter = "America"
-MODEL_LSTM_PATH = "../LSTM_model/best_multi_task_model.keras"
-MODEL_GRU_PATH = "../GRU_Model/best_multi_task_model.keras"
+MODEL_LSTM_PATH = "../LSTM_model/best_v6_plus_minimal_tuning_v2_final_model.keras"
+MODEL_GRU_PATH = "../GRU_Model/best_v6_plus_minimal_tuning_v2_final_model.keras"
 lgbm_price_model = joblib.load('../Ensemble_Model/lgbm_price_model.pkl')
 xgb_dir_model = joblib.load('../Ensemble_Model/xgb_dir_model.pkl')
 SEQ_LENGTH = 10
@@ -86,7 +87,7 @@ def fetch_latest_data():
         FROM StockDetail
         LEFT JOIN Stock ON StockDetail.StockSymbol = Stock.StockSymbol
         WHERE Stock.Market = '{market_filter}'  
-        AND StockDetail.Date >= CURDATE() - INTERVAL 365 DAY
+        AND StockDetail.Date >= CURDATE() - INTERVAL 350 DAY
         ORDER BY StockDetail.StockSymbol, StockDetail.Date ASC;
     """
 
@@ -230,6 +231,7 @@ def fetch_latest_data():
     
     # Apply indicators calculation to each stock group
     df = df.groupby('StockSymbol').apply(calculate_indicators)
+    df = df.reset_index(drop=True)
     
     # Drop rows with NaN values
     df.dropna(inplace=True)
@@ -244,6 +246,32 @@ try:
 except Exception as e:
     print(f"❌ เกิดข้อผิดพลาดในการโหลดโมเดล: {e}")
     exit()
+
+# ตัวอย่างการ compile (ต้องใช้ loss และ metrics ให้ตรงกับตอน train เดิม)
+model_lstm.compile(
+    optimizer=Adam(learning_rate=1e-4),
+    loss={
+        "price_output": "huber",
+        "direction_output": "binary_crossentropy"
+    },
+    loss_weights={"price_output": 0.39, "direction_output": 0.61},
+    metrics={
+        "price_output": ["mae"],
+        "direction_output": ["accuracy"]
+    }
+)
+model_gru.compile(
+    optimizer=Adam(learning_rate=1e-4),
+    loss={
+        "price_output": "huber",
+        "direction_output": "binary_crossentropy"
+    },
+    loss_weights={"price_output": 0.39, "direction_output": 0.61},
+    metrics={
+        "price_output": ["mae"],
+        "direction_output": ["accuracy"]
+    }
+)
 
 # ------------------------- 4) เตรียมข้อมูล -------------------------
 feature_columns = [
@@ -575,6 +603,9 @@ def check_model_features(model, model_type='lgbm'):
 if __name__ == "__main__":
     print("\n🔮 กำลังทำนายราคาหุ้นสำหรับวันถัดไป...")
     test_df.to_csv('latest_data.csv', index=False)
+    print("หุ้นทั้งหมดใน test_df:", test_df['StockSymbol'].unique())
+    for ticker in test_df['StockSymbol'].unique():
+        print(f"{ticker}: {len(test_df[test_df['StockSymbol'] == ticker])} rows")
     print(check_model_features(lgbm_price_model, 'lgbm'))
     print(check_model_features(xgb_dir_model, 'xgb'))
     # 2. เรียกใช้ฟังก์ชันใหม่เพื่อทำนายวันถัดไป (สำคัญ!)
