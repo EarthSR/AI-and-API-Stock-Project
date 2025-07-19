@@ -129,8 +129,8 @@ dependencies:
       - cymem==2.0.11
       - datasets==3.6.0
       - dill==0.3.8
-      - en-core-web-sm==3.8.0
-      - en-core-web-trf==3.8.0
+      # - en-core-web-sm==3.8.0
+      # - en-core-web-trf==3.8.0
       - exchange-calendars==4.10.1
       - fastapi==0.115.14
       - filelock==3.16.1
@@ -199,7 +199,7 @@ dependencies:
       - plyer==2.1.0
       - preshed==3.0.9
       - propcache==0.3.2
-      - protobuf==5.29.4
+      - protobuf>=3.20.3,<4.24.0
       - pyarrow==20.0.0
       - pyasn1==0.6.1
       - pyasn1-modules==0.4.1
