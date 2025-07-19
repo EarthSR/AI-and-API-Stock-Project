@@ -23,7 +23,6 @@ app.use(cors()); // Enable CORS
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 
-// Create Connection Pool
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -35,7 +34,6 @@ const pool = mysql.createPool({
     queueLimit: 0,
     connectTimeout: 60000,
   });
-
 
 
   // ฟังก์ชันสำหรับตรวจสอบ JWT token
@@ -777,9 +775,10 @@ app.get("/api/search", (req, res) => {
         s.StockSymbol, 
         s.Market, 
         s.CompanyName, 
-        sd.StockDetailID,  -- ✅ ดึงเฉพาะวันล่าสุด
+        sd.StockDetailID,  -- ดึงเฉพาะวันล่าสุด
         sd.Date, 
-        sd.ClosePrice
+        sd.ClosePrice,
+        sd.ChangePercen
     FROM Stock s
     INNER JOIN StockDetail sd 
         ON s.StockSymbol = sd.StockSymbol
@@ -803,14 +802,14 @@ app.get("/api/search", (req, res) => {
       return res.status(404).json({ message: "No results found" });
     }
 
-    // ✅ ดึงเฉพาะข้อมูลวันล่าสุด
     const groupedResults = results.map(stock => ({
       StockSymbol: stock.StockSymbol,
       Market: stock.Market,
       CompanyName: stock.CompanyName,
-      StockDetailID: stock.StockDetailID,  // ✅ ดึง StockDetailID วันล่าสุด
+      StockDetailID: stock.StockDetailID,
       LatestDate: stock.Date,
-      ClosePrice: stock.ClosePrice
+      ClosePrice: stock.ClosePrice,
+      ChangePercen: stock.ChangePercen  
     }));
 
     res.json({ results: groupedResults });
@@ -821,7 +820,6 @@ app.get("/api/search", (req, res) => {
 
 
 // ---- Profile ---- //
-
 //แก้ไขโปรไฟล์
 app.put(
   "/api/users/:userId/profile",
@@ -1063,13 +1061,15 @@ app.delete("/api/favorites", verifyToken, (req, res) => {
 
 // API สำหรับดึงรายการหุ้นที่ผู้ใช้ติดตาม พร้อมราคาวันล่าสุด และกราฟ 5 วัน
 app.get("/api/favorites", verifyToken, (req, res) => {
-  const userId = req.userId; // ดึง userId จาก Token ที่ผ่านการตรวจสอบแล้ว
+  const userId = req.userId;
 
-  // ดึงรายการหุ้นที่ผู้ใช้ติดตาม พร้อม FollowID
+  // ✅ ดึงหุ้นที่ผู้ใช้ติดตาม พร้อมชื่อบริษัทและ FollowDate เรียงตาม FollowDate จากใหม่ไปเก่า
   const fetchFavoritesSql = `
-    SELECT fs.FollowID, fs.StockSymbol
+    SELECT fs.FollowID, fs.StockSymbol, fs.FollowDate, s.CompanyName
     FROM FollowedStocks fs
-    WHERE fs.UserID = ?;
+    JOIN Stock s ON fs.StockSymbol = s.StockSymbol
+    WHERE fs.UserID = ?
+    ORDER BY fs.FollowDate DESC;
   `;
 
   pool.query(fetchFavoritesSql, [userId], (err, stockResults) => {
@@ -1082,7 +1082,6 @@ app.get("/api/favorites", verifyToken, (req, res) => {
       return res.status(404).json({ message: "No followed stocks found" });
     }
 
-    // ดึงข้อมูลราคาปิด (ClosePrice) และ Change (%) 5 วันล่าสุดสำหรับแต่ละหุ้น
     const stockSymbols = stockResults.map(stock => stock.StockSymbol);
 
     const fetchStockDetailsSql = `
@@ -1098,21 +1097,21 @@ app.get("/api/favorites", verifyToken, (req, res) => {
         return res.status(500).json({ error: "Error fetching stock details" });
       }
 
-      // จัดกลุ่มข้อมูลตามหุ้น
       const stockDataMap = {};
       stockResults.forEach(stock => {
         stockDataMap[stock.StockSymbol] = {
-          FollowID: stock.FollowID, // ✅ เพิ่ม FollowID
+          FollowID: stock.FollowID,
           StockSymbol: stock.StockSymbol,
-          LastPrice: null, // ราคาปิดล่าสุด
-          LastChange: null, // การเปลี่ยนแปลงล่าสุด
-          HistoricalPrices: [] // กราฟย้อนหลัง 5 วัน
+          CompanyName: stock.CompanyName,
+          FollowDate: stock.FollowDate, // ✅ เพิ่ม FollowDate
+          LastPrice: null,
+          LastChange: null,
+          HistoricalPrices: []
         };
       });
 
       priceResults.forEach(price => {
         if (!stockDataMap[price.StockSymbol].LastPrice) {
-          // กำหนดราคาปิดและการเปลี่ยนแปลงของวันล่าสุด
           stockDataMap[price.StockSymbol].LastPrice = price.ClosePrice;
           stockDataMap[price.StockSymbol].LastChange = price.ChangePercentage;
         }
@@ -1125,11 +1124,11 @@ app.get("/api/favorites", verifyToken, (req, res) => {
         }
       });
 
-      // ส่งผลลัพธ์เป็น Array ของหุ้นที่ผู้ใช้ติดตาม
       res.json(Object.values(stockDataMap));
     });
   });
 });
+
 
 // API สำหรับดึงหุ้นที่มีการเปลี่ยนแปลงสูงสุด 10 อันดับ พร้อมราคาปิด และ ID
 app.get("/api/top-10-stocks", async (req, res) => {
@@ -1296,50 +1295,104 @@ app.get("/api/trending-stocks", async (req, res) => {
 
 app.get("/api/latest-news", async (req, res) => {
   try {
-    // ดึงวันที่ล่าสุด
-    const latestDateQuery = "SELECT MAX(PublishedDate) AS LatestDate FROM News";
-    pool.query(latestDateQuery, (dateErr, dateResults) => {
-      if (dateErr) {
-        console.error("Database error fetching latest date:", dateErr);
-        return res.status(500).json({ error: "Database error fetching latest date" });
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = parseInt(req.query.offset) || 0;
+    const sourceInput = req.query.source;
+    const sentimentInput = req.query.sentiment;
+    const sortOrder = req.query.sort?.toUpperCase() === "ASC" ? "ASC" : "DESC"; // default DESC
+
+    // แปลง source ที่รับมาจาก Flutter ให้ตรงกับในฐานข้อมูล
+    let sourceDbValue = null;
+    if (sourceInput === "TH News") {
+      sourceDbValue = "bangkokpost";
+    } else if (sourceInput === "US News") {
+      sourceDbValue = "investing";
+    }
+
+    let query = `
+      SELECT 
+        NewsID, 
+        Title,
+        Source,
+        Sentiment, 
+        DATE_FORMAT(PublishedDate, '%Y-%m-%d') as PublishedDate,
+        Img
+      FROM News
+    `;
+
+    const conditions = [];
+    const params = [];
+
+    if (sourceDbValue) {
+      conditions.push("Source = ?");
+      params.push(sourceDbValue);
+    }
+
+    if (sentimentInput && ['Positive', 'Negative', 'Neutral'].includes(sentimentInput)) {
+      conditions.push("Sentiment = ?");
+      params.push(sentimentInput);
+    }
+
+    if (conditions.length > 0) {
+      query += " WHERE " + conditions.join(" AND ");
+    }
+
+    query += ` ORDER BY PublishedDate ${sortOrder} LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
+
+    pool.query(query, params, (err, results) => {
+      if (err) {
+        console.error("DB Error:", err);
+        return res.status(500).json({ error: "Database error" });
       }
 
-      const latestDate = dateResults[0].LatestDate;
-      if (!latestDate) {
-        return res.status(404).json({ error: "No news data available" });
-      }
-
-      // ดึงข่าวล่าสุดจากตาราง News (เพิ่ม NewsID)
-      const newsQuery = `
-        SELECT NewsID, Title, Sentiment, PublishedDate 
-        FROM News 
-        WHERE PublishedDate = ?
-        ORDER BY PublishedDate DESC
-        LIMIT 10;
-      `;
-
-      pool.query(newsQuery, [latestDate], (err, results) => {
-        if (err) {
-          console.error("Database error fetching latest news:", err);
-          return res.status(500).json({ error: "Database error fetching latest news" });
-        }
-
-        res.json({
-          date: latestDate,
-          news: results.map(news => ({
-            NewsID: news.NewsID,  // ✅ เพิ่ม NewsID
-            Title: news.Title,
-            Sentiment: news.Sentiment,
-            PublishedDate: news.PublishedDate
-          }))
-        });
-      });
+      res.json({ news: results });
     });
   } catch (error) {
-    console.error("Internal server error:", error.message);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Error:", error.message);
+    res.status(500).json({ error: "Internal error" });
   }
 });
+
+
+app.get("/api/news-by-source", async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = parseInt(req.query.offset) || 0;
+    const region = (req.query.region || "TH").toUpperCase();
+
+    // แปลงรหัสประเทศ → ชื่อแหล่งข่าวในฐานข้อมูล
+    let sourceName;
+    if (region === "TH News") {
+      sourceName = "BangkokPost";
+    } else if (region === "US News") {
+      sourceName = "Investing";
+    } else {
+      return res.status(400).json({ error: "Invalid region" });
+    }
+
+    const query = `
+      SELECT NewsID, Title, Source, Sentiment, PublishedDate, Img
+      FROM News
+      WHERE Source = ?
+      ORDER BY PublishedDate DESC
+      LIMIT ? OFFSET ?;
+    `;
+
+    pool.query(query, [sourceName, limit, offset], (err, results) => {
+      if (err) {
+        console.error("DB Error:", err);
+        return res.status(500).json({ error: "Database error" });
+      }
+
+      res.json({ news: results });
+    });
+  } catch (error) {
+    console.error("Error:", error.message);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
 
 //Detail News
 app.get("/api/news-detail", async (req, res) => {
@@ -1351,7 +1404,7 @@ app.get("/api/news-detail", async (req, res) => {
 
     // คิวรี่ดึงรายละเอียดข่าวโดยใช้ NewsID
     const newsDetailQuery = `
-      SELECT NewsID, Title, Sentiment, Source, PublishedDate, ConfidenceScore, Content, URL
+      SELECT NewsID, Title, Sentiment, Source, PublishedDate, ConfidenceScore, Content, URL,Img
       FROM News
       WHERE NewsID = ?
       LIMIT 1;
@@ -1373,15 +1426,17 @@ app.get("/api/news-detail", async (req, res) => {
       const confidencePercentage = `${(news.ConfidenceScore * 100).toFixed(0)}%`;
 
       res.json({
-        NewsID: news.NewsID,
-        Title: news.Title,
-        Sentiment: news.Sentiment,
-        Source: news.Source,
-        PublishedDate: news.PublishedDate,
-        ConfidenceScore: confidencePercentage, // แสดงค่าเป็นเปอร์เซ็นต์
-        Content: news.Content,
-        URL: news.URL
-      });
+  NewsID: news.NewsID,
+  Title: news.Title,
+  Sentiment: news.Sentiment,
+  Source: news.Source,
+  PublishedDate: news.PublishedDate,
+  ConfidenceScore: confidencePercentage, // แสดงค่าเป็นเปอร์เซ็นต์
+  Content: news.Content,
+  ImageURL: news.Img, // <-- แก้ตรงนี้
+  URL: news.URL
+});
+
     });
   } catch (error) {
     console.error("Internal server error:", error.message);
@@ -1405,14 +1460,21 @@ async function getExchangeRate() {
 app.get("/api/stock-detail/:symbol", async (req, res) => {
   try {
     const { symbol } = req.params;
-    const { timeframe = "5D" } = req.query; // ค่าเริ่มต้นของกราฟเป็น 5 วัน
+    const { timeframe = "5D" } = req.query;
 
     // กำหนดช่วงเวลาที่รองรับ
-    const historyLimits = { "1D": 1, "5D": 5, "30D": 30, "6M": 180 };
+    const historyLimits = { 
+      "1D": 1, 
+      "5D": 5, 
+      "1M": 22,    // ประมาณ 22 วันทำการใน 1 เดือน
+      "3M": 66,    // 3 เดือน 
+      "6M": 132,   // 6 เดือน
+      "1Y": 264,   // 1 ปี (ประมาณ 252 วันทำการ)
+      "ALL": null  // null หมายถึงดึงข้อมูลทั้งหมด
+    };
 
-    // ตรวจสอบว่า timeframe ถูกต้องหรือไม่
-    if (!historyLimits[timeframe]) {
-      return res.status(400).json({ error: "Invalid timeframe. Choose from 1D, 5D, 30D, 6M." });
+    if (!historyLimits.hasOwnProperty(timeframe)) {
+      return res.status(400).json({ error: "Invalid timeframe. Choose from 1D, 5D, 1M, 3M, 6M, 1Y, ALL." });
     }
 
     // ดึงวันที่ล่าสุดที่มีข้อมูล
@@ -1441,9 +1503,7 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
           sd.OpenPrice, 
           sd.ClosePrice, 
           sd.Changepercen AS ChangePercentage, 
-          sd.Volume, 
-          sd.PredictionClose, 
-          sd.PredictionTrend  -- ✅ เพิ่ม PredictionTrend
+          sd.Volume
         FROM Stock s
         LEFT JOIN StockDetail sd ON s.StockSymbol = sd.StockSymbol AND sd.Date = ?
         WHERE s.StockSymbol = ?;
@@ -1460,26 +1520,20 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
         }
 
         const stock = results[0];
-
-        // ✅ แปลงค่า Type ของหุ้นจาก Market
         let stockType = stock.Market === "America" ? "US Stock" : "TH Stock";
 
-        // ✅ ดึงค่าอัตราแลกเปลี่ยน USD → THB ถ้าหุ้นเป็นของตลาดอเมริกา
         let exchangeRate = 1;
         if (stockType === "US Stock") {
           exchangeRate = await getExchangeRate();
         }
 
-        // ✅ ตรวจสอบค่า ClosePrice และแปลงเป็น THB ถ้าหุ้นเป็นของ US
         const closePrice = stock.ClosePrice !== null ? parseFloat(stock.ClosePrice) : 0;
         const closePriceTHB = stockType === "US Stock" ? closePrice * exchangeRate : closePrice;
 
-        // ✅ คำนวณ % การเปลี่ยนแปลงของ Prediction Close
         let pricePredictionChange = stock.PredictionClose
           ? ((stock.PredictionClose - stock.ClosePrice) / stock.ClosePrice) * 100
           : null;
 
-        // ✅ คำนวณค่าเฉลี่ย Volume 30 วัน
         const avgVolumeQuery = `
           SELECT AVG(Volume) AS AvgVolume30D 
           FROM StockDetail 
@@ -1487,43 +1541,47 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
           ORDER BY Date DESC 
           LIMIT 30;
         `;
+        
 
         pool.query(avgVolumeQuery, [symbol], (volErr, volResults) => {
           if (volErr) {
             console.error("Database error fetching average volume:", volErr);
             return res.status(500).json({ error: "Database error fetching average volume" });
           }
-        
-          // ✅ แก้ปัญหา .toFixed(2) ใช้กับค่าที่เป็น null
+
           const avgVolume30D = volResults[0]?.AvgVolume30D ? parseFloat(volResults[0].AvgVolume30D) : 0;
           const formattedAvgVolume30D = avgVolume30D > 0 ? avgVolume30D.toFixed(2) + " Million" : "N/A";
-        
-          // ✅ ดึงข้อมูลกราฟย้อนหลังตาม Timeframe ที่เลือก
-          const historyQuery = `
-            SELECT StockSymbol, Date, ClosePrice
+
+          let historyQuery = `
+            SELECT StockSymbol, Date, OpenPrice, HighPrice, LowPrice, ClosePrice
             FROM StockDetail 
             WHERE StockSymbol = ? 
-            ORDER BY Date DESC 
-            LIMIT ?;
+            ORDER BY Date DESC
           `;
-        
-          pool.query(historyQuery, [symbol, historyLimits[timeframe]], (histErr, historyResults) => {
+
+          const limit = historyLimits[timeframe];
+          if (limit !== null) {
+            historyQuery += ` LIMIT ${limit}`;
+          }
+          // ถ้า timeframe เป็น ALL จะไม่มี LIMIT
+
+          pool.query(historyQuery, [symbol], (histErr, historyResults) => {
             if (histErr) {
               console.error(`Database error fetching historical data:`, histErr);
               return res.status(500).json({ error: "Database error fetching historical data" });
             }
-        
-            // ✅ ส่ง Response กลับ
+
             res.json({
               StockDetailID: stock.StockDetailID,
               StockSymbol: stock.StockSymbol,
               Type: stockType,
+              company : stock.CompanyName,
               ClosePrice: stock.ClosePrice,
               ClosePriceTHB: closePriceTHB.toFixed(2),
               Date: latestDate,
               Change: stock.ChangePercentage,
               PredictionClose: stock.PredictionClose,
-              PredictionTrend: stock.PredictionTrend, // ✅ เพิ่ม PredictionTrend
+              PredictionTrend: stock.PredictionTrend,
               PredictionCloseDate: latestDate,
               PricePredictionChange: pricePredictionChange ? pricePredictionChange.toFixed(2) + "%" : "N/A",
               SelectedTimeframe: timeframe,
@@ -1531,7 +1589,7 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
               Overview: {
                 Open: stock.OpenPrice,
                 Close: stock.ClosePrice,
-                AvgVolume30D: formattedAvgVolume30D // ✅ ใช้ค่าที่แก้ไขแล้ว
+                AvgVolume30D: formattedAvgVolume30D
               },
               Profile: {
                 Sector: stock.Sector,
@@ -1548,6 +1606,7 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 
 //Recommended US Stocks
