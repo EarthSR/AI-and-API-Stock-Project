@@ -16,8 +16,6 @@ load_dotenv(path)
 
 # File paths
 MERGED_CSV_PATH = os.path.join(os.path.dirname(__file__), "Stock", "merged_stock_sentiment_financial.csv")
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "Stock", "output")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 try:
     print("📥 กำลังโหลดไฟล์ merged_stock_sentiment_financial.csv ...")
@@ -84,13 +82,19 @@ try:
     df["Sector"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[2])
     df["Industry"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[3])
     df["Description"] = df["StockSymbol"].map(lambda x: company_dict.get(x, ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown"))[4])
+    
+    # FIXED: Properly handle sentiment mapping using vectorized operations
     df["Sentiment"] = df["Sentiment"].fillna("Neutral")
-    if df["Sentiment"] == 0:
-        df["Sentiment"] = "Neutral"
-    if df["Sentiment"] == 1:
-        df["Sentiment"] = "Positive"
-    if df["Sentiment"] == -1:
-        df["Sentiment"] = "Negative"
+    
+    # Use replace method for mapping numeric sentiment values to text
+    sentiment_mapping = {0: "Neutral", 1: "Positive", -1: "Negative"}
+    df["Sentiment"] = df["Sentiment"].replace(sentiment_mapping)
+    
+    # Alternative approach using loc for more complex conditions:
+    # df.loc[df["Sentiment"] == 0, "Sentiment"] = "Neutral"
+    # df.loc[df["Sentiment"] == 1, "Sentiment"] = "Positive"
+    # df.loc[df["Sentiment"] == -1, "Sentiment"] = "Negative"
+    
     df = df.where(pd.notna(df), None)
 
     # Prepare stock data for Stock table

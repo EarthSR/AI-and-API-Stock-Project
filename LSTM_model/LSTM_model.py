@@ -370,6 +370,7 @@ for t_id in unique_tickers_test:
     test_features_scaled[mask_test] = X_scaled
     test_price_scaled[mask_test]    = y_scaled
 
+np.save('ticker_scalers.pkl', ticker_scalers)
 np.save('test_features.npy', test_features_scaled)
 np.save('test_price.npy',   test_price_scaled)
 np.save('train_features.npy', train_features_scaled)

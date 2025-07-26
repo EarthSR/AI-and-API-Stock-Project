@@ -249,7 +249,7 @@ def run_all_news_scripts():
 
 def clear_stock_csv():
     """ลบไฟล์ CSV ในโฟลเดอร์ที่กำหนด"""
-    folder_paths = ["./usa/News", "./thai/News"]
+    folder_paths = ["./usa/News"]
     deleted_count = 0
     
     for folder in folder_paths:
