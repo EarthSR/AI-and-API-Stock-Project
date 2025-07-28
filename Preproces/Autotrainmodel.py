@@ -2370,7 +2370,6 @@ if __name__ == "__main__":
     # ======== AUTOMATED WORKFLOW ========
     
     if need_retrain:
-        # ======================== RETRAIN MODE ========================
         print(f"\n🔄 เริ่มต้นการรีเทรนโมเดลอัตโนมัติ...")
         
         # กำหนดพารามิเตอร์
@@ -2382,13 +2381,44 @@ if __name__ == "__main__":
         print(f"   📦 Chunk size: {chunk_size} วัน")
         print(f"   🔄 Retrain frequency: {retrain_freq} วัน")
         print(f"   📈 Sequence length: {SEQ_LENGTH} วัน")
-        print(f"   🤖 Models: LSTM + GRU (ทั้งสองโมเดล)")
+        print(f"   🤖 Models: LSTM + GRU (ทั้งสองโมเดลพร้อมกัน)")
         
-        retrain_success = False
+        # ตรวจสอบและแก้ไข Ticker ID ที่เกินช่วง
+        print(f"\n🔧 ตรวจสอบและแก้ไข Ticker/Market ID...")
+        
+        # ตรวจสอบ Ticker ID range
+        max_ticker_id = prepared_df['Ticker_ID'].max()
+        unique_ticker_count = prepared_df['Ticker_ID'].nunique()
+        print(f"   📊 Max Ticker ID: {max_ticker_id}, Unique count: {unique_ticker_count}")
+        
+        # แก้ไข Ticker ID ให้อยู่ในช่วงที่ถูกต้อง (0 to n-1)
+        if max_ticker_id >= unique_ticker_count:
+            print(f"   🔧 แก้ไข Ticker ID mapping...")
+            ticker_mapping = {old_id: new_id for new_id, old_id in enumerate(sorted(prepared_df['Ticker_ID'].unique()))}
+            prepared_df['Ticker_ID'] = prepared_df['Ticker_ID'].map(ticker_mapping)
+            print(f"   ✅ แก้ไข Ticker ID เรียบร้อย: 0-{prepared_df['Ticker_ID'].max()}")
+        
+        # ตรวจสอบ Market ID range
+        max_market_id = prepared_df['Market_ID'].max()
+        unique_market_count = prepared_df['Market_ID'].nunique()
+        print(f"   📊 Max Market ID: {max_market_id}, Unique count: {unique_market_count}")
+        
+        # แก้ไข Market ID ให้อยู่ในช่วงที่ถูกต้อง
+        if max_market_id >= unique_market_count:
+            print(f"   🔧 แก้ไข Market ID mapping...")
+            market_mapping = {old_id: new_id for new_id, old_id in enumerate(sorted(prepared_df['Market_ID'].unique()))}
+            prepared_df['Market_ID'] = prepared_df['Market_ID'].map(market_mapping)
+            print(f"   ✅ แก้ไข Market ID เรียบร้อย: 0-{prepared_df['Market_ID'].max()}")
+        
+        retrain_success = {"lstm": False, "gru": False}
         
         try:
-            if should_retrain_lstm:
-                print(f"\n🔍 กำลังรีเทรน LSTM...")
+            # รีเทรนทั้งสองโมเดลพร้อมกัน
+            print(f"\n🔍 กำลังรีเทรนทั้ง LSTM และ GRU พร้อมกัน...")
+            
+            # รีเทรน LSTM
+            print(f"\n🔴 รีเทรน LSTM...")
+            try:
                 predictions_lstm, metrics_lstm = walk_forward_validation_multi_task_batch(
                     model=model_lstm,
                     df=prepared_df,
@@ -2405,10 +2435,22 @@ if __name__ == "__main__":
                     predictions_lstm.to_csv('retrain_lstm_results.csv', index=False)
                     update_retrain_date("LSTM")
                     print("✅ รีเทรน LSTM สำเร็จ")
-                    retrain_success = True
-                
-            if should_retrain_gru:
-                print(f"\n🔍 กำลังรีเทรน GRU...")
+                    retrain_success["lstm"] = True
+                    
+                    # แสดงสถิติ LSTM
+                    if metrics_lstm:
+                        lstm_avg_acc = np.mean([m['Direction_Accuracy'] for m in metrics_lstm.values()])
+                        lstm_avg_mae = np.mean([m['MAE'] for m in metrics_lstm.values()])
+                        print(f"   📊 LSTM Performance: Accuracy={lstm_avg_acc:.3f}, MAE={lstm_avg_mae:.3f}")
+                else:
+                    print("⚠️ รีเทรน LSTM ไม่ได้ผลลัพธ์")
+                    
+            except Exception as e:
+                print(f"⚠️ รีเทรน LSTM ล้มเหลว: {e}")
+            
+            # รีเทรน GRU
+            print(f"\n🔵 รีเทรน GRU...")
+            try:
                 predictions_gru, metrics_gru = walk_forward_validation_multi_task_batch(
                     model=model_gru,
                     df=prepared_df,
@@ -2425,13 +2467,48 @@ if __name__ == "__main__":
                     predictions_gru.to_csv('retrain_gru_results.csv', index=False)
                     update_retrain_date("GRU")
                     print("✅ รีเทรน GRU สำเร็จ")
-                    retrain_success = True
+                    retrain_success["gru"] = True
+                    
+                    # แสดงสถิติ GRU
+                    if metrics_gru:
+                        gru_avg_acc = np.mean([m['Direction_Accuracy'] for m in metrics_gru.values()])
+                        gru_avg_mae = np.mean([m['MAE'] for m in metrics_gru.values()])
+                        print(f"   📊 GRU Performance: Accuracy={gru_avg_acc:.3f}, MAE={gru_avg_mae:.3f}")
+                else:
+                    print("⚠️ รีเทรน GRU ไม่ได้ผลลัพธ์")
+                    
+            except Exception as e:
+                print(f"⚠️ รีเทรน GRU ล้มเหลว: {e}")
             
-            if retrain_success:
-                print(f"\n🎉 การรีเทรนเสร็จสิ้น! กำลังดำเนินการทำนาย...")
-                print(f"💾 ไฟล์การรีเทรน: retrain_lstm_results.csv, retrain_gru_results.csv")
+            # สรุปผลการรีเทรน
+            successful_models = [model for model, success in retrain_success.items() if success]
+            
+            if successful_models:
+                print(f"\n🎉 การรีเทรนเสร็จสิ้น!")
+                print(f"   ✅ โมเดลที่รีเทรนสำเร็จ: {', '.join(successful_models).upper()}")
+                print(f"   💾 ไฟล์การรีเทรน:")
+                if retrain_success["lstm"]:
+                    print(f"      📄 retrain_lstm_results.csv")
+                if retrain_success["gru"]:
+                    print(f"      📄 retrain_gru_results.csv")
+                
+                # เปรียบเทียบผลลัพธ์ถ้ามีทั้งสองโมเดล
+                if retrain_success["lstm"] and retrain_success["gru"] and metrics_lstm and metrics_gru:
+                    print(f"\n🏆 เปรียบเทียบผลลัพธ์การรีเทรน:")
+                    print(f"   🔴 LSTM: Accuracy={lstm_avg_acc:.3f}, MAE={lstm_avg_mae:.3f}")
+                    print(f"   🔵 GRU:  Accuracy={gru_avg_acc:.3f}, MAE={gru_avg_mae:.3f}")
+                    
+                    if lstm_avg_acc > gru_avg_acc:
+                        print(f"   🏅 LSTM มี Direction Accuracy ที่ดีกว่า!")
+                    elif gru_avg_acc > lstm_avg_acc:
+                        print(f"   🏅 GRU มี Direction Accuracy ที่ดีกว่า!")
+                    else:
+                        print(f"   🤝 ทั้งสองโมเดลมี Direction Accuracy เท่ากัน")
+                
+                print(f"   🔮 กำลังดำเนินการทำนาย...")
             else:
-                print(f"\n⚠️ การรีเทรนไม่สำเร็จ แต่จะดำเนินการทำนายต่อไป...")
+                print(f"\n⚠️ การรีเทรนไม่สำเร็จทั้งสองโมเดล")
+                print(f"   🔮 จะดำเนินการทำนายต่อไปด้วยโมเดลเดิม...")
             
         except Exception as e:
             print(f"❌ เกิดข้อผิดพลาดในการรีเทรน: {e}")

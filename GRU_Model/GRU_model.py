@@ -245,7 +245,7 @@ psar = ta.trend.PSARIndicator(high=df['High'], low=df['Low'], close=df['Close'],
 df['PSAR'] = psar.psar()
 
 us_stock = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
-thai_stock = ['ADVANC', 'INTUCH', 'TRUE', 'DITTO', 'DIF', 
+thai_stock = ['ADVANC', 'TRUE', 'DITTO', 'DIF', 
            'INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
 df['Market_ID'] = df['Ticker'].apply(lambda x: "US" if x in us_stock else "TH" if x in thai_stock else None)
 
