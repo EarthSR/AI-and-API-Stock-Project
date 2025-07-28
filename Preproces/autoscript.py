@@ -83,6 +83,9 @@ SCRIPTS = {
         "daily_sentiment": ["./thai/dailysentiment_Thai.py"],
         "combine_all": ["./thai/combineall_Thai.py"],
         "stock_to_database": ["./thai/stock_to_database_Thai.py"]
+    },
+    "update stock data": {
+        "update_stock_data": ["./Autotrainmodel.py"]
     }
 }
 
@@ -521,7 +524,8 @@ def update_stock_data(now, market):
                 (SCRIPTS["stock_us"]["get_financial"], "Get Financial US"),
                 (SCRIPTS["stock_us"]["daily_sentiment"], "Daily Sentiment US"),
                 (SCRIPTS["stock_us"]["combine_all"], "Combine All US"),
-                (SCRIPTS["stock_us"]["stock_to_database"], "Stock to Database US")
+                (SCRIPTS["stock_us"]["stock_to_database"], "Stock to Database US"),
+                (SCRIPTS["update stock data"]["update_stock_data"], "Update Stock Data")
             ]:
                 for script in script_group:
                     if script in running_scripts:
@@ -588,7 +592,8 @@ def update_stock_data(now, market):
             (SCRIPTS["stock_th"]["get_financial"], "Get Financial TH"),
             (SCRIPTS["stock_th"]["daily_sentiment"], "Daily Sentiment TH"),
             (SCRIPTS["stock_th"]["combine_all"], "Combine All TH"),
-            (SCRIPTS["stock_th"]["stock_to_database"], "Stock to Database TH")
+            (SCRIPTS["stock_th"]["stock_to_database"], "Stock to Database TH"),
+            (SCRIPTS["update stock data"]["update_stock_data"], "Update Stock Data")
         ]:
             for script in script_group:
                 if script in running_scripts:

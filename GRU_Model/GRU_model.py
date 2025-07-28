@@ -333,6 +333,15 @@ test_price_scaled     = np.zeros_like(test_price)
 ticker_scalers = {}
 
 unique_tickers_train = train_df['Ticker_ID'].unique()
+
+# ✅ สร้าง mapping ระหว่าง Ticker_ID กับ StockSymbol
+ticker_id_to_name = {}
+for t_id in unique_tickers_train:
+    ticker_rows = train_df[train_df['Ticker_ID'] == t_id]
+    ticker_name = ticker_rows['Ticker'].iloc[0]
+    ticker_id_to_name[t_id] = ticker_name
+    print(f"Mapping: Ticker_ID {t_id} = {ticker_name}")
+
 for t_id in unique_tickers_train:
     mask_train = (train_ticker_id == t_id)
     X_part = train_features[mask_train]
@@ -347,9 +356,11 @@ for t_id in unique_tickers_train:
     train_features_scaled[mask_train] = X_scaled
     train_price_scaled[mask_train]    = y_scaled
 
+    # ✅ เพิ่ม 'ticker' key ให้ compatible กับ Online Learning
     ticker_scalers[t_id] = {
         'feature_scaler': scaler_f,
-        'price_scaler': scaler_p
+        'price_scaler': scaler_p,
+        'ticker': ticker_id_to_name[t_id]  # ← เพิ่มบรรทัดนี้!
     }
 
 unique_tickers_test = test_df['Ticker_ID'].unique()
@@ -370,12 +381,19 @@ for t_id in unique_tickers_test:
     test_features_scaled[mask_test] = X_scaled
     test_price_scaled[mask_test]    = y_scaled
 
+# ✅ บันทึก ticker_scalers ที่มี 'ticker' key
 joblib.dump(ticker_scalers, 'ticker_scalers.pkl')
 np.save('test_features.npy', test_features_scaled)
 np.save('test_price.npy',   test_price_scaled)
 np.save('train_features.npy', train_features_scaled)
 np.save('train_price.npy',   train_price_scaled)
-print("✅ บันทึก test_features.npy และ test_price.npy สำเร็จ!")
+print("✅ บันทึก ticker_scalers.pkl พร้อม ticker names สำเร็จ!")
+
+# ✅ แสดงข้อมูล ticker_scalers เพื่อ verify
+print(f"\n📊 Ticker Scalers Summary:")
+for t_id, scaler_info in ticker_scalers.items():
+    ticker_name = scaler_info.get('ticker', 'Unknown')
+    print(f"   Ticker_ID {t_id}: {ticker_name}")
 
 seq_length = 10
 
@@ -769,148 +787,325 @@ def walk_forward_validation_multi_task_batch(
     ticker_encoder,
     market_encoder,
     seq_length=10,
-    retrain_frequency=5
+    retrain_frequency=5,
+    chunk_size = 200
 ):
     """
     ทำ Walk-Forward Validation แบบ Multi-Task (Price + Direction)
-    และ Online Learning เป็น batch
-    โดยใช้ Per-Ticker Scaling (ticker_scalers) ตรงกับที่เทรน
+    แบ่งข้อมูลเป็น chunks ละ 90 วัน พร้อม Online Learning
+    
+    - Mini-retrain: ทุก retrain_frequency วัน (Online Learning แบบต่อเนื่อง)
+    - Chunk-based: แบ่งข้อมูลเป็นช่วงๆ เพื่อใช้ข้อมูลทั้งหมด
     """
 
     all_predictions = []
+    chunk_metrics = []
     tickers = df['Ticker'].unique()
 
     for ticker in tickers:
         print(f"\nProcessing Ticker: {ticker}")
         df_ticker = df[df['Ticker'] == ticker].sort_values('Date').reset_index(drop=True)
-
-        if len(df_ticker) < seq_length + 1:
-            print(f"Not enough data for ticker {ticker}, skipping...")
+        
+        total_days = len(df_ticker)
+        print(f"   📊 Total data available: {total_days} days")
+        
+        if total_days < chunk_size + seq_length:
+            print(f"   ⚠️ Not enough data (need at least {chunk_size + seq_length} days), skipping...")
             continue
-
-        batch_features = []
-        batch_tickers = []
-        batch_market  = []
-        batch_price   = []
-        batch_dir     = []
-
-        for i in range(len(df_ticker) - seq_length):
-            historical_data = df_ticker.iloc[i : i + seq_length]
-            target_data     = df_ticker.iloc[i + seq_length]
-
-            t_id = historical_data['Ticker_ID'].iloc[-1]
-            if t_id not in ticker_scalers:
-                print(f"Ticker {ticker} (Ticker_ID={t_id}) not found in ticker_scalers, skipping this portion.")
+        
+        # คำนวณจำนวน chunks ที่สามารถสร้างได้
+        num_chunks = total_days // chunk_size
+        remaining_days = total_days % chunk_size
+        
+        # เพิ่ม partial chunk ถ้าข้อมูลเพียงพอ
+        if remaining_days > seq_length:
+            num_chunks += 1
+            
+        print(f"   📦 Number of chunks: {num_chunks} (chunk_size={chunk_size})")
+        
+        ticker_predictions = []
+        
+        # ประมวลผลแต่ละ chunk
+        for chunk_idx in range(num_chunks):
+            start_idx = chunk_idx * chunk_size
+            end_idx = min(start_idx + chunk_size, total_days)
+            
+            # ตรวจสอบขนาด chunk
+            if (end_idx - start_idx) < seq_length + 1:
+                print(f"      ⚠️ Chunk {chunk_idx + 1} too small ({end_idx - start_idx} days), skipping...")
                 continue
+                
+            current_chunk = df_ticker.iloc[start_idx:end_idx].reset_index(drop=True)
+            
+            print(f"\n      📦 Processing Chunk {chunk_idx + 1}/{num_chunks}")
+            print(f"         📅 Date range: {current_chunk['Date'].min()} to {current_chunk['Date'].max()}")
+            print(f"         📈 Days: {len(current_chunk)} ({start_idx}-{end_idx})")
+            
+            # === Walk-Forward Validation ภายใน Chunk ===
+            chunk_predictions = []
+            batch_features = []
+            batch_tickers = []
+            batch_market = []
+            batch_price = []
+            batch_dir = []
+            predictions_count = 0
 
-            scaler_f = ticker_scalers[t_id]['feature_scaler']
-            scaler_p = ticker_scalers[t_id]['price_scaler']
+            for i in range(len(current_chunk) - seq_length):
+                historical_data = current_chunk.iloc[i : i + seq_length]
+                target_data = current_chunk.iloc[i + seq_length]
 
-            features = historical_data[feature_columns].values
-            ticker_ids = historical_data['Ticker_ID'].values
-            market_ids = historical_data['Market_ID'].values
+                t_id = historical_data['Ticker_ID'].iloc[-1]
+                if t_id not in ticker_scalers:
+                    print(f"         ⚠️ Ticker_ID {t_id} not found in scalers, skipping...")
+                    continue
 
-            features_scaled = scaler_f.transform(features)
+                scaler_f = ticker_scalers[t_id]['feature_scaler']
+                scaler_p = ticker_scalers[t_id]['price_scaler']
 
-            X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
-            X_ticker   = ticker_ids.reshape(1, seq_length)
-            X_market   = market_ids.reshape(1, seq_length)
+                # เตรียม input features
+                features = historical_data[feature_columns].values
+                ticker_ids = historical_data['Ticker_ID'].values
+                market_ids = historical_data['Market_ID'].values
 
-            pred_price_scaled, pred_dir_prob = model.predict([X_features, X_ticker, X_market], verbose=0)
+                try:
+                    features_scaled = scaler_f.transform(features)
+                except Exception as e:
+                    print(f"         ⚠️ Feature scaling error: {e}")
+                    continue
 
-            predicted_price = scaler_p.inverse_transform(pred_price_scaled)[0][0]
-            predicted_dir = 1 if pred_dir_prob[0][0] >= 0.5 else 0
+                X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
+                X_ticker = ticker_ids.reshape(1, seq_length)
+                X_market = market_ids.reshape(1, seq_length)
 
-            actual_price = target_data['Close']
-            future_date  = target_data['Date']
-            last_close   = historical_data.iloc[-1]['Close']
-            actual_dir   = 1 if (target_data['Close'] > last_close) else 0
+                # ทำนาย
+                try:
+                    pred_output = model.predict([X_features, X_ticker, X_market], verbose=0)
+                    pred_price_scaled = pred_output[0]
+                    pred_dir_prob = pred_output[1]
 
-            all_predictions.append({
-                'Ticker': ticker,
-                'Date': future_date,
-                'Predicted_Price': predicted_price,
-                'Actual_Price': actual_price,
-                'Predicted_Dir': predicted_dir,
-                'Actual_Dir': actual_dir
-            })
+                    predicted_price = scaler_p.inverse_transform(pred_price_scaled)[0][0]
+                    predicted_dir = 1 if pred_dir_prob[0][0] >= 0.5 else 0
 
-            batch_features.append(X_features)
-            batch_tickers.append(X_ticker)
-            batch_market.append(X_market)
+                    # เก็บผลลัพธ์
+                    actual_price = target_data['Close']
+                    future_date = target_data['Date']
+                    last_close = historical_data.iloc[-1]['Close']
+                    actual_dir = 1 if (target_data['Close'] > last_close) else 0
 
-            y_price_true_scaled = scaler_p.transform(np.array([[actual_price]], dtype=float))
-            batch_price.append(y_price_true_scaled)
+                    chunk_predictions.append({
+                        'Ticker': ticker,
+                        'Date': future_date,
+                        'Chunk_Index': chunk_idx + 1,
+                        'Position_in_Chunk': i + 1,
+                        'Predicted_Price': predicted_price,
+                        'Actual_Price': actual_price,
+                        'Predicted_Dir': predicted_dir,
+                        'Actual_Dir': actual_dir,
+                        'Last_Close': last_close,
+                        'Price_Change_Actual': actual_price - last_close,
+                        'Price_Change_Predicted': predicted_price - last_close
+                    })
 
-            y_dir_true = np.array([actual_dir], dtype=float)
-            batch_dir.append(y_dir_true)
+                    predictions_count += 1
 
-            if (i+1) % retrain_frequency == 0 or (i == (len(df_ticker) - seq_length - 1)):
-                bf = np.concatenate(batch_features, axis=0)
-                bt = np.concatenate(batch_tickers, axis=0)
-                bm = np.concatenate(batch_market, axis=0)
-                bp = np.concatenate(batch_price, axis=0)
-                bd = np.concatenate(batch_dir, axis=0)
+                    # เตรียมข้อมูลสำหรับ mini-retrain
+                    batch_features.append(X_features)
+                    batch_tickers.append(X_ticker)
+                    batch_market.append(X_market)
 
-                model.fit(
-                    [bf, bt, bm],
-                    {
-                        'price_output': bp,
-                        'direction_output': bd
-                    },
-                    epochs=1,
-                    batch_size=len(bf),
-                    verbose=0,
-                    shuffle=False
-                )
-                batch_features = []
-                batch_tickers  = []
-                batch_market   = []
-                batch_price    = []
-                batch_dir      = []
+                    y_price_true_scaled = scaler_p.transform(np.array([[actual_price]], dtype=float))
+                    batch_price.append(y_price_true_scaled)
+
+                    y_dir_true = np.array([actual_dir], dtype=float)
+                    batch_dir.append(y_dir_true)
+
+                    # 🔄 Mini-retrain (Online Learning ภายใน chunk)
+                    if (i+1) % retrain_frequency == 0 or (i == (len(current_chunk) - seq_length - 1)):
+                        if len(batch_features) > 0:
+                            try:
+                                bf = np.concatenate(batch_features, axis=0)
+                                bt = np.concatenate(batch_tickers, axis=0)
+                                bm = np.concatenate(batch_market, axis=0)
+                                bp = np.concatenate(batch_price, axis=0)
+                                bd = np.concatenate(batch_dir, axis=0)
+
+                                model.fit(
+                                    [bf, bt, bm],
+                                    {
+                                        'price_output': bp,
+                                        'direction_output': bd
+                                    },
+                                    epochs=1,
+                                    batch_size=len(bf),
+                                    verbose=0,
+                                    shuffle=False
+                                )
+                                
+                                print(f"            🔄 Mini-retrain at position {i+1} (batch size: {len(bf)})")
+                                
+                            except Exception as e:
+                                print(f"            ⚠️ Mini-retrain error: {e}")
+
+                            # ล้าง batch
+                            batch_features = []
+                            batch_tickers = []
+                            batch_market = []
+                            batch_price = []
+                            batch_dir = []
+                            
+                except Exception as e:
+                    print(f"         ⚠️ Prediction error at position {i}: {e}")
+                    continue
+
+            # คำนวณ metrics สำหรับ chunk นี้
+            if chunk_predictions:
+                chunk_df = pd.DataFrame(chunk_predictions)
+                
+                actual_prices = chunk_df['Actual_Price'].values
+                pred_prices = chunk_df['Predicted_Price'].values
+                actual_dirs = chunk_df['Actual_Dir'].values
+                pred_dirs = chunk_df['Predicted_Dir'].values
+                
+                # คำนวณ metrics
+                mae_val = mean_absolute_error(actual_prices, pred_prices)
+                mse_val = mean_squared_error(actual_prices, pred_prices)
+                rmse_val = np.sqrt(mse_val)
+                r2_val = r2_score(actual_prices, pred_prices)
+                dir_acc = accuracy_score(actual_dirs, pred_dirs)
+                dir_f1 = f1_score(actual_dirs, pred_dirs)
+                
+                # คำนวณ MAPE และ SMAPE (safe calculation)
+                try:
+                    mape_val = np.mean(np.abs((actual_prices - pred_prices) / actual_prices)) * 100
+                except:
+                    mape_val = 0
+                    
+                try:
+                    smape_val = 100/len(actual_prices) * np.sum(2 * np.abs(pred_prices - actual_prices) / (np.abs(actual_prices) + np.abs(pred_prices)))
+                except:
+                    smape_val = 0
+
+                chunk_metric = {
+                    'Ticker': ticker,
+                    'Chunk_Index': chunk_idx + 1,
+                    'Chunk_Start_Date': current_chunk['Date'].min(),
+                    'Chunk_End_Date': current_chunk['Date'].max(),
+                    'Chunk_Days': len(current_chunk),
+                    'Predictions_Count': predictions_count,
+                    'MAE': mae_val,
+                    'MSE': mse_val,
+                    'RMSE': rmse_val,
+                    'MAPE': mape_val,
+                    'SMAPE': smape_val,
+                    'R2_Score': r2_val,
+                    'Direction_Accuracy': dir_acc,
+                    'Direction_F1': dir_f1
+                }
+                
+                chunk_metrics.append(chunk_metric)
+                ticker_predictions.extend(chunk_predictions)
+                
+                print(f"         📊 Chunk results: {predictions_count} predictions")
+                print(f"         📈 Direction accuracy: {dir_acc:.3f}")
+                print(f"         📈 Price MAE: {mae_val:.3f}")
+            
+            # ✅ แค่ Mini-retrain (Online Learning) ก็เพียงพอแล้ว
+            print(f"         ✅ Chunk {chunk_idx + 1} completed with continuous online learning")
+        
+        all_predictions.extend(ticker_predictions)
+        print(f"   ✅ Completed {ticker}: {len(ticker_predictions)} total predictions from {num_chunks} chunks")
+
+    # รวบรวมและบันทึกผลลัพธ์
+    print(f"\n📊 Processing complete!")
+    print(f"   Total predictions: {len(all_predictions)}")
+    print(f"   Total chunks processed: {len(chunk_metrics)}")
+    
+    if len(all_predictions) == 0:
+        print("❌ No predictions generated!")
+        return pd.DataFrame(), {}
 
     predictions_df = pd.DataFrame(all_predictions)
-    predictions_df.to_csv('predictions_multi_task_walkforward_batch.csv', index=False)
-    print("\n✅ Saved predictions to 'predictions_multi_task_walkforward_batch.csv'")
+    
+    # บันทึก predictions
+    predictions_df.to_csv('predictions_chunk_walkforward.csv', index=False)
+    print("💾 Saved predictions to 'predictions_chunk_walkforward.csv'")
+    
+    # บันทึก chunk metrics
+    if chunk_metrics:
+        chunk_metrics_df = pd.DataFrame(chunk_metrics)
+        chunk_metrics_df.to_csv('chunk_metrics.csv', index=False)
+        print("💾 Saved chunk metrics to 'chunk_metrics.csv'")
 
-    # คำนวณ Metrics
-    metrics_dict = {}
+    # คำนวณ Overall Metrics ต่อ Ticker
+    print("\n📊 Calculating overall metrics...")
+    overall_metrics = {}
+    
     for ticker, group in predictions_df.groupby('Ticker'):
         actual_prices = group['Actual_Price'].values
-        pred_prices   = group['Predicted_Price'].values
-        actual_dirs   = group['Actual_Dir'].values
-        pred_dirs     = group['Predicted_Dir'].values
+        pred_prices = group['Predicted_Price'].values
+        actual_dirs = group['Actual_Dir'].values
+        pred_dirs = group['Predicted_Dir'].values
 
-        mae_val  = mean_absolute_error(actual_prices, pred_prices)
-        mse_val  = mean_squared_error(actual_prices, pred_prices)
+        # คำนวณ metrics
+        mae_val = mean_absolute_error(actual_prices, pred_prices)
+        mse_val = mean_squared_error(actual_prices, pred_prices)
         rmse_val = np.sqrt(mse_val)
-        mape_val = custom_mape(actual_prices, pred_prices)
-        smape_val= smape(actual_prices, pred_prices)
-        r2_val   = r2_score(actual_prices, pred_prices)
+        r2_val = r2_score(actual_prices, pred_prices)
 
-        dir_acc  = accuracy_score(actual_dirs, pred_dirs)
-        dir_f1   = f1_score(actual_dirs, pred_dirs)
+        dir_acc = accuracy_score(actual_dirs, pred_dirs)
+        dir_f1 = f1_score(actual_dirs, pred_dirs)
         dir_precision = precision_score(actual_dirs, pred_dirs)
         dir_recall = recall_score(actual_dirs, pred_dirs)
 
-        metrics_dict[ticker] = {
+        # Safe MAPE และ SMAPE calculation
+        try:
+            mape_val = np.mean(np.abs((actual_prices - pred_prices) / actual_prices)) * 100
+        except:
+            mape_val = 0
+            
+        try:
+            smape_val = 100/len(actual_prices) * np.sum(2 * np.abs(pred_prices - actual_prices) / (np.abs(actual_prices) + np.abs(pred_prices)))
+        except:
+            smape_val = 0
+
+        overall_metrics[ticker] = {
+            'Total_Predictions': len(group),
+            'Number_of_Chunks': len(group['Chunk_Index'].unique()),
             'MAE': mae_val,
             'MSE': mse_val,
             'RMSE': rmse_val,
             'MAPE': mape_val,
             'SMAPE': smape_val,
-            'R2 Score': r2_val,
-            'Direction Accuracy': dir_acc,
-            'Direction F1 Score': dir_f1,
-            'Direction Precision': dir_precision,
-            'Direction Recall': dir_recall
+            'R2_Score': r2_val,
+            'Direction_Accuracy': dir_acc,
+            'Direction_F1_Score': dir_f1,
+            'Direction_Precision': dir_precision,
+            'Direction_Recall': dir_recall
         }
 
-    metrics_df = pd.DataFrame.from_dict(metrics_dict, orient='index')
-    metrics_df.to_csv('metrics_per_ticker_multi_task_batch.csv')
-    print("✅ Saved metrics to 'metrics_per_ticker_multi_task_batch.csv'")
+    # บันทึก overall metrics
+    overall_metrics_df = pd.DataFrame.from_dict(overall_metrics, orient='index')
+    overall_metrics_df.to_csv('overall_metrics_per_ticker.csv')
+    print("💾 Saved overall metrics to 'overall_metrics_per_ticker.csv'")
 
-    return predictions_df, metrics_dict
+    # สรุปผลลัพธ์
+    print(f"\n🎯 Summary:")
+    print(f"   📈 Tickers processed: {len(predictions_df['Ticker'].unique())}")
+    print(f"   📈 Average predictions per ticker: {len(predictions_df)/len(predictions_df['Ticker'].unique()):.1f}")
+    print(f"   📈 Average chunks per ticker: {len(chunk_metrics)/len(predictions_df['Ticker'].unique()):.1f}")
+    
+    if chunk_metrics:
+        avg_chunk_acc = np.mean([c['Direction_Accuracy'] for c in chunk_metrics])
+        avg_chunk_mae = np.mean([c['MAE'] for c in chunk_metrics])
+        print(f"   📈 Average chunk direction accuracy: {avg_chunk_acc:.3f}")
+        print(f"   📈 Average chunk MAE: {avg_chunk_mae:.3f}")
+
+    print(f"\n📁 Files generated:")
+    print(f"   📄 predictions_chunk_walkforward.csv - All predictions with chunk info")
+    print(f"   📄 chunk_metrics.csv - Performance metrics per chunk")  
+    print(f"   📄 overall_metrics_per_ticker.csv - Overall performance per ticker")
+
+    return predictions_df, overall_metrics
 
 # ------------------------------------------------------------------------------------
 # 6) เรียกใช้งาน Walk-Forward Validation สำหรับ Multi-Task
@@ -924,7 +1119,8 @@ predictions_df, results_per_ticker = walk_forward_validation_multi_task_batch(
     ticker_encoder = ticker_encoder,
     market_encoder = market_encoder,
     seq_length = 10,
-    retrain_frequency= 5
+    retrain_frequency= 5,
+    chunk_size = 200
 )
 
 for ticker, metrics in results_per_ticker.items():
@@ -934,11 +1130,11 @@ for ticker, metrics in results_per_ticker.items():
     print(f"  RMSE: {metrics['RMSE']:.4f}")
     print(f"  MAPE: {metrics['MAPE']:.4f}")
     print(f"  SMAPE:{metrics['SMAPE']:.4f}")
-    print(f"  R2 Score: {metrics['R2 Score']:.4f}")
-    print(f"  Direction Accuracy: {metrics['Direction Accuracy']:.4f}")
-    print(f"  Direction F1 Score: {metrics['Direction F1 Score']:.4f}")
-    print(f"  Direction Precision: {metrics['Direction Precision']:.4f}")
-    print(f"  Direction Recall: {metrics['Direction Recall']:.4f}")
+    print(f"  R2 Score: {metrics['R2_Score']:.4f}")
+    print(f"  Direction Accuracy: {metrics['Direction_Accuracy']:.4f}")
+    print(f"  Direction F1 Score: {metrics['Direction_F1_Score']:.4f}")
+    print(f"  Direction Precision: {metrics['Direction_Precision']:.4f}")
+    print(f"  Direction Recall: {metrics['Direction_Recall']:.4f}")
 
 metrics_df = pd.DataFrame.from_dict(results_per_ticker, orient='index')
 metrics_df.to_csv('metrics_per_ticker_multi_task.csv', index=True)

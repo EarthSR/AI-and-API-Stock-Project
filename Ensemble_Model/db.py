@@ -39,7 +39,9 @@ def save_predictions_to_db(predictions_df):
                         SET PredictionClose_LSTM = :Predicted_Price_LSTM, 
                             PredictionClose_GRU = :Predicted_Price_GRU, 
                             PredictionTrend_LSTM = :Predicted_Dir_LSTM, 
-                            PredictionTrend_GRU = :Predicted_Dir_GRU
+                            PredictionTrend_GRU = :Predicted_Dir_GRU,
+                            PredictionClose_Ensemble = :XGB_Predicted_Price,
+                            PredictionTrend_Ensemble = :XGB_Predicted_Direction
                         WHERE date = :date AND StockSymbol = :symbol;
                     """)
                     connection.execute(update_query, {
@@ -47,6 +49,8 @@ def save_predictions_to_db(predictions_df):
                         "Predicted_Price_GRU": row['Predicted_Price_GRU'],
                         "Predicted_Dir_LSTM": row['Predicted_Dir_LSTM'],
                         "Predicted_Dir_GRU": row['Predicted_Dir_GRU'],
+                        "XGB_Predicted_Price": row['XGB_Predicted_Price'],
+                        "XGB_Predicted_Direction": row['XGB_Predicted_Direction'],
                         "date": date,
                         "symbol": symbol
                     })

@@ -1,7 +1,0 @@
-Data Quality Analysis Results
-==================================================
-Completeness Score: 0.0%
-Price Completeness: 100.0%
-Ticker Balance: 81.0%
-Total Records: 51,021
-Unique Tickers: 20

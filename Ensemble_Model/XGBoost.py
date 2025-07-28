@@ -227,18 +227,27 @@ except Exception as e:
 try:
     logger.info("Performing backtesting with additional metrics")
     
+    # สร้าง DataFrame สำหรับผลลัพธ์
     results_df = pd.DataFrame({
+        'Ticker': df.loc[test_indices, 'Ticker'],
+        'Date': df.loc[test_indices, 'Date'],
         'Actual_Price': y_test_price,
+        'Predicted_Price_LSTM': df.loc[test_indices, 'Predicted_Price_LSTM'],
+        'Predicted_Price_GRU': df.loc[test_indices, 'Predicted_Price_GRU'],
         'XGB_Predicted_Price': y_pred_price,
         'Actual_Direction': y_test_dir,
+        'Predicted_Dir_LSTM': df.loc[test_indices, 'Predicted_Dir_LSTM'],
+        'Predicted_Dir_GRU': df.loc[test_indices, 'Predicted_Dir_GRU'],
         'XGB_Predicted_Direction': y_pred_dir,
-        'XGB_Predicted_Direction_Proba': y_pred_dir_proba,
-        'Date': df.loc[test_indices, 'Date'],
-        'Ticker': df.loc[test_indices, 'Ticker']
+        'XGB_Predicted_Direction_Proba': y_pred_dir_proba
     }, index=test_indices)
 
     # เรียงข้อมูลตาม Ticker และ Date
     results_df = results_df.sort_values(['Ticker', 'Date'])
+
+    # บันทึกผลลัพธ์ลงในไฟล์ CSV
+    results_df.to_csv('ensemble_predictions.csv', index=False)
+    logger.info("Ensemble predictions saved to ensemble_predictions.csv")
 
     # คำนวณ Returns โดยไม่มี Look-ahead Bias
     results_df['Returns'] = results_df.groupby('Ticker')['Actual_Price'].pct_change()
