@@ -51,7 +51,6 @@ try:
     # Company dictionary
     company_dict = {
         "ADVANC": ("Advanced Info Service Public Company Limited", "Thailand", "Communication", "Telecom Services", "Advanced Info Service Public Company Limited operates as a telecommunications and technology company primarily in Thailand..."),
-        "INTUCH": ("Intouch Holdings Public Company Limited", "Thailand", "Communication", "Telecom Holding", "Intouch Holdings Public Company Limited, through its subsidiaries, engages in the telecommunications and other businesses in Thailand..."),
         "TRUE": ("True Corporation Public Company Limited", "Thailand", "Communication", "Telecom Services", "True Corporation Public Company Limited, together with its subsidiaries, provides telecommunications and value-added services in Thailand..."),
         "DITTO": ("DITTO (Thailand) Public Company Limited", "Thailand", "Technology", "IT Solutions", "Ditto (Thailand) Public Company Limited distributes data and document management solutions in Thailand..."),
         "DIF": ("Digital Telecommunications Infrastructure Fund", "Thailand", "Real Estate", "Infrastructure Fund", "We own or are entitled to the net revenues generated from a portfolio of 16,059 telecommunications towers..."),
