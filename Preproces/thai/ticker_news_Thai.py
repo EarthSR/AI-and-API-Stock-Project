@@ -22,7 +22,6 @@ stock_entities = {
     "HUMAN": ["HUMAN"],
     "INET": ["INET"],
     "INSET": ["INSET"],
-    "INTUCH": ["INTUCH"],
     "JAS": ["JAS"],
     "JMART": ["JMART"],
     "TRUE": ["TRUE"]
@@ -36,7 +35,6 @@ context_mapping = [
     {"Keywords": ["human resource", "HR software", "payroll", "recruitment", "employee management"], "Stocks": ["HUMAN"]},
     {"Keywords": ["cloud", "data center", "IT service", "hosting", "cloud solution", "server"], "Stocks": ["INET"]},
     {"Keywords": ["network service", "fiber optic", "infrastructure", "installation service"], "Stocks": ["INSET"]},
-    {"Keywords": ["investment", "holding company", "telecom", "AIS", "INTUCH group"], "Stocks": ["INTUCH"]},
     {"Keywords": ["broadband", "fixed internet", "telecom", "Jasmine", "fiber"], "Stocks": ["JAS"]},
     {"Keywords": ["retail", "mobile store", "finance service", "Jaymart", "consumer loan", "mobile retail"], "Stocks": ["JMART"]},
     {"Keywords": ["mobile", "5G", "network", "broadband", "TRUE ID", "telecom", "True Corporation"], "Stocks": ["TRUE"]}

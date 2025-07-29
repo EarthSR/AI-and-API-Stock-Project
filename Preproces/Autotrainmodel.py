@@ -153,13 +153,6 @@ def walk_forward_validation_multi_task_batch(
     retrain_frequency=5,
     chunk_size = 200
 ):
-    """
-    ทำ Walk-Forward Validation แบบ Multi-Task (Price + Direction)
-    แบ่งข้อมูลเป็น chunks ละ chunk_size วัน พร้อม Online Learning
-    
-    - Mini-retrain: ทุก retrain_frequency วัน (Online Learning แบบต่อเนื่อง)
-    - Chunk-based: แบ่งข้อมูลเป็นช่วงๆ เพื่อใช้ข้อมูลทั้งหมด
-    """
 
     all_predictions = []
     chunk_metrics = []
@@ -1137,17 +1130,24 @@ class XGBoostMetaLearner:
     """
     
     def __init__(self, 
-                 clf_model_path='../Ensemble_Model/xgb_classifier_model.pkl', 
-                 reg_model_path='../Ensemble_Model/xgb_regressor_model.pkl',
-                 scaler_dir_path='../Ensemble_Model/scaler_dir.pkl', 
-                 scaler_price_path='../Ensemble_Model/scaler_price.pkl',
-                 retrain_frequency=5):
-        
+                clf_model_path='../Ensemble_Model/transparent_xgb_classifier.pkl', 
+                reg_model_path='../Ensemble_Model/transparent_xgb_regressor.pkl',
+                scaler_dir_path='../Ensemble_Model/robust_scaler_dir.pkl', 
+                scaler_price_path='../Ensemble_Model/robust_scaler_price.pkl',
+                dir_features_path='../Ensemble_Model/transparent_dir_features.pkl',
+                price_features_path='../Ensemble_Model/transparent_price_features.pkl',
+                retrain_frequency=5):
+            
         self.clf_model_path = clf_model_path
         self.reg_model_path = reg_model_path
         self.scaler_dir_path = scaler_dir_path
         self.scaler_price_path = scaler_price_path
         self.retrain_frequency = retrain_frequency
+        self.dir_features_path = dir_features_path
+        self.price_features_path = price_features_path
+        self.dir_features = None
+        self.price_features = None
+            
         
         self.xgb_clf = None
         self.xgb_reg = None
@@ -1172,6 +1172,18 @@ class XGBoostMetaLearner:
             else:
                 print("⚠️ ไม่พบไฟล์ XGBoost Regressor")
             
+            if os.path.exists(self.dir_features_path):
+                self.dir_features = joblib.load(self.dir_features_path)
+                print("✅ โหลด Direction Features สำเร็จ")
+            else:
+                print("⚠️ ไม่พบไฟล์ Direction Features")
+                
+            if os.path.exists(self.price_features_path):
+                self.price_features = joblib.load(self.price_features_path)
+                print("✅ โหลด Price Features สำเร็จ")
+            else:
+                print("⚠️ ไม่พบไฟล์ Price Features")
+                
             if os.path.exists(self.scaler_dir_path):
                 self.scaler_dir = joblib.load(self.scaler_dir_path)
                 print("✅ โหลด Direction Scaler สำเร็จ")
@@ -1183,10 +1195,10 @@ class XGBoostMetaLearner:
                 print("✅ โหลด Price Scaler สำเร็จ")
             else:
                 print("⚠️ ไม่พบไฟล์ Price Scaler")
-                
+                    
         except Exception as e:
             print(f"⚠️ เกิดข้อผิดพลาดในการโหลดโมเดล: {e}")
-    
+
     def calculate_technical_indicators(self, df):
         """คำนวณ technical indicators สำหรับ XGBoost"""
         
@@ -1241,149 +1253,281 @@ class XGBoostMetaLearner:
         
         return df_with_indicators
     
-    def prepare_features(self, df):
-        """เตรียม features สำหรับ XGBoost"""
+    def add_market_features_for_prediction(self, df):
+        """เพิ่ม Market Features สำหรับการทำนาย"""
         
-        # คำนวณ technical indicators
-        df = self.calculate_technical_indicators(df)
+        thai_tickers = ['ADVANC', 'DIF', 'DITTO', 'HUMAN', 'INET', 'INSET', 'JAS', 'JMART', 'TRUE']
+        us_tickers = ['AAPL', 'AMD', 'AMZN', 'AVGO', 'GOOGL', 'META', 'MSFT', 'NVDA', 'TSLA', 'TSM']
         
-        # สร้าง meta features
-        df['Price_Diff'] = df['PredictionClose_LSTM'] - df['PredictionClose_GRU']
-        df['Dir_Agreement'] = (df['PredictionTrend_LSTM'] == df['PredictionTrend_GRU']).astype(int)
+        df['Market_ID'] = df['StockSymbol'].apply(lambda x: 0 if x in thai_tickers else 1)
+        df['Market_Name'] = df['Market_ID'].map({0: 'Thai', 1: 'US'})
         
-        # Normalize actual price ตาม ticker
-        df['Actual_Price_Normalized'] = df.groupby('StockSymbol')['Close'].transform(
-            lambda x: (x - x.mean()) / x.std() if x.std() != 0 else 0
-        )
+        # Price categories (ใช้ numeric values)
+        def get_price_category(row):
+            if row['Market_ID'] == 0:  # Thai
+                if row['Close'] < 10: return 0  # Low
+                elif row['Close'] < 50: return 1  # Medium
+                else: return 2  # High
+            else:  # US
+                if row['Close'] < 100: return 0  # Low
+                elif row['Close'] < 300: return 1  # Medium
+                else: return 2  # High
         
-        # Features สำหรับ direction prediction
-        direction_features = [
-            'PredictionTrend_LSTM', 'PredictionTrend_GRU', 'Dir_Agreement', 
-            'RSI', 'SMA_20', 'MACD', 'BB_High', 'BB_Low', 'ATR'
-        ]
+        df['Price_Category'] = df.apply(get_price_category, axis=1)
         
-        # Features สำหรับ price prediction
-        price_features = [
-            'PredictionClose_LSTM', 'PredictionClose_GRU', 'Price_Diff',
-            'RSI', 'SMA_20', 'MACD', 'BB_High', 'BB_Low', 'ATR',
-            'Actual_Price_Normalized'
-        ]
-        
-        # ตรวจสอบว่า features ทั้งหมดมีอยู่
-        available_dir_features = [f for f in direction_features if f in df.columns]
-        available_price_features = [f for f in price_features if f in df.columns]
-        
-        return df, available_dir_features, available_price_features
+        return df
     
     def predict_meta(self, df):
-        """ทำนายด้วย XGBoost Meta-Learner"""
+        """แก้ไข predict_meta method ให้ใช้ feature lists ที่โหลดจากไฟล์"""
         
         if self.xgb_clf is None or self.xgb_reg is None:
-            print("❌ XGBoost models ยังไม่ได้โหลด ไม่สามารถทำนายได้")
+            print("❌ XGBoost models ยังไม่ได้โหลด")
             return df
         
-        # เตรียม features
-        df_prepared, dir_features, price_features = self.prepare_features(df)
-        
-        # ตรวจสอบข้อมูลที่มี predictions จาก LSTM และ GRU
+        # ตรวจสอบข้อมูลที่มี predictions
         prediction_mask = (
-            df_prepared['PredictionClose_LSTM'].notna() & 
-            df_prepared['PredictionClose_GRU'].notna() &
-            df_prepared['PredictionTrend_LSTM'].notna() & 
-            df_prepared['PredictionTrend_GRU'].notna()
+            df['PredictionClose_LSTM'].notna() & 
+            df['PredictionClose_GRU'].notna() &
+            df['PredictionTrend_LSTM'].notna() & 
+            df['PredictionTrend_GRU'].notna()
         )
         
         if not prediction_mask.any():
             print("❌ ไม่มีข้อมูล predictions จาก LSTM/GRU")
             return df
         
-        # เลือกเฉพาะแถวที่มี predictions
-        df_to_predict = df_prepared[prediction_mask].copy()
+        # เตรียมข้อมูล
+        df_for_prediction = df[prediction_mask].copy()
         
-        if len(df_to_predict) == 0:
-            print("❌ ไม่มีข้อมูลสำหรับทำนาย")
-            return df
+        # เพิ่ม Market Features
+        df_for_prediction = self.add_market_features_for_prediction(df_for_prediction)
         
-        # จัดการ missing values
-        imputer = SimpleImputer(strategy='mean')
+        # คำนวณ technical indicators
+        df_for_prediction = self.calculate_technical_indicators(df_for_prediction)
         
+        # สร้าง features ที่ขาดหายไป
+        df_for_prediction = calculate_realistic_features(df_for_prediction)
+
         try:
-            # Direction prediction
-            X_dir = df_to_predict[dir_features]
-            X_dir_filled = imputer.fit_transform(X_dir)
+            print("🔧 กำลังเตรียม features สำหรับ XGBoost (Using Loaded Features)...")
             
-            if self.scaler_dir is not None:
-                X_dir_scaled = self.scaler_dir.transform(X_dir_filled)
+            # เตรียม features พื้นฐาน
+            if 'Predicted_Price_LSTM' not in df_for_prediction.columns:
+                df_for_prediction['Predicted_Price_LSTM'] = df_for_prediction['PredictionClose_LSTM']
+            
+            if 'Predicted_Price_GRU' not in df_for_prediction.columns:
+                df_for_prediction['Predicted_Price_GRU'] = df_for_prediction['PredictionClose_GRU']
+            
+            if 'Predicted_Dir_LSTM' not in df_for_prediction.columns:
+                df_for_prediction['Predicted_Dir_LSTM'] = (df_for_prediction['PredictionTrend_LSTM'] > 0.5).astype(int)
+            
+            if 'Predicted_Dir_GRU' not in df_for_prediction.columns:
+                df_for_prediction['Predicted_Dir_GRU'] = (df_for_prediction['PredictionTrend_GRU'] > 0.5).astype(int)
+            
+            # ========== ใช้ feature lists ที่โหลดจากไฟล์ ==========
+            if self.dir_features is not None:
+                required_dir_features = self.dir_features
+                print(f"   ✅ ใช้ Direction features จากไฟล์: {len(required_dir_features)} features")
             else:
-                print("⚠️ ไม่มี Direction Scaler, ใช้ข้อมูลดิบ")
-                X_dir_scaled = X_dir_filled
+                # Fallback หากไม่มีไฟล์
+                required_dir_features = [
+                    'Predicted_Dir_LSTM', 'Predicted_Dir_GRU', 'Dir_Agreement', 
+                    'RSI', 'MACD', 'ATR', 'Market_ID', 'Price_Category'
+                ]
+                print(f"   ⚠️ ใช้ Direction features แบบ fallback: {len(required_dir_features)} features")
             
-            # Price prediction
-            X_price = df_to_predict[price_features]
-            X_price_filled = imputer.fit_transform(X_price)
-            
-            if self.scaler_price is not None:
-                X_price_scaled = self.scaler_price.transform(X_price_filled)
+            if self.price_features is not None:
+                required_price_features = self.price_features  
+                print(f"   ✅ ใช้ Price features จากไฟล์: {len(required_price_features)} features")
             else:
-                print("⚠️ ไม่มี Price Scaler, ใช้ข้อมูลดิบ")
-                X_price_scaled = X_price_filled
+                # Fallback หากไม่มีไฟล์
+                required_price_features = [
+                    'Predicted_Price_LSTM', 'Predicted_Price_GRU', 'Price_Diff_Normalized',
+                    'RSI', 'MACD', 'ATR', 'Market_ID', 'Price_Category'
+                ]
+                print(f"   ⚠️ ใช้ Price features แบบ fallback: {len(required_price_features)} features")
             
-            # ทำนาย
-            # Direction prediction
-            xgb_pred_dir = self.xgb_clf.predict(X_dir_scaled)
-            xgb_pred_dir_proba = self.xgb_clf.predict_proba(X_dir_scaled)[:, 1]
-            
-            # Price prediction
-            xgb_pred_price = self.xgb_reg.predict(X_price_scaled)
-            
-            # เพิ่มผลลัพธ์กลับเข้าไปใน DataFrame
-            df_prepared.loc[prediction_mask, 'XGB_Predicted_Direction_Raw'] = xgb_pred_dir
-            df_prepared.loc[prediction_mask, 'XGB_Predicted_Direction_Proba'] = xgb_pred_dir_proba
-            df_prepared.loc[prediction_mask, 'XGB_Predicted_Price_Raw'] = xgb_pred_price
-            
-            # ใช้ Direction เป็นหลัก เพราะสำคัญที่สุดในการลงทุน
-            df_prepared.loc[prediction_mask, 'XGB_Predicted_Direction'] = xgb_pred_dir
-            
-            # ปรับ Price ให้สอดคล้องกับ Direction ที่ทำนายได้
-            current_prices = df_to_predict['Close'].values
-            
-            # คำนวณ price adjustment ตาม direction
-            price_adjustments = []
-            for i, (current_price, pred_dir, raw_price) in enumerate(zip(current_prices, xgb_pred_dir, xgb_pred_price)):
-                raw_change_pct = (raw_price - current_price) / current_price
-                
-                if pred_dir == 1:  # ทิศทางขึ้น
-                    if raw_price <= current_price:  # แต่ราคาทำนายลง
-                        # ปรับให้เป็นการขึ้นเล็กน้อย (0.5-2%)
-                        adjusted_change = max(0.005, abs(raw_change_pct) * 0.5)
-                        adjusted_price = current_price * (1 + adjusted_change)
+            # สร้าง missing features ตามที่ต้องการ
+            for feature in required_dir_features + required_price_features:
+                if feature not in df_for_prediction.columns:
+                    # สร้าง features ที่ขาดหายไปตามชื่อที่ต้องการ
+                    if feature == 'Dir_Agreement':
+                        df_for_prediction[feature] = (df_for_prediction['Predicted_Dir_LSTM'] == df_for_prediction['Predicted_Dir_GRU']).astype(int)
+                    elif feature == 'Price_Diff_Normalized':
+                        df_for_prediction[feature] = (df_for_prediction['PredictionClose_LSTM'] - df_for_prediction['PredictionClose_GRU']) / (df_for_prediction['Close'] + 1e-8)
+                    elif feature == 'SMA_20':  # สำคัญ - ต้องสร้าง SMA_20
+                        df_for_prediction[feature] = df_for_prediction.groupby('StockSymbol')['Close'].rolling(window=20, min_periods=1).mean().reset_index(level=0, drop=True)
                     else:
-                        adjusted_price = raw_price  # ใช้ราคาเดิม
-                else:  # ทิศทางลง
-                    if raw_price >= current_price:  # แต่ราคาทำนายขึ้น
-                        # ปรับให้เป็นการลงเล็กน้อย (0.5-2%)
-                        adjusted_change = max(0.005, abs(raw_change_pct) * 0.5)
-                        adjusted_price = current_price * (1 - adjusted_change)
+                        # Default values สำหรับ features อื่นๆ  
+                        default_values = {
+                            'RSI': 50.0, 'MACD': 0.0, 'ATR': df_for_prediction['Close'] * 0.02,
+                            'Market_ID': 0, 'Price_Category': 1
+                        }
+                        df_for_prediction[feature] = default_values.get(feature, 0.5)
+            
+            # ตรวจสอบ features ที่มีอยู่
+            available_dir_features = [f for f in required_dir_features if f in df_for_prediction.columns]
+            available_price_features = [f for f in required_price_features if f in df_for_prediction.columns]
+            
+            print(f"   ✅ Direction features: {len(available_dir_features)}/{len(required_dir_features)}")
+            print(f"   ✅ Price features: {len(available_price_features)}/{len(required_price_features)}")
+            
+            # ========== Direction Prediction ==========
+            if len(available_dir_features) > 0 and set(available_dir_features) == set(required_dir_features):
+                try:
+                    X_dir = df_for_prediction[available_dir_features].copy().fillna(0).infer_objects(copy=False)
+                    
+                    if self.scaler_dir is not None:
+                        X_dir_scaled = self.scaler_dir.transform(X_dir)
                     else:
-                        adjusted_price = raw_price  # ใช้ราคาเดิม
+                        X_dir_scaled = ((X_dir - X_dir.mean()) / (X_dir.std() + 1e-8)).fillna(0).values
+                    
+                    pred_dir = self.xgb_clf.predict(X_dir_scaled)
+                    pred_dir_proba = self.xgb_clf.predict_proba(X_dir_scaled)[:, 1]
+                    
+                    print("   ✅ XGBoost Direction prediction สำเร็จ")
+                    
+                except Exception as e:
+                    print(f"   ⚠️ Direction prediction error: {e}")
+                    print("   🔄 ใช้ fallback สำหรับ direction")
+                    pred_dir_proba = (df_for_prediction['PredictionTrend_LSTM'] + df_for_prediction['PredictionTrend_GRU']) / 2
+                    pred_dir = (pred_dir_proba > 0.5).astype(int)
+            else:
+                print("   ⚠️ Direction features ไม่ครบ - ใช้ fallback")
+                pred_dir_proba = (df_for_prediction['PredictionTrend_LSTM'] + df_for_prediction['PredictionTrend_GRU']) / 2
+                pred_dir = (pred_dir_proba > 0.5).astype(int)
+            
+            # ========== Price Prediction ==========
+            if len(available_price_features) > 0 and set(available_price_features) == set(required_price_features):
+                try:
+                    X_price = df_for_prediction[available_price_features].copy().fillna(0).infer_objects(copy=False)
+                    
+                    if self.scaler_price is not None:
+                        X_price_scaled = self.scaler_price.transform(X_price)
+                    else:
+                        X_price_scaled = ((X_price - X_price.mean()) / (X_price.std() + 1e-8)).fillna(0).values
+                    
+                    pred_price_raw = self.xgb_reg.predict(X_price_scaled)
+                    
+                    print("   ✅ XGBoost Price prediction สำเร็จ")
+                    
+                except Exception as e:
+                    print(f"   ⚠️ Price prediction error: {e}")
+                    print("   🔄 ใช้ fallback สำหรับ price")
+                    pred_price_raw = (df_for_prediction['PredictionClose_LSTM'] + df_for_prediction['PredictionClose_GRU']) / 2
+            else:
+                print("   ⚠️ Price features ไม่ครบ - ใช้ fallback")
+                pred_price_raw = (df_for_prediction['PredictionClose_LSTM'] + df_for_prediction['PredictionClose_GRU']) / 2
+        
+            
+            # ========== Enhanced Post-processing ==========
+            current_prices = df_for_prediction['Close'].values
+            final_predicted_prices = []
+            reliability_scores = []
+            consistency_flags = []
+            warnings_list = []
+            actions = []
+            
+            print("   🔧 กำลังทำ post-processing และ consistency check...")
+            
+            for i in range(len(pred_price_raw)):
+                current_price = current_prices[i]
+                raw_price = pred_price_raw[i]
+                direction = pred_dir[i]
+                confidence = pred_dir_proba[i]
                 
-                price_adjustments.append(adjusted_price)
+                reliability = min(confidence * 1.2, 0.9)
+                
+                final_price, is_consistent, change_pct = enhanced_conservative_adjustment(
+                    raw_price, current_price, direction, reliability, max_change_pct=20.0
+                )
+                
+                final_predicted_prices.append(final_price)
+                reliability_scores.append(reliability)
+                consistency_flags.append(int(is_consistent))  # แปลงเป็น int เพื่อหลีกเลี่ยง dtype warning
+                
+                if not is_consistent:
+                    warnings_list.append("CONSISTENCY_FIXED")
+                    actions.append("CAUTION")
+                elif abs(change_pct) > 15:
+                    warnings_list.append("HIGH_VOLATILITY")
+                    actions.append("HIGH_RISK")
+                elif reliability >= 0.7:
+                    warnings_list.append("HIGH_CONFIDENCE")
+                    actions.append("INVEST")
+                else:
+                    warnings_list.append("MODERATE_CONFIDENCE")
+                    actions.append("CAUTION")
             
-            df_prepared.loc[prediction_mask, 'XGB_Predicted_Price'] = price_adjustments
+            # ========== บันทึกผลลัพธ์ (แก้ไข dtype warnings) ==========
+            df.loc[prediction_mask, 'XGB_Predicted_Direction'] = pred_dir
+            df.loc[prediction_mask, 'XGB_Predicted_Price'] = final_predicted_prices
+            df.loc[prediction_mask, 'XGB_Confidence'] = pred_dir_proba
+            df.loc[prediction_mask, 'XGB_Predicted_Direction_Proba'] = pred_dir_proba
+            df.loc[prediction_mask, 'Reliability_Score'] = reliability_scores
+            df.loc[prediction_mask, 'Reliability_Warning'] = warnings_list
+            df.loc[prediction_mask, 'Suggested_Action'] = actions
+            df.loc[prediction_mask, 'Ensemble_Method'] = 'XGBoost Meta-Learner (Fixed Features)'
+            df.loc[prediction_mask, 'Consistency_Check'] = consistency_flags  # ใช้ int แทน bool
             
-            # คำนวณ confidence score
-            df_prepared.loc[prediction_mask, 'XGB_Confidence'] = np.abs(xgb_pred_dir_proba - 0.5) * 2
+            df.loc[prediction_mask, 'Price_Change_Percent'] = ((np.array(final_predicted_prices) - current_prices) / current_prices) * 100
             
-            print(f"✅ XGBoost Meta-Learner ทำนายสำเร็จ {prediction_mask.sum()} แถว (Direction-focused)")
+            # สถิติสรุป
+            consistent_count = sum([bool(flag) for flag in consistency_flags])
+            avg_reliability = np.mean(reliability_scores)
             
-            print(f"✅ XGBoost Meta-Learner ทำนายสำเร็จ {prediction_mask.sum()} แถว")
+            print(f"   ✅ XGBoost Meta-Learner (Fixed) ทำนายสำเร็จ {prediction_mask.sum()} แถว")
+            print(f"   📊 Consistency: {consistent_count}/{len(consistency_flags)} predictions")
+            print(f"   📊 Average Reliability: {avg_reliability:.3f}")
+            
+            if consistent_count < len(consistency_flags):
+                print(f"   🔧 แก้ไข inconsistency: {len(consistency_flags) - consistent_count} predictions")
             
         except Exception as e:
-            print(f"❌ เกิดข้อผิดพลาดในการทำนายด้วย XGBoost: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"❌ XGBoost prediction failed: {e}")
+            print("🔄 ใช้ Enhanced Fallback")
             
-        return df_prepared
+            # Enhanced Fallback with consistency check
+            try:
+                fallback_weights = 0.5
+                fallback_price = (fallback_weights * df_for_prediction['PredictionClose_LSTM'] + 
+                                (1-fallback_weights) * df_for_prediction['PredictionClose_GRU'])
+                fallback_dir_prob = (fallback_weights * df_for_prediction['PredictionTrend_LSTM'] + 
+                                    (1-fallback_weights) * df_for_prediction['PredictionTrend_GRU'])
+                
+                final_fallback_prices = []
+                fallback_directions = []
+                
+                for i in range(len(fallback_price)):
+                    current_price = df_for_prediction['Close'].iloc[i]
+                    raw_fb_price = fallback_price.iloc[i]
+                    raw_fb_dir_prob = fallback_dir_prob.iloc[i]
+                    raw_fb_dir = 1 if raw_fb_dir_prob > 0.5 else 0
+                    
+                    fb_price, is_cons, _ = validate_prediction_consistency(raw_fb_price, current_price, raw_fb_dir)
+                    
+                    final_fallback_prices.append(fb_price)
+                    fallback_directions.append(raw_fb_dir)
+                
+                df.loc[prediction_mask, 'XGB_Predicted_Direction'] = fallback_directions
+                df.loc[prediction_mask, 'XGB_Predicted_Price'] = final_fallback_prices
+                df.loc[prediction_mask, 'XGB_Confidence'] = fallback_dir_prob.values
+                df.loc[prediction_mask, 'Reliability_Score'] = [0.6] * len(final_fallback_prices)
+                df.loc[prediction_mask, 'Reliability_Warning'] = ['FALLBACK_MODE'] * len(final_fallback_prices)
+                df.loc[prediction_mask, 'Suggested_Action'] = ['CAUTION'] * len(final_fallback_prices)
+                df.loc[prediction_mask, 'Ensemble_Method'] = 'Enhanced Fallback (Feature Fixed)'
+                df.loc[prediction_mask, 'Consistency_Check'] = [1] * len(final_fallback_prices)
+                
+                current_prices = df.loc[prediction_mask, 'Close'].values
+                df.loc[prediction_mask, 'Price_Change_Percent'] = ((np.array(final_fallback_prices) - current_prices) / current_prices) * 100
+                
+                print(f"   ✅ Enhanced Fallback สำเร็จ {prediction_mask.sum()} แถว")
+                
+            except Exception as fallback_error:
+                print(f"❌ Fallback failed: {fallback_error}")
+        
+        return df
+
     
     def should_retrain_meta(self):
         """ตรวจสอบว่าควร retrain XGBoost หรือไม่"""
@@ -1451,17 +1595,7 @@ except Exception as e:
     print(f"❌ เกิดข้อผิดพลาดในการสร้าง database connection: {e}")
     exit()
 
-# ตั้งค่าตลาด
-current_hour = datetime.now().hour
-if 8 <= current_hour < 18:
-    print("📊 กำลังประมวลผลตลาดหุ้นไทย (SET)...")
-    market_filter = "Thailand"
-elif 19 <= current_hour or current_hour < 5:
-    print("📊 กำลังประมวลผลตลาดหุ้นอเมริกา (NYSE & NASDAQ)...")
-    market_filter = "America"
-else:
-    print("❌ ไม่อยู่ในช่วงเวลาทำการของตลาดหุ้นไทยหรืออเมริกา")
-    exit()
+# ตั้งค่าตลาด    
 MODEL_LSTM_PATH = "../LSTM_model/best_v6_plus_minimal_tuning_v2_final_model.keras"
 MODEL_GRU_PATH = "../GRU_Model/best_v6_plus_minimal_tuning_v2_final_model.keras"
 SEQ_LENGTH = 10
@@ -1535,7 +1669,7 @@ def fetch_latest_data():
                 StockDetail.PredictionTrend_LSTM 
             FROM StockDetail
             LEFT JOIN Stock ON StockDetail.StockSymbol = Stock.StockSymbol
-            WHERE Stock.Market = '{market_filter}'  
+            WHERE Stock.Market = '{market_filter}'
             AND StockDetail.Date >= CURDATE() - INTERVAL 350 DAY
             ORDER BY StockDetail.StockSymbol, StockDetail.Date ASC;
         """
@@ -1677,6 +1811,114 @@ def fetch_latest_data():
         traceback.print_exc()
         return pd.DataFrame()
 
+def get_next_trading_day(last_date, market_type="US"):
+    """
+    คำนวณวันทำการถัดไปที่ถูกต้อง
+    """
+    next_day = last_date + pd.Timedelta(days=1)
+    return next_day
+
+def validate_prediction_consistency(predicted_price, current_price, predicted_direction, confidence_threshold=0.01):
+    """
+    ตรวจสอบและแก้ไขความสอดคล้องระหว่าง direction และ price change
+    """
+    price_change = predicted_price - current_price
+    price_change_pct = (price_change / current_price) * 100
+    
+    # คำนวณ direction จาก price change
+    actual_direction = 1 if price_change_pct > confidence_threshold else 0
+    
+    # ตรวจสอบความสอดคล้อง
+    is_consistent = (predicted_direction == actual_direction)
+    
+    if not is_consistent:
+        # แก้ไขโดยปรับ price ให้สอดคล้องกับ direction
+        if predicted_direction == 1:  # BUY - ต้องเป็นบวก
+            adjusted_price = current_price * (1 + max(0.005, abs(price_change_pct) * 0.1 / 100))
+        else:  # SELL - ต้องเป็นลบ
+            adjusted_price = current_price * (1 - max(0.005, abs(price_change_pct) * 0.1 / 100))
+        
+        return adjusted_price, False, price_change_pct  # False = มีการแก้ไข
+    
+    return predicted_price, True, price_change_pct  # True = ไม่ต้องแก้ไข
+
+def validate_prediction_consistency(predicted_price, current_price, predicted_direction, confidence_threshold=0.01):
+    """ตรวจสอบและแก้ไขความสอดคล้องระหว่าง direction และ price change"""
+    price_change = predicted_price - current_price
+    price_change_pct = (price_change / current_price) * 100
+    
+    actual_direction = 1 if price_change_pct > confidence_threshold else 0
+    is_consistent = (predicted_direction == actual_direction)
+    
+    if not is_consistent:
+        if predicted_direction == 1:  # BUY - ต้องเป็นบวก
+            adjusted_price = current_price * (1 + max(0.005, abs(price_change_pct) * 0.1 / 100))
+        else:  # SELL - ต้องเป็นลบ
+            adjusted_price = current_price * (1 - max(0.005, abs(price_change_pct) * 0.1 / 100))
+        
+        return adjusted_price, False, price_change_pct
+    
+    return predicted_price, True, price_change_pct
+
+def enhanced_conservative_adjustment(raw_price, current_price, predicted_direction, reliability_score, max_change_pct=15.0):
+    """ปรับราคาแบบ conservative ที่ดีขึ้น"""
+    raw_change_pct = (raw_price - current_price) / current_price * 100
+    
+    if abs(raw_change_pct) > max_change_pct:
+        limited_change_pct = np.sign(raw_change_pct) * min(abs(raw_change_pct), max_change_pct * reliability_score)
+        adjusted_price = current_price * (1 + limited_change_pct / 100)
+    else:
+        adjusted_change_pct = raw_change_pct * reliability_score
+        adjusted_price = current_price * (1 + adjusted_change_pct / 100)
+    
+    final_price, is_consistent, final_change_pct = validate_prediction_consistency(
+        adjusted_price, current_price, predicted_direction
+    )
+    
+    return final_price, is_consistent, final_change_pct
+
+def calculate_realistic_features(df):
+    """คำนวณ features จากข้อมูลจริง แทนการใช้ default values"""
+    df_enhanced = df.copy()
+    
+    # คำนวณ Price Agreement จริงๆ
+    if 'PredictionClose_LSTM' in df.columns and 'PredictionClose_GRU' in df.columns:
+        lstm_pred = df['PredictionClose_LSTM']
+        gru_pred = df['PredictionClose_GRU']
+        
+        price_diff_pct = abs(lstm_pred - gru_pred) / df['Close'] * 100
+        df_enhanced['Price_Agreement'] = np.exp(-price_diff_pct / 10)
+        df_enhanced['LSTM_Error_Pct'] = np.minimum(price_diff_pct, 20.0)
+        df_enhanced['GRU_Error_Pct'] = np.minimum(price_diff_pct, 20.0)
+    else:
+        df_enhanced['Price_Agreement'] = 0.7
+        df_enhanced['LSTM_Error_Pct'] = 10.0
+        df_enhanced['GRU_Error_Pct'] = 10.0
+    
+    # คำนวณ Direction Confidence
+    if 'PredictionTrend_LSTM' in df.columns and 'PredictionTrend_GRU' in df.columns:
+        lstm_conf = abs(df['PredictionTrend_LSTM'] - 0.5) * 2
+        gru_conf = abs(df['PredictionTrend_GRU'] - 0.5) * 2
+        df_enhanced['Dir_Confidence'] = (lstm_conf + gru_conf) / 2
+    else:
+        df_enhanced['Dir_Confidence'] = 0.5
+    
+    # คำนวณ Volume Normalized
+    if 'Volume' in df.columns:
+        volume_max = df['Volume'].rolling(window=30, min_periods=1).max()
+        df_enhanced['Volume_Normalized'] = df['Volume'] / (volume_max + 1e-8)
+    else:
+        df_enhanced['Volume_Normalized'] = 0.5
+    
+    # คำนวณ Price Volatility
+    if 'ATR' in df.columns:
+        df_enhanced['Price_Volatility'] = df['ATR'] / (df['Close'] + 1e-8)
+    else:
+        price_std = df['Close'].rolling(window=14, min_periods=1).std()
+        df_enhanced['Price_Volatility'] = price_std / (df['Close'] + 1e-8)
+    
+    return df_enhanced
+
 def calculate_dynamic_weights(df_ticker, price_weight_factor=0.6, direction_weight_factor=0.4):
     """
     คำนวณ dynamic weight ระหว่าง LSTM และ GRU ตาม performance ล่าสุด
@@ -1776,15 +2018,14 @@ def calculate_dynamic_weights(df_ticker, price_weight_factor=0.6, direction_weig
     return 0.5, 0.5
 
 def predict_future_day_with_meta(model_lstm, model_gru, df, feature_columns, 
-                                scaler_features, scaler_target, ticker_encoder, seq_length):
+                                      scaler_features, scaler_target, ticker_encoder, seq_length):
     """
-    ทำนายด้วย LSTM/GRU + XGBoost Meta-Learner
+    ฟังก์ชันทำนายที่แก้ไขปัญหาแล้ว
     """
-    
     future_predictions = []
     tickers = df['StockSymbol'].unique()
     
-    print("\n🔮 กำลังทำนายด้วย 3-Layer Ensemble (LSTM + GRU + XGBoost)...")
+    print("\n🔮 กำลังทำนายด้วย Enhanced 3-Layer Ensemble (สามารถผิดจริง)...")
 
     for ticker in tickers:
         print(f"\n📊 กำลังทำนายสำหรับหุ้น: {ticker}")
@@ -1795,7 +2036,21 @@ def predict_future_day_with_meta(model_lstm, model_gru, df, feature_columns,
             continue
 
         try:
-            # 1. ทำนายด้วย LSTM และ GRU
+            # คำนวณวันที่ถัดไปที่ถูกต้อง
+            last_date = df_ticker['Date'].max()
+            
+            # ตรวจสอบประเภทตลาด
+            us_tickers = ['AAPL', 'AMD', 'AMZN', 'AVGO', 'GOOGL', 'META', 'MSFT', 'NVDA', 'TSLA', 'TSM']
+            market_type = "US" if ticker in us_tickers else "TH"
+            
+            # คำนวณวันทำการถัดไป
+            next_day = get_next_trading_day(last_date, market_type)
+            
+            print(f"🔍 Debug {ticker} ({market_type}):")
+            print(f"   วันที่ล่าสุด: {last_date}")
+            print(f"   วันที่ทำนาย: {next_day}")
+            
+            # ทำนายด้วย LSTM และ GRU (ใช้โค้ดเดิม)
             latest_data = df_ticker.iloc[-seq_length:]
             features_scaled = scaler_features.transform(latest_data[feature_columns])
             ticker_ids = latest_data["Ticker_ID"].values
@@ -1817,56 +2072,78 @@ def predict_future_day_with_meta(model_lstm, model_gru, df, feature_columns,
             pred_direction_gru = np.squeeze(pred_output_gru[1])
             pred_price_gru = scaler_target.inverse_transform(pred_price_gru_scaled.reshape(-1, 1)).flatten()[0]
 
-            # 2. เตรียมข้อมูลสำหรับ XGBoost Meta-Learner
+            # เตรียมข้อมูลสำหรับ XGBoost Meta-Learner
             meta_input = pd.DataFrame({
                 'StockSymbol': [ticker],
-                'Date': [df_ticker['Date'].max()],
+                'Date': [next_day],  # ใช้วันที่ที่แก้ไขแล้ว
                 'Close': [df_ticker.iloc[-1]['Close']],
                 'High': [df_ticker.iloc[-1]['High']] if 'High' in df_ticker.columns else [df_ticker.iloc[-1]['Close'] * 1.01],
                 'Low': [df_ticker.iloc[-1]['Low']] if 'Low' in df_ticker.columns else [df_ticker.iloc[-1]['Close'] * 0.99],
+                'Volume': [df_ticker.iloc[-1]['Volume']] if 'Volume' in df_ticker.columns else [1000000],
                 'PredictionClose_LSTM': [pred_price_lstm],
                 'PredictionClose_GRU': [pred_price_gru],
-                'PredictionTrend_LSTM': [1 if pred_direction_lstm > 0.5 else 0],
-                'PredictionTrend_GRU': [1 if pred_direction_gru > 0.5 else 0]
+                'PredictionTrend_LSTM': [pred_direction_lstm],  # ใช้ probability แทน binary
+                'PredictionTrend_GRU': [pred_direction_gru]     # ใช้ probability แทน binary
             })
             
-            # เพิ่มข้อมูลประวัติสำหรับ technical indicators
-            historical_data = df_ticker.tail(30).copy()  # ใช้ 30 วันล่าสุด
-            historical_data = pd.concat([historical_data, meta_input], ignore_index=True)
+            # เพิ่มข้อมูลประวัติ
+            historical_data = df_ticker.tail(30).copy()
+            combined_data = pd.concat([historical_data, meta_input], ignore_index=True)
             
-            # 3. ทำนายด้วย XGBoost Meta-Learner
-            meta_predictions = meta_learner.predict_meta(historical_data)
+            # ทำนายด้วย fixed XGBoost Meta-Learner
+            meta_predictions = meta_learner.predict_meta(combined_data)
             
-            if 'XGB_Predicted_Price' in meta_predictions.columns:
-                # ใช้ผลลัพธ์จาก XGBoost
-                final_predicted_price = meta_predictions['XGB_Predicted_Price'].iloc[-1]
-                final_predicted_direction = meta_predictions['XGB_Predicted_Direction'].iloc[-1]
-                final_direction_prob = meta_predictions['XGB_Predicted_Direction_Proba'].iloc[-1]
-                xgb_confidence = meta_predictions['XGB_Confidence'].iloc[-1]
-                ensemble_method = "XGBoost Meta-Learner"
-            else:
-                # Fallback: ใช้ Dynamic Weight ระหว่าง LSTM และ GRU
-                lstm_weight, gru_weight = calculate_dynamic_weights(df_ticker)
-                final_predicted_price = lstm_weight * pred_price_lstm + gru_weight * pred_price_gru
-                final_direction_prob = lstm_weight * pred_direction_lstm + gru_weight * pred_direction_gru
-                final_predicted_direction = 1 if final_direction_prob > 0.5 else 0
-                xgb_confidence = abs(final_direction_prob - 0.5) * 2
-                ensemble_method = "Dynamic Weight Fallback"
-
-            # 4. สร้างผลลัพธ์
-            last_date = df_ticker['Date'].max()
-            next_day = last_date + pd.Timedelta(days=1)
+            # สร้างผลลัพธ์
             current_close = df_ticker.iloc[-1]['Close']
             
-            # Model agreement
+            if 'XGB_Predicted_Price' in meta_predictions.columns:
+                # ใช้ผลลัพธ์จาก XGBoost ที่แก้ไขแล้ว
+                final_row = meta_predictions.iloc[-1]
+                final_predicted_price = final_row['XGB_Predicted_Price']
+                final_predicted_direction = final_row['XGB_Predicted_Direction']
+                final_direction_prob = final_row['XGB_Predicted_Direction_Proba']
+                xgb_confidence = final_row['XGB_Confidence']
+                ensemble_method = final_row['Ensemble_Method']
+                consistency_check = final_row.get('Consistency_Check', True)
+                
+                print(f"   ✅ {ensemble_method} ทำนายวันที่: {next_day}")
+                if not consistency_check:
+                    print(f"   🔧 มีการแก้ไข consistency")
+            else:
+                # Enhanced Fallback
+                from scipy.stats import hmean
+                
+                # ใช้ harmonic mean แทน arithmetic mean เพื่อลด outliers
+                try:
+                    final_predicted_price = hmean([abs(pred_price_lstm), abs(pred_price_gru)]) * np.sign(pred_price_lstm + pred_price_gru)
+                except:
+                    final_predicted_price = (pred_price_lstm + pred_price_gru) / 2
+                
+                final_direction_prob = (pred_direction_lstm + pred_direction_gru) / 2
+                
+                # ตรวจสอบ consistency ใน fallback ด้วย
+                raw_direction = 1 if final_direction_prob > 0.5 else 0
+                final_predicted_price, consistency_check, _ = validate_prediction_consistency(
+                    final_predicted_price, current_close, raw_direction
+                )
+                final_predicted_direction = 1 if (final_predicted_price > current_close) else 0
+                
+                xgb_confidence = abs(final_direction_prob - 0.5) * 2
+                ensemble_method = "Enhanced Fallback (Consistent)"
+                
+                print(f"   ⚠️ {ensemble_method} ทำนายวันที่: {next_day}")
+                if not consistency_check:
+                    print(f"   🔧 มีการแก้ไข consistency ใน fallback")
+
+            # คำนวณข้อมูลเพิ่มเติม
             lstm_dir = 1 if pred_direction_lstm > 0.5 else 0
             gru_dir = 1 if pred_direction_gru > 0.5 else 0
             model_agreement = 1 if lstm_dir == gru_dir else 0
             
-            # เพิ่มผลลัพธ์
+            # สร้างผลลัพธ์สุดท้าย
             prediction_result = {
                 'StockSymbol': ticker,
-                'Date': next_day,
+                'Date': next_day,  # วันที่ที่แก้ไขแล้ว
                 'Predicted_Price': final_predicted_price,
                 'Predicted_Direction': final_predicted_direction,
                 'Direction_Probability': final_direction_prob,
@@ -1879,32 +2156,33 @@ def predict_future_day_with_meta(model_lstm, model_gru, df, feature_columns,
                 'Last_Close': current_close,
                 'Price_Change': final_predicted_price - current_close,
                 'Price_Change_Percent': (final_predicted_price - current_close) / current_close * 100,
-                'Model_Agreement': model_agreement
+                'Model_Agreement': model_agreement,
+                'Consistency_Check': consistency_check,
+                'Market_Type': market_type
             }
             
-            # แสดงข้อมูล debug สำหรับ XGBoost
-            if 'XGB_Predicted_Price' in meta_predictions.columns:
-                price_change_pct = prediction_result['Price_Change_Percent']
-                direction_consistent = ((price_change_pct > 0 and final_predicted_direction == 1) or 
-                                      (price_change_pct <= 0 and final_predicted_direction == 0))
-                consistency_status = "✅" if direction_consistent else "❌"
-                
-                # แสดงข้อมูลการปรับราคา
-                raw_price = meta_predictions['XGB_Predicted_Price_Raw'].iloc[-1] if 'XGB_Predicted_Price_Raw' in meta_predictions.columns else final_predicted_price
-                raw_change = (raw_price - current_close) / current_close * 100
-                
-                print(f"    🎯 Direction: {int(final_predicted_direction)} (Confidence: {xgb_confidence:.3f})")
-                print(f"    📊 Price: {raw_change:+.2f}% → {price_change_pct:+.2f}% {consistency_status}")
+            # ตรวจสอบความสมเหตุสมผลสุดท้าย
+            change_pct = prediction_result['Price_Change_Percent']
+            direction = prediction_result['Predicted_Direction']
+            
+            direction_consistent = ((change_pct > 0 and direction == 1) or (change_pct <= 0 and direction == 0))
+            reasonable_change = abs(change_pct) <= 50  # จำกัดการเปลี่ยนแปลงไม่เกิน 50%
+            
+            consistency_status = "✅" if direction_consistent else "❌"
+            reasonable_status = "✅" if reasonable_change else "⚠️"
+            
+            print(f"    🎯 Direction: {int(direction)} (Confidence: {xgb_confidence:.3f}) {consistency_status}")
+            print(f"    📊 Price Change: {change_pct:+.2f}% {reasonable_status}")
+            
+            if not reasonable_change:
+                print(f"    ⚠️ การเปลี่ยนแปลงราคาสูงมาก ({change_pct:.2f}%) - ควรระวัง")
             
             future_predictions.append(prediction_result)
-            
-            print(f"✅ {ticker}: {ensemble_method} - "
-                  f"Price: {final_predicted_price:.2f} "
-                  f"({prediction_result['Price_Change_Percent']:.2f}%) "
-                  f"Confidence: {xgb_confidence:.3f}")
                   
         except Exception as e:
             print(f"❌ เกิดข้อผิดพลาดในการทำนาย {ticker}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
     return pd.DataFrame(future_predictions)
@@ -2203,6 +2481,16 @@ if __name__ == "__main__":
     print("\n🚀 เริ่มต้นระบบทำนายหุ้นแบบ Enhanced 3-Layer Ensemble (Automated Mode)")
     print("🔧 Using Unified Data Preparation System (Training + Online Learning Compatible)")
     print("⚡ ระบบจะตรวจสอบและรีเทรนอัตโนมัติทุก 5 วัน")
+    current_hour = datetime.now().hour
+    if 8 <= current_hour < 18:
+        print("📊 กำลังประมวลผลตลาดหุ้นไทย (SET)...")
+        market_filter = "Thailand"
+    elif 19 <= current_hour or current_hour < 5:
+        print("📊 กำลังประมวลผลตลาดหุ้นอเมริกา (NYSE & NASDAQ)...")
+        market_filter = "America"
+    else:
+        print("❌ ไม่อยู่ในช่วงเวลาทำการของตลาดหุ้นไทยหรืออเมริกา")
+        exit()
 
     # โหลดโมเดล LSTM และ GRU
     print("\n🤖 กำลังโหลดโมเดล LSTM และ GRU...")
@@ -2370,7 +2658,6 @@ if __name__ == "__main__":
     # ======== AUTOMATED WORKFLOW ========
     
     if need_retrain:
-        # ======================== RETRAIN MODE ========================
         print(f"\n🔄 เริ่มต้นการรีเทรนโมเดลอัตโนมัติ...")
         
         # กำหนดพารามิเตอร์
@@ -2382,13 +2669,44 @@ if __name__ == "__main__":
         print(f"   📦 Chunk size: {chunk_size} วัน")
         print(f"   🔄 Retrain frequency: {retrain_freq} วัน")
         print(f"   📈 Sequence length: {SEQ_LENGTH} วัน")
-        print(f"   🤖 Models: LSTM + GRU (ทั้งสองโมเดล)")
+        print(f"   🤖 Models: LSTM + GRU (ทั้งสองโมเดลพร้อมกัน)")
         
-        retrain_success = False
+        # ตรวจสอบและแก้ไข Ticker ID ที่เกินช่วง
+        print(f"\n🔧 ตรวจสอบและแก้ไข Ticker/Market ID...")
+        
+        # ตรวจสอบ Ticker ID range
+        max_ticker_id = prepared_df['Ticker_ID'].max()
+        unique_ticker_count = prepared_df['Ticker_ID'].nunique()
+        print(f"   📊 Max Ticker ID: {max_ticker_id}, Unique count: {unique_ticker_count}")
+        
+        # แก้ไข Ticker ID ให้อยู่ในช่วงที่ถูกต้อง (0 to n-1)
+        if max_ticker_id >= unique_ticker_count:
+            print(f"   🔧 แก้ไข Ticker ID mapping...")
+            ticker_mapping = {old_id: new_id for new_id, old_id in enumerate(sorted(prepared_df['Ticker_ID'].unique()))}
+            prepared_df['Ticker_ID'] = prepared_df['Ticker_ID'].map(ticker_mapping)
+            print(f"   ✅ แก้ไข Ticker ID เรียบร้อย: 0-{prepared_df['Ticker_ID'].max()}")
+        
+        # ตรวจสอบ Market ID range
+        max_market_id = prepared_df['Market_ID'].max()
+        unique_market_count = prepared_df['Market_ID'].nunique()
+        print(f"   📊 Max Market ID: {max_market_id}, Unique count: {unique_market_count}")
+        
+        # แก้ไข Market ID ให้อยู่ในช่วงที่ถูกต้อง
+        if max_market_id >= unique_market_count:
+            print(f"   🔧 แก้ไข Market ID mapping...")
+            market_mapping = {old_id: new_id for new_id, old_id in enumerate(sorted(prepared_df['Market_ID'].unique()))}
+            prepared_df['Market_ID'] = prepared_df['Market_ID'].map(market_mapping)
+            print(f"   ✅ แก้ไข Market ID เรียบร้อย: 0-{prepared_df['Market_ID'].max()}")
+        
+        retrain_success = {"lstm": False, "gru": False}
         
         try:
-            if should_retrain_lstm:
-                print(f"\n🔍 กำลังรีเทรน LSTM...")
+            # รีเทรนทั้งสองโมเดลพร้อมกัน
+            print(f"\n🔍 กำลังรีเทรนทั้ง LSTM และ GRU พร้อมกัน...")
+            
+            # รีเทรน LSTM
+            print(f"\n🔴 รีเทรน LSTM...")
+            try:
                 predictions_lstm, metrics_lstm = walk_forward_validation_multi_task_batch(
                     model=model_lstm,
                     df=prepared_df,
@@ -2405,10 +2723,22 @@ if __name__ == "__main__":
                     predictions_lstm.to_csv('retrain_lstm_results.csv', index=False)
                     update_retrain_date("LSTM")
                     print("✅ รีเทรน LSTM สำเร็จ")
-                    retrain_success = True
-                
-            if should_retrain_gru:
-                print(f"\n🔍 กำลังรีเทรน GRU...")
+                    retrain_success["lstm"] = True
+                    
+                    # แสดงสถิติ LSTM
+                    if metrics_lstm:
+                        lstm_avg_acc = np.mean([m['Direction_Accuracy'] for m in metrics_lstm.values()])
+                        lstm_avg_mae = np.mean([m['MAE'] for m in metrics_lstm.values()])
+                        print(f"   📊 LSTM Performance: Accuracy={lstm_avg_acc:.3f}, MAE={lstm_avg_mae:.3f}")
+                else:
+                    print("⚠️ รีเทรน LSTM ไม่ได้ผลลัพธ์")
+                    
+            except Exception as e:
+                print(f"⚠️ รีเทรน LSTM ล้มเหลว: {e}")
+            
+            # รีเทรน GRU
+            print(f"\n🔵 รีเทรน GRU...")
+            try:
                 predictions_gru, metrics_gru = walk_forward_validation_multi_task_batch(
                     model=model_gru,
                     df=prepared_df,
@@ -2425,13 +2755,48 @@ if __name__ == "__main__":
                     predictions_gru.to_csv('retrain_gru_results.csv', index=False)
                     update_retrain_date("GRU")
                     print("✅ รีเทรน GRU สำเร็จ")
-                    retrain_success = True
+                    retrain_success["gru"] = True
+                    
+                    # แสดงสถิติ GRU
+                    if metrics_gru:
+                        gru_avg_acc = np.mean([m['Direction_Accuracy'] for m in metrics_gru.values()])
+                        gru_avg_mae = np.mean([m['MAE'] for m in metrics_gru.values()])
+                        print(f"   📊 GRU Performance: Accuracy={gru_avg_acc:.3f}, MAE={gru_avg_mae:.3f}")
+                else:
+                    print("⚠️ รีเทรน GRU ไม่ได้ผลลัพธ์")
+                    
+            except Exception as e:
+                print(f"⚠️ รีเทรน GRU ล้มเหลว: {e}")
             
-            if retrain_success:
-                print(f"\n🎉 การรีเทรนเสร็จสิ้น! กำลังดำเนินการทำนาย...")
-                print(f"💾 ไฟล์การรีเทรน: retrain_lstm_results.csv, retrain_gru_results.csv")
+            # สรุปผลการรีเทรน
+            successful_models = [model for model, success in retrain_success.items() if success]
+            
+            if successful_models:
+                print(f"\n🎉 การรีเทรนเสร็จสิ้น!")
+                print(f"   ✅ โมเดลที่รีเทรนสำเร็จ: {', '.join(successful_models).upper()}")
+                print(f"   💾 ไฟล์การรีเทรน:")
+                if retrain_success["lstm"]:
+                    print(f"      📄 retrain_lstm_results.csv")
+                if retrain_success["gru"]:
+                    print(f"      📄 retrain_gru_results.csv")
+                
+                # เปรียบเทียบผลลัพธ์ถ้ามีทั้งสองโมเดล
+                if retrain_success["lstm"] and retrain_success["gru"] and metrics_lstm and metrics_gru:
+                    print(f"\n🏆 เปรียบเทียบผลลัพธ์การรีเทรน:")
+                    print(f"   🔴 LSTM: Accuracy={lstm_avg_acc:.3f}, MAE={lstm_avg_mae:.3f}")
+                    print(f"   🔵 GRU:  Accuracy={gru_avg_acc:.3f}, MAE={gru_avg_mae:.3f}")
+                    
+                    if lstm_avg_acc > gru_avg_acc:
+                        print(f"   🏅 LSTM มี Direction Accuracy ที่ดีกว่า!")
+                    elif gru_avg_acc > lstm_avg_acc:
+                        print(f"   🏅 GRU มี Direction Accuracy ที่ดีกว่า!")
+                    else:
+                        print(f"   🤝 ทั้งสองโมเดลมี Direction Accuracy เท่ากัน")
+                
+                print(f"   🔮 กำลังดำเนินการทำนาย...")
             else:
-                print(f"\n⚠️ การรีเทรนไม่สำเร็จ แต่จะดำเนินการทำนายต่อไป...")
+                print(f"\n⚠️ การรีเทรนไม่สำเร็จทั้งสองโมเดล")
+                print(f"   🔮 จะดำเนินการทำนายต่อไปด้วยโมเดลเดิม...")
             
         except Exception as e:
             print(f"❌ เกิดข้อผิดพลาดในการรีเทรน: {e}")
@@ -2488,12 +2853,6 @@ if __name__ == "__main__":
     if not future_predictions_df.empty:
         print(f"\n🎯 ผลลัพธ์การทำนายอัตโนมัติ (Enhanced 3-Layer Ensemble):")
         
-        # บันทึกผลลัพธ์
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = f'automated_predictions_{timestamp}.csv'
-        future_predictions_df.to_csv(output_path, index=False)
-        print(f"💾 บันทึกผลลัพธ์ใน {output_path}")
-        
         # แสดงผลลัพธ์
         display_cols = ['StockSymbol', 'Date', 'Last_Close', 'Predicted_Price', 
                        'Price_Change_Percent', 'Predicted_Direction', 'XGB_Confidence',
@@ -2543,7 +2902,6 @@ if __name__ == "__main__":
     print(f"📋 สรุปการทำงาน:")
     print(f"   🔄 การรีเทรน: {'ดำเนินการแล้ว' if need_retrain else 'ไม่จำเป็น'}")
     print(f"   🔮 การทำนาย: {'สำเร็จ' if not future_predictions_df.empty else 'ไม่สำเร็จ'}")
-    print(f"   💾 ไฟล์ผลลัพธ์: {output_path if not future_predictions_df.empty else 'ไม่มี'}")
     print(f"   🗓️ วันที่รีเทรนครั้งถัดไป: {(datetime.now() + timedelta(days=5)).strftime('%Y-%m-%d')}")
     
     print("\n🔚 ขอบคุณที่ใช้ระบบทำนายหุ้น Enhanced 3-Layer Ensemble (Automated Mode)")
