@@ -1065,7 +1065,7 @@ app.get("/api/favorites", verifyToken, (req, res) => {
 
   // ✅ ดึงหุ้นที่ผู้ใช้ติดตาม พร้อมชื่อบริษัทและ FollowDate เรียงตาม FollowDate จากใหม่ไปเก่า
   const fetchFavoritesSql = `
-    SELECT fs.FollowID, fs.StockSymbol, fs.FollowDate, s.CompanyName
+    SELECT fs.FollowID, fs.StockSymbol, fs.FollowDate, s.CompanyName ,s.Market
     FROM FollowedStocks fs
     JOIN Stock s ON fs.StockSymbol = s.StockSymbol
     WHERE fs.UserID = ?
@@ -1103,7 +1103,8 @@ app.get("/api/favorites", verifyToken, (req, res) => {
           FollowID: stock.FollowID,
           StockSymbol: stock.StockSymbol,
           CompanyName: stock.CompanyName,
-          FollowDate: stock.FollowDate, // ✅ เพิ่ม FollowDate
+          FollowDate: stock.FollowDate,
+          Market: stock.Market,
           LastPrice: null,
           LastChange: null,
           HistoricalPrices: []
@@ -1390,6 +1391,53 @@ app.get("/api/news-by-source", async (req, res) => {
   } catch (error) {
     console.error("Error:", error.message);
     res.status(500).json({ error: "Internal error" });
+  }
+});
+
+
+app.get("/api/recommentnews-stockdetail", async (req, res) => {
+  try {
+    const stockSymbol = req.query.symbol;
+
+    if (!stockSymbol) {
+      return res.status(400).json({ error: "Missing StockSymbol in query parameters" });
+    }
+
+     const newsRecommentQuery = `
+      SELECT 
+        ns.StockSymbol,
+        ns.NewsID,
+        n.Title,
+        n.Source,
+        n.PublishedDate,
+        n.Sentiment,
+        n.Img
+      FROM newsstock ns
+      JOIN news n ON ns.NewsID = n.NewsID
+      WHERE ns.StockSymbol = ?
+      ORDER BY n.PublishedDate DESC
+      LIMIT 10
+    `;
+
+    pool.query(newsRecommentQuery, [stockSymbol], (err, results) => {
+      if (err) {
+        console.error("Database error fetching news detail:", err);
+        return res.status(500).json({ error: "Database error fetching news detail" });
+      }
+
+      if (results.length === 0) {
+        if (results.length === 0) {
+  return res.json([]);
+}
+        return res.status(404).json({ error: "News not found" });
+      }
+
+      res.json(results);
+    });
+
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
