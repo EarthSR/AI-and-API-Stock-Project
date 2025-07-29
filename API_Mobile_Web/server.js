@@ -1393,6 +1393,54 @@ app.get("/api/news-by-source", async (req, res) => {
   }
 });
 
+app.get("/api/recommentnews-stockdetail", async (req, res) => {
+  try {
+    const stockSymbol = req.query.symbol;
+
+    if (!stockSymbol) {
+      return res.status(400).json({ error: "Missing StockSymbol in query parameters" });
+    }
+
+     const newsRecommentQuery = `
+      SELECT 
+        ns.StockSymbol,
+        ns.NewsID,
+        n.Title,
+        n.Source,
+        n.PublishedDate,
+        n.Sentiment,
+        n.Img
+      FROM newsstock ns
+      JOIN news n ON ns.NewsID = n.NewsID
+      WHERE ns.StockSymbol = ?
+      ORDER BY n.PublishedDate DESC
+      LIMIT 10
+    `;
+
+    pool.query(newsRecommentQuery, [stockSymbol], (err, results) => {
+      if (err) {
+        console.error("Database error fetching news detail:", err);
+        return res.status(500).json({ error: "Database error fetching news detail" });
+      }
+
+      if (results.length === 0) {
+        if (results.length === 0) {
+  return res.json([]);
+}
+        return res.status(404).json({ error: "News not found" });
+      }
+
+      res.json(results);
+    });
+
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+
 
 //Detail News
 app.get("/api/news-detail", async (req, res) => {
@@ -1426,15 +1474,15 @@ app.get("/api/news-detail", async (req, res) => {
       const confidencePercentage = `${(news.ConfidenceScore * 100).toFixed(0)}%`;
 
       res.json({
-  NewsID: news.NewsID,
-  Title: news.Title,
-  Sentiment: news.Sentiment,
-  Source: news.Source,
-  PublishedDate: news.PublishedDate,
-  ConfidenceScore: confidencePercentage, // แสดงค่าเป็นเปอร์เซ็นต์
-  Content: news.Content,
-  ImageURL: news.Img, // <-- แก้ตรงนี้
-  URL: news.URL
+      NewsID: news.NewsID,
+      Title: news.Title,
+      Sentiment: news.Sentiment,
+      Source: news.Source,
+      PublishedDate: news.PublishedDate,
+      ConfidenceScore: confidencePercentage, 
+      Content: news.Content,
+      ImageURL: news.Img, 
+      URL: news.URL
 });
 
     });
