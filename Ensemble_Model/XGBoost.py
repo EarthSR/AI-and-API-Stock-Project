@@ -1,581 +1,529 @@
 import pandas as pd
 import numpy as np
 import xgboost as xgb
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler, RobustScaler
-from sklearn.metrics import accuracy_score, classification_report, mean_squared_error, r2_score
-from sklearn.impute import SimpleImputer
-from ta.momentum import RSIIndicator
-from ta.trend import SMAIndicator, MACD
-from ta.volatility import BollingerBands, AverageTrueRange
+from sklearn.metrics import accuracy_score, mean_squared_error, r2_score, classification_report
+from sklearn.base import BaseEstimator, RegressorMixin
 import joblib
 import logging
 import warnings
+import os
+from datetime import datetime, timedelta
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-## ----------------------------------
-## 1. Transparent Data Preparation with Warning System
-## ----------------------------------
-
-def add_market_features_transparent(df):
-    """เพิ่ม Market Features แบบโปร่งใส"""
+class FixedUnifiedTradingSystem:
+    """
+    Fixed Trading System - แก้ไขปัญหาพื้นฐาน
+    """
     
-    thai_tickers = ['ADVANC', 'DIF', 'DITTO', 'HUMAN', 'INET', 'INSET', 'JAS', 'JMART', 'TRUE']
-    us_tickers = ['AAPL', 'AMD', 'AMZN', 'AVGO', 'GOOGL', 'META', 'MSFT', 'NVDA', 'TSLA', 'TSM']
+    def __init__(self, price_threshold=0.5):  # เปลี่ยนจาก 0.0 เป็น 0.5%
+        self.price_threshold = price_threshold
+        self.model = None
+        self.feature_names = None
+        self.training_stats = {}
+        self.data_stats = {}
+        self.scaler = None
     
-    df['Market_ID'] = df['Ticker'].apply(lambda x: 0 if x in thai_tickers else 1)
-    df['Market_Name'] = df['Market_ID'].map({0: 'Thai', 1: 'US'})
-    
-    # Price categories
-    def get_price_category(row):
-        if row['Market_ID'] == 0:  # Thai
-            if row['Actual_Price'] < 10: return 0  # Low
-            elif row['Actual_Price'] < 50: return 1  # Medium  
-            else: return 2  # High
-        else:  # US
-            if row['Actual_Price'] < 100: return 0  # Low
-            elif row['Actual_Price'] < 300: return 1  # Medium
-            else: return 2  # High
-    
-    df['Price_Category'] = df.apply(get_price_category, axis=1)
-    
-    # Market-aware normalization (แต่เก็บข้อมูลดิบไว้)
-    df['Price_Raw'] = df['Actual_Price']  # เก็บราคาดิบ
-    df['Price_Market_Norm'] = df.groupby('Market_ID')['Actual_Price'].transform(
-        lambda x: (x - x.median()).abs().median()  # ใช้ median และ MAD แทน mean/std
-    )
-    
-    return df
-
-def create_prediction_quality_metrics(df):
-    """สร้างเมตริกประเมินคุณภาพการพยากรณ์"""
-    
-    # คำนวณ prediction errors
-    df['LSTM_Error_Pct'] = abs((df['Predicted_Price_LSTM'] - df['Actual_Price']) / df['Actual_Price']) * 100
-    df['GRU_Error_Pct'] = abs((df['Predicted_Price_GRU'] - df['Actual_Price']) / df['Actual_Price']) * 100
-    
-    # Model agreement strength
-    df['Price_Agreement'] = 1 - abs(df['Predicted_Price_LSTM'] - df['Predicted_Price_GRU']) / df['Actual_Price']
-    df['Price_Agreement'] = np.clip(df['Price_Agreement'], 0, 1)
-    
-    # Prediction stability (เอาไว้เตือนเมื่อการพยากรณ์ไม่เสถียร)
-    df['Price_Volatility_Window'] = df.groupby('Ticker')['Actual_Price'].transform(
-        lambda x: x.rolling(window=min(5, len(x)), min_periods=1).std()
-    )
-    
-    return df
-
-def detect_prediction_anomalies(df):
-    """ตรวจจับการพยากรณ์ที่ผิดปกติ"""
-    
-    anomaly_flags = []
-    
-    for idx, row in df.iterrows():
-        flags = []
+    def validate_input_data(self, df):
+        """ตรวจสอบข้อมูลที่เข้ามา"""
+        logger.info("🔍 Validating input data...")
         
-        # 1. ราคาติดลบ
-        if row['Predicted_Price_LSTM'] <= 0 or row['Predicted_Price_GRU'] <= 0:
-            flags.append('NEGATIVE_PRICE')
+        required_columns = ['Ticker', 'Date', 'Actual_Price', 'Predicted_Price_LSTM', 
+                           'Predicted_Price_GRU', 'Predicted_Dir_LSTM', 'Predicted_Dir_GRU']
         
-        # 2. การเปลี่ยนแปลงสุดโต่ง
-        lstm_change = abs((row['Predicted_Price_LSTM'] - row['Actual_Price']) / row['Actual_Price'])
-        gru_change = abs((row['Predicted_Price_GRU'] - row['Actual_Price']) / row['Actual_Price'])
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise ValueError(f"Missing required columns: {missing_columns}")
         
-        threshold = 0.5 if row['Market_ID'] == 0 else 0.3  # Thai stocks มี volatility สูงกว่า
+        # ตรวจสอบข้อมูลที่ผิดปกติ
+        issues = []
         
-        if lstm_change > threshold:
-            flags.append('LSTM_EXTREME')
-        if gru_change > threshold:
-            flags.append('GRU_EXTREME')
+        # 1. ราคาที่เป็น 0 หรือติดลบ
+        invalid_prices = (df['Actual_Price'] <= 0).sum()
+        if invalid_prices > 0:
+            issues.append(f"Invalid prices: {invalid_prices} rows")
         
-        # 3. Model disagreement สูง
-        if row['Price_Agreement'] < 0.5:
-            flags.append('HIGH_DISAGREEMENT')
+        # 2. Missing values
+        missing_data = df[required_columns].isnull().sum().sum()
+        if missing_data > 0:
+            issues.append(f"Missing values: {missing_data} cells")
         
-        # 4. ราคาสูงกว่าหรือต่ำกว่าประวัติการณ์
-        ticker_data = df[df['Ticker'] == row['Ticker']]
-        price_range = ticker_data['Actual_Price'].quantile([0.01, 0.99])
+        # 3. Direction ที่อยู่นอกช่วง 0-1
+        invalid_dirs_lstm = ((df['Predicted_Dir_LSTM'] < 0) | (df['Predicted_Dir_LSTM'] > 1)).sum()
+        invalid_dirs_gru = ((df['Predicted_Dir_GRU'] < 0) | (df['Predicted_Dir_GRU'] > 1)).sum()
+        if invalid_dirs_lstm + invalid_dirs_gru > 0:
+            issues.append(f"Invalid directions: LSTM={invalid_dirs_lstm}, GRU={invalid_dirs_gru}")
         
-        if (row['Predicted_Price_LSTM'] < price_range.iloc[0] * 0.5 or 
-            row['Predicted_Price_LSTM'] > price_range.iloc[1] * 2):
-            flags.append('OUT_OF_RANGE')
+        # 4. ราคาที่แตกต่างกันมากเกินไป
+        price_diff_lstm = abs(df['Predicted_Price_LSTM'] - df['Actual_Price']) / df['Actual_Price']
+        price_diff_gru = abs(df['Predicted_Price_GRU'] - df['Actual_Price']) / df['Actual_Price']
         
-        anomaly_flags.append('|'.join(flags) if flags else 'NORMAL')
+        extreme_diff_lstm = (price_diff_lstm > 0.5).sum()  # มากกว่า 50%
+        extreme_diff_gru = (price_diff_gru > 0.5).sum()
+        
+        if extreme_diff_lstm + extreme_diff_gru > 0:
+            issues.append(f"Extreme price differences: LSTM={extreme_diff_lstm}, GRU={extreme_diff_gru}")
+        
+        if issues:
+            logger.warning("Data issues found:")
+            for issue in issues:
+                logger.warning(f"  - {issue}")
+        else:
+            logger.info("✅ Data validation passed")
+        
+        return len(issues) == 0
     
-    df['Anomaly_Flags'] = anomaly_flags
-    
-    return df
-
-## ----------------------------------
-## 2. Improved Model Architecture
-## ----------------------------------
-
-def create_robust_features(df):
-    """สร้าง features ที่แข็งแกร่งกว่า"""
-    
-    # เพิ่ม High และ Low
-    df['High'] = df['Actual_Price'] * 1.005  # ลด noise
-    df['Low'] = df['Actual_Price'] * 0.995
-    
-    # Robust price differences
-    df['Price_Diff'] = df['Predicted_Price_LSTM'] - df['Predicted_Price_GRU']
-    df['Price_Diff_Normalized'] = df['Price_Diff'] / (df['Actual_Price'] + 1e-8)
-    
-    # Direction features
-    df['Dir_Agreement'] = (df['Predicted_Dir_LSTM'] == df['Predicted_Dir_GRU']).astype(int)
-    df['Dir_Confidence'] = abs(df['Predicted_Dir_LSTM'] - 0.5) + abs(df['Predicted_Dir_GRU'] - 0.5)
-    
-    # Rolling statistics (แบบ robust)
-    def calculate_robust_indicators(group):
-        if len(group) < 14:
-            return group
+    def create_simple_features(self, df, is_training=True):
+        """สร้าง features แบบง่าย ๆ ที่เข้าใจได้"""
+        logger.info("🔧 Creating simple features...")
         
-        price_series = group['Actual_Price']
+        df_clean = df.sort_values(['Ticker', 'Date']).reset_index(drop=True)
         
-        # RSI
-        try:
-            group['RSI'] = RSIIndicator(close=price_series, window=14).rsi()
-        except:
-            group['RSI'] = 50  # default neutral RSI
-        
-        # Robust trend indicators
-        if len(group) >= 20:
-            group['SMA_20'] = SMAIndicator(close=price_series, window=20).sma_indicator()
+        if is_training:
+            # สำหรับ training: ใช้ Actual_Price เป็น current price และ target
+            df_clean['Current_Price'] = df_clean['Actual_Price']
+            # สร้าง future price โดยการ shift กลับ (ปลอดภัยกว่า)
+            df_clean['Future_Price'] = df_clean.groupby('Ticker')['Actual_Price'].shift(-1)
             
-            # Bollinger Bands
-            bb = BollingerBands(close=price_series, window=20, window_dev=2)
-            group['BB_Upper'] = bb.bollinger_hband()
-            group['BB_Lower'] = bb.bollinger_lband()
-            group['BB_Position'] = (price_series - group['BB_Lower']) / (group['BB_Upper'] - group['BB_Lower'] + 1e-8)
-        
-        if len(group) >= 26:
-            group['MACD'] = MACD(close=price_series, window_slow=26, window_fast=12).macd()
-        
-        # ATR
-        if len(group) >= 14:
-            group['ATR'] = AverageTrueRange(
-                high=group['High'], 
-                low=group['Low'], 
-                close=price_series, 
-                window=14
-            ).average_true_range()
-        
-        return group
-    
-    # Apply indicators by ticker
-    df = df.groupby('Ticker', include_groups=False).apply(calculate_robust_indicators).reset_index(drop=True)
-    
-    # Market-aware feature normalization
-    market_features = ['RSI', 'BB_Position', 'Price_Diff_Normalized']
-    for feature in market_features:
-        if feature in df.columns:
-            df[f'{feature}_Market_Norm'] = df.groupby('Market_ID')[feature].transform(
-                lambda x: (x - x.median()).abs().median()
+            # คำนวณ return และ direction
+            df_clean['Target_Return_Pct'] = (
+                (df_clean['Future_Price'] - df_clean['Current_Price']) / 
+                df_clean['Current_Price'] * 100
             )
-    
-    return df
-
-## ----------------------------------
-## 3. Transparent Training Pipeline
-## ----------------------------------
-
-try:
-    # Load data
-    lstm_df = pd.read_csv("../LSTM_model/all_predictions_per_day_multi_task.csv")
-    gru_df = pd.read_csv("../GRU_Model/all_predictions_per_day_multi_task.csv")
-
-    logger.info(f"Loaded LSTM: {len(lstm_df)}, GRU: {len(gru_df)} records")
-
-    # Combine data
-    df = pd.DataFrame({
-        "Ticker": lstm_df["Ticker"],
-        "Date": pd.to_datetime(lstm_df["Date"]),
-        "Actual_Price": lstm_df["Actual_Price"],
-        "Predicted_Price_LSTM": lstm_df["Predicted_Price"],
-        "Predicted_Price_GRU": gru_df["Predicted_Price"],
-        "Actual_Direction": lstm_df["Actual_Dir"],
-        "Predicted_Dir_LSTM": lstm_df["Predicted_Dir"],
-        "Predicted_Dir_GRU": gru_df["Predicted_Dir"]
-    })
-
-    # Apply transparent preprocessing
-    df = add_market_features_transparent(df)
-    df = create_prediction_quality_metrics(df)
-    df = detect_prediction_anomalies(df)
-    df = create_robust_features(df)
-
-    # Log anomaly statistics
-    anomaly_stats = df['Anomaly_Flags'].value_counts()
-    logger.info("Anomaly Detection Results:")
-    for anomaly, count in anomaly_stats.items():
-        logger.info(f"  {anomaly}: {count} ({count/len(df)*100:.1f}%)")
-
-    # Clean data but keep transparency
-    df = df.sort_values(['Ticker', 'Date']).reset_index(drop=True)
-    
-    # Remove insufficient data tickers
-    ticker_counts = df.groupby('Ticker').size()
-    insufficient_tickers = ticker_counts[ticker_counts < 26].index
-    if len(insufficient_tickers) > 0:
-        logger.warning(f"Removing tickers with <26 days: {list(insufficient_tickers)}")
-        df = df[~df['Ticker'].isin(insufficient_tickers)]
-
-    # Imputation strategy
-    numeric_cols = ['RSI', 'SMA_20', 'MACD', 'BB_Upper', 'BB_Lower', 'BB_Position', 'ATR',
-                   'Price_Diff_Normalized', 'RSI_Market_Norm', 'BB_Position_Market_Norm']
-    
-    # Forward/backward fill by ticker
-    df[numeric_cols] = df.groupby('Ticker')[numeric_cols].ffill().bfill()
-    
-    # Market-aware imputation for remaining NaN
-    for market_id in df['Market_ID'].unique():
-        market_mask = df['Market_ID'] == market_id
-        imputer = SimpleImputer(strategy='median')
+            df_clean['Target_Direction'] = (
+                df_clean['Target_Return_Pct'] > self.price_threshold
+            ).astype(int)
+            
+            # เอาแถวสุดท้ายของแต่ละ ticker ออก (ไม่มี future price)
+            df_clean = df_clean.groupby('Ticker').apply(lambda x: x.iloc[:-1]).reset_index(drop=True)
+            
+        else:
+            # สำหรับ prediction: ใช้ราคาปัจจุบันที่ส่งมา
+            if 'Current_Price' not in df_clean.columns:
+                df_clean['Current_Price'] = df_clean['Actual_Price']
         
-        for col in numeric_cols:
-            if df.loc[market_mask, col].isna().any():
-                df.loc[market_mask, col] = imputer.fit_transform(
-                    df.loc[market_mask, [col]]
-                ).flatten()
-
-    # Final cleanup
-    df.dropna(subset=['Actual_Price', 'Actual_Direction'], inplace=True)
-    
-    # Outlier detection (but don't remove - just flag)
-    for market_id in df['Market_ID'].unique():
-        market_data = df[df['Market_ID'] == market_id]
-        q1, q3 = market_data['Actual_Price'].quantile([0.25, 0.75])
-        iqr = q3 - q1
-        lower_bound = q1 - 3 * iqr
-        upper_bound = q3 + 3 * iqr
+        # 1. ความแตกต่างของการทำนายราคา
+        df_clean['Price_Diff_Pct'] = abs(
+            df_clean['Predicted_Price_LSTM'] - df_clean['Predicted_Price_GRU']
+        ) / df_clean['Current_Price'] * 100
         
-        outlier_mask = (market_data['Actual_Price'] < lower_bound) | (market_data['Actual_Price'] > upper_bound)
-        df.loc[df['Market_ID'] == market_id, 'Is_Outlier'] = outlier_mask
-
-    logger.info(f"Final dataset size: {len(df)}")
-    logger.info(f"Outliers detected: {df['Is_Outlier'].sum()} ({df['Is_Outlier'].sum()/len(df)*100:.1f}%)")
-
-    # Feature sets
-    base_features = ['Predicted_Dir_LSTM', 'Predicted_Dir_GRU', 'Dir_Agreement', 'Dir_Confidence']
-    market_features = ['Market_ID', 'Price_Category']
-    technical_features = ['RSI', 'SMA_20', 'MACD', 'BB_Position', 'ATR']
-    quality_features = ['Price_Agreement', 'LSTM_Error_Pct', 'GRU_Error_Pct']
+        # 2. ราคาเฉลี่ย
+        df_clean['Price_Avg'] = (
+            df_clean['Predicted_Price_LSTM'] + df_clean['Predicted_Price_GRU']
+        ) / 2
+        
+        # 3. การเปลี่ยนแปลงราคาจากปัจจุบัน
+        df_clean['LSTM_Price_Change_Pct'] = (
+            (df_clean['Predicted_Price_LSTM'] - df_clean['Current_Price']) / 
+            df_clean['Current_Price'] * 100
+        )
+        df_clean['GRU_Price_Change_Pct'] = (
+            (df_clean['Predicted_Price_GRU'] - df_clean['Current_Price']) / 
+            df_clean['Current_Price'] * 100
+        )
+        df_clean['Avg_Price_Change_Pct'] = (
+            df_clean['LSTM_Price_Change_Pct'] + df_clean['GRU_Price_Change_Pct']
+        ) / 2
+        
+        # 4. Direction features
+        df_clean['LSTM_Dir_Binary'] = (df_clean['Predicted_Dir_LSTM'] > 0.5).astype(int)
+        df_clean['GRU_Dir_Binary'] = (df_clean['Predicted_Dir_GRU'] > 0.5).astype(int)
+        df_clean['Dir_Agreement'] = (
+            df_clean['LSTM_Dir_Binary'] == df_clean['GRU_Dir_Binary']
+        ).astype(int)
+        
+        # 5. Direction confidence
+        df_clean['LSTM_Dir_Confidence'] = abs(df_clean['Predicted_Dir_LSTM'] - 0.5) * 2
+        df_clean['GRU_Dir_Confidence'] = abs(df_clean['Predicted_Dir_GRU'] - 0.5) * 2
+        df_clean['Avg_Dir_Confidence'] = (
+            df_clean['LSTM_Dir_Confidence'] + df_clean['GRU_Dir_Confidence']
+        ) / 2
+        
+        # 6. Consistency check (สำคัญมาก!)
+        lstm_price_direction = (df_clean['LSTM_Price_Change_Pct'] > self.price_threshold).astype(int)
+        gru_price_direction = (df_clean['GRU_Price_Change_Pct'] > self.price_threshold).astype(int)
+        
+        df_clean['LSTM_Consistency'] = (
+            lstm_price_direction == df_clean['LSTM_Dir_Binary']
+        ).astype(int)
+        df_clean['GRU_Consistency'] = (
+            gru_price_direction == df_clean['GRU_Dir_Binary']
+        ).astype(int)
+        df_clean['Overall_Consistency'] = (
+            df_clean['LSTM_Consistency'] + df_clean['GRU_Consistency']
+        ) / 2
+        
+        # 7. Market context
+        thai_stocks = ['ADVANC', 'DIF', 'DITTO', 'HUMAN', 'INET', 'INSET', 'JAS', 'JMART', 'TRUE']
+        df_clean['Is_Thai'] = df_clean['Ticker'].isin(thai_stocks).astype(int)
+        
+        # 8. Price level categories
+        def categorize_price(row):
+            price = row['Current_Price']
+            if row['Is_Thai']:
+                if price < 10: return 0      # Low
+                elif price < 50: return 1   # Medium  
+                else: return 2              # High
+            else:  # US stocks
+                if price < 100: return 0    # Low
+                elif price < 300: return 1  # Medium
+                else: return 2              # High
+        
+        df_clean['Price_Category'] = df_clean.apply(categorize_price, axis=1)
+        
+        # 9. Simple interaction features
+        df_clean['Agreement_Confidence'] = df_clean['Dir_Agreement'] * df_clean['Avg_Dir_Confidence']
+        df_clean['Consistency_Score'] = df_clean['Overall_Consistency'] * df_clean['Avg_Dir_Confidence']
+        
+        logger.info(f"   Created {len([c for c in df_clean.columns if c not in df.columns])} features")
+        
+        return df_clean
     
-    dir_features = base_features + market_features + technical_features + quality_features
+    def train_simple_model(self, df):
+        """เทรนโมเดลแบบง่าย ๆ"""
+        logger.info("🚀 Training Simple XGBoost Model...")
+        
+        # Validate input data
+        if not self.validate_input_data(df):
+            logger.warning("Data validation failed, but continuing...")
+        
+        # Create features
+        df_processed = self.create_simple_features(df, is_training=True)
+        
+        # Remove rows with missing target
+        df_processed = df_processed.dropna(subset=['Target_Return_Pct', 'Target_Direction'])
+        
+        if len(df_processed) == 0:
+            raise ValueError("No valid training data after preprocessing")
+        
+        # Define simple feature set
+        feature_cols = [
+            'Price_Diff_Pct', 'LSTM_Price_Change_Pct', 'GRU_Price_Change_Pct', 'Avg_Price_Change_Pct',
+            'LSTM_Dir_Confidence', 'GRU_Dir_Confidence', 'Avg_Dir_Confidence',
+            'Dir_Agreement', 'LSTM_Consistency', 'GRU_Consistency', 'Overall_Consistency',
+            'Is_Thai', 'Price_Category', 'Agreement_Confidence', 'Consistency_Score'
+        ]
+        
+        # Select available features
+        available_features = [f for f in feature_cols if f in df_processed.columns]
+        logger.info(f"   Using {len(available_features)} features")
+        
+        # Prepare data
+        X = df_processed[available_features].fillna(0)
+        y_returns = df_processed['Target_Return_Pct']
+        y_directions = df_processed['Target_Direction']
+        
+        # Remove extreme outliers
+        return_q99 = y_returns.quantile(0.99)
+        return_q01 = y_returns.quantile(0.01)
+        outlier_mask = (y_returns >= return_q01) & (y_returns <= return_q99)
+        
+        X = X[outlier_mask].reset_index(drop=True)
+        y_returns = y_returns[outlier_mask].reset_index(drop=True)
+        y_directions = y_directions[outlier_mask].reset_index(drop=True)
+        
+        logger.info(f"   After outlier removal: {len(X)} samples")
+        
+        # Time-based split (80/20)
+        split_date = pd.to_datetime(df_processed['Date']).quantile(0.8)
+        train_mask = pd.to_datetime(df_processed['Date']) < split_date
+        train_mask = train_mask[outlier_mask].reset_index(drop=True)
+        test_mask = ~train_mask
+        
+        X_train, X_test = X[train_mask], X[test_mask]
+        y_returns_train, y_returns_test = y_returns[train_mask], y_returns[test_mask]
+        y_directions_train, y_directions_test = y_directions[train_mask], y_directions[test_mask]
+        
+        logger.info(f"   Train: {len(X_train)} samples")
+        logger.info(f"   Test: {len(X_test)} samples")
+        logger.info(f"   Direction balance - Train: {y_directions_train.mean():.3f}, Test: {y_directions_test.mean():.3f}")
+        
+        # Scale features
+        self.scaler = StandardScaler()
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
+        
+        # Simple XGBoost parameters
+        xgb_params = {
+            'n_estimators': 100,        # ลดลงจาก 200
+            'max_depth': 4,            # ลดลงจาก 5
+            'learning_rate': 0.1,      # เพิ่มขึ้นจาก 0.08
+            'subsample': 0.8,          # ลดลงจาก 0.85
+            'colsample_bytree': 0.8,   # ลดลงจาก 0.85
+            'reg_alpha': 0.1,          # ลดลงจาก 0.3
+            'reg_lambda': 0.1,         # ลดลงจาก 0.3
+            'random_state': 42,
+            'min_child_weight': 5,     # เพิ่มขึ้นจาก 3
+            'gamma': 0.05              # ลดลงจาก 0.1
+        }
+        
+        # Train separate models
+        self.price_model = xgb.XGBRegressor(objective='reg:squarederror', **xgb_params)
+        self.direction_model = xgb.XGBClassifier(objective='binary:logistic', **xgb_params)
+        
+        # Fit models
+        self.price_model.fit(X_train_scaled, y_returns_train)
+        self.direction_model.fit(X_train_scaled, y_directions_train)
+        
+        self.feature_names = available_features
+        
+        # Evaluate
+        self._evaluate_model_performance(X_train_scaled, X_test_scaled, 
+                                       y_returns_train, y_returns_test,
+                                       y_directions_train, y_directions_test)
+        
+        logger.info("✅ Simple model training completed!")
+        return self.training_stats
     
-    price_base = ['Predicted_Price_LSTM', 'Predicted_Price_GRU', 'Price_Diff_Normalized']
-    price_features = price_base + market_features + technical_features + quality_features + ['Price_Market_Norm']
-
-    X_dir = df[dir_features]
-    y_dir = df['Actual_Direction']
-    X_price = df[price_features]
-    y_price = df['Actual_Price']
-
-    # Use RobustScaler instead of StandardScaler
-    scaler_dir = RobustScaler()  # Less sensitive to outliers
-    scaler_price = RobustScaler()
+    def _evaluate_model_performance(self, X_train, X_test, y_returns_train, y_returns_test,
+                                   y_directions_train, y_directions_test):
+        """ประเมินประสิทธิภาพโมเดล"""
+        
+        # Predictions
+        pred_returns_train = self.price_model.predict(X_train)
+        pred_returns_test = self.price_model.predict(X_test)
+        
+        pred_dir_probs_train = self.direction_model.predict_proba(X_train)[:, 1]
+        pred_dir_probs_test = self.direction_model.predict_proba(X_test)[:, 1]
+        
+        pred_directions_train = (pred_dir_probs_train > 0.5).astype(int)
+        pred_directions_test = (pred_dir_probs_test > 0.5).astype(int)
+        
+        # Metrics
+        train_price_r2 = r2_score(y_returns_train, pred_returns_train)
+        test_price_r2 = r2_score(y_returns_test, pred_returns_test)
+        
+        train_dir_acc = accuracy_score(y_directions_train, pred_directions_train)
+        test_dir_acc = accuracy_score(y_directions_test, pred_directions_test)
+        
+        # Consistency check (สำคัญมาก!)
+        train_price_directions = (pred_returns_train > self.price_threshold).astype(int)
+        test_price_directions = (pred_returns_test > self.price_threshold).astype(int)
+        
+        train_consistency = (train_price_directions == pred_directions_train).mean()
+        test_consistency = (test_price_directions == pred_directions_test).mean()
+        
+        # Store stats
+        self.training_stats = {
+            'train_price_r2': train_price_r2,
+            'test_price_r2': test_price_r2,
+            'train_direction_accuracy': train_dir_acc,
+            'test_direction_accuracy': test_dir_acc,
+            'train_consistency': train_consistency,
+            'test_consistency': test_consistency,
+            'price_threshold': self.price_threshold,
+            'feature_count': len(self.feature_names)
+        }
+        
+        # Logging
+        logger.info("📊 Model Performance:")
+        logger.info(f"   Price R² - Train: {train_price_r2:.4f}, Test: {test_price_r2:.4f}")
+        logger.info(f"   Direction Accuracy - Train: {train_dir_acc:.4f}, Test: {test_dir_acc:.4f}")
+        logger.info(f"   🎯 Price-Direction Consistency - Train: {train_consistency:.4f}, Test: {test_consistency:.4f}")
+        
+        # Quality assessment
+        if test_consistency < 0.7:
+            logger.warning("🚨 LOW CONSISTENCY: Model predictions are inconsistent!")
+        elif test_consistency >= 0.8:
+            logger.info("✅ HIGH CONSISTENCY: Model predictions are consistent!")
+        else:
+            logger.info("⚠️ MODERATE CONSISTENCY: Model predictions are acceptable")
     
-    X_dir_scaled = scaler_dir.fit_transform(X_dir)
-    X_price_scaled = scaler_price.fit_transform(X_price)
-
-    # Save scalers and feature lists
-    joblib.dump(scaler_dir, 'robust_scaler_dir.pkl')
-    joblib.dump(scaler_price, 'robust_scaler_price.pkl')
-    joblib.dump(dir_features, 'transparent_dir_features.pkl')
-    joblib.dump(price_features, 'transparent_price_features.pkl')
-
-    # Time-based split
-    split_date = df['Date'].quantile(0.8)
-    train_mask = df['Date'] < split_date
-    test_mask = df['Date'] >= split_date
-
-    X_train_dir, X_test_dir = X_dir_scaled[train_mask], X_dir_scaled[test_mask]
-    y_train_dir, y_test_dir = y_dir[train_mask], y_dir[test_mask]
-    X_train_price, X_test_price = X_price_scaled[train_mask], X_price_scaled[test_mask]
-    y_train_price, y_test_price = y_price[train_mask], y_price[test_mask]
-    test_indices = df.index[test_mask]
-
-    logger.info(f"Training: {len(X_train_dir)}, Testing: {len(X_test_dir)}")
-
-except Exception as e:
-    logger.error(f"Error in transparent data preparation: {str(e)}")
-    raise
-
-## ----------------------------------
-## 4. Robust Model Training
-## ----------------------------------
-
-try:
-    logger.info("Training Transparent XGBoost Models")
+    def predict_signals(self, input_data):
+        """Generate trading signals - ไม่แก้ไขผลลัพธ์อัตโนมัติ"""
+        if self.price_model is None or self.direction_model is None:
+            raise ValueError("Model must be trained first")
+        
+        if isinstance(input_data, dict):
+            df = pd.DataFrame(input_data)
+        else:
+            df = input_data.copy()
+        
+        # Create features
+        df_processed = self.create_simple_features(df, is_training=False)
+        
+        # Select features
+        X = df_processed[self.feature_names].fillna(0)
+        X_scaled = self.scaler.transform(X)
+        
+        # Predict (ใช้ผลลัพธ์ตรงจากโมเดล ไม่แก้ไข)
+        predicted_returns = self.price_model.predict(X_scaled)
+        predicted_dir_probs = self.direction_model.predict_proba(X_scaled)[:, 1]
+        predicted_directions = (predicted_dir_probs > 0.5).astype(int)
+        
+        # Calculate predicted prices
+        current_prices = df_processed['Current_Price'].values
+        predicted_prices = current_prices * (1 + predicted_returns / 100)
+        
+        # ✅ ตรวจสอบความสอดคล้อง แต่ไม่แก้ไข (เก็บเป็นข้อมูลเท่านั้น)
+        price_implied_directions = (predicted_returns > self.price_threshold).astype(int)
+        inconsistent_mask = (predicted_directions != price_implied_directions)
+        
+        # 📊 เก็บสถิติความไม่สอดคล้อง แต่ไม่แก้ไข
+        if inconsistent_mask.sum() > 0:
+            logger.info(f"🚨 Found {inconsistent_mask.sum()}/{len(inconsistent_mask)} inconsistent predictions (NOT FIXED)")
+            logger.info(f"🎯 Raw Model Consistency: {(1 - inconsistent_mask.mean()):.1%}")
+        else:
+            logger.info("✅ All predictions are naturally consistent")
+        
+        # ❌ ลบส่วนการแก้ไขออกทั้งหมด - ไม่แก้ไข predicted_directions และ predicted_dir_probs
+        # ❌ predicted_directions[inconsistent_mask] = price_implied_directions[inconsistent_mask]
+        # ❌ predicted_dir_probs[inconsistent_mask] = np.where(...)
+        
+        # ✅ คำนวณ confidence แบบธรรมชาติ (ไม่มี consistency bonus)
+        base_confidence = np.abs(predicted_dir_probs - 0.5) * 2
+        # ❌ ลบ consistency bonus ออก
+        # ❌ consistency_bonus = (~inconsistent_mask).astype(float) * 0.1
+        final_confidence = np.clip(base_confidence, 0.1, 0.9)
+        
+        # Generate results (เพิ่มข้อมูลความไม่สอดคล้อง)
+        results = []
+        for idx in range(len(df_processed)):
+            results.append({
+                'Ticker': df_processed.iloc[idx]['Ticker'],
+                'Current_Price': current_prices[idx],
+                'Predicted_Price': predicted_prices[idx],
+                'Predicted_Return_Pct': predicted_returns[idx],
+                'Predicted_Direction': predicted_directions[idx],  # ✅ ผลจริงจากโมเดล
+                'Direction_Probability': predicted_dir_probs[idx],  # ✅ ผลจริงจากโมเดล
+                'Confidence': final_confidence[idx],  # ✅ ไม่มี artificial bonus
+                'Is_Inconsistent': inconsistent_mask[idx],  # ✅ เพิ่มข้อมูลความไม่สอดคล้อง
+                'Price_Implied_Direction': price_implied_directions[idx],  # ✅ เพิ่มเพื่อเปรียบเทียบ
+                'Model_Consistency': self.training_stats.get('test_consistency', 0)  # ✅ ความสอดคล้องจริงจากการเทรน
+            })
+        
+        return pd.DataFrame(results)
     
-    # Direction Model
-    xgb_clf = xgb.XGBClassifier(
-        objective='binary:logistic',
-        eval_metric='logloss',
-        random_state=42,
-        n_estimators=200,
-        max_depth=5,
-        learning_rate=0.1,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=0.1
-    )
-
-    # Simpler grid search for stability
-    param_grid_clf = {
-        'n_estimators': [150, 200, 250],
-        'max_depth': [4, 5, 6],
-        'learning_rate': [0.05, 0.1, 0.15]
-    }
+    def save_model(self, path='./fixed_unified_trading_model.pkl'):
+        """Save model"""
+        model_data = {
+            'price_model': self.price_model,
+            'direction_model': self.direction_model,
+            'scaler': self.scaler,
+            'feature_names': self.feature_names,
+            'training_stats': self.training_stats,
+            'price_threshold': self.price_threshold,
+            'version': '1.0_fixed'
+        }
+        joblib.dump(model_data, path)
+        logger.info(f"✅ Fixed model saved to {path}")
     
-    grid_clf = GridSearchCV(xgb_clf, param_grid_clf, cv=3, scoring='accuracy', n_jobs=-1)
-    grid_clf.fit(X_train_dir, y_train_dir)
-    
-    xgb_clf = grid_clf.best_estimator_
-    logger.info(f"Best Direction Model params: {grid_clf.best_params_}")
+    def load_model(self, path='./fixed_unified_trading_model.pkl'):
+        """Load model"""
+        model_data = joblib.load(path)
+        self.price_model = model_data['price_model']
+        self.direction_model = model_data['direction_model']
+        self.scaler = model_data['scaler']
+        self.feature_names = model_data['feature_names']
+        self.training_stats = model_data['training_stats']
+        self.price_threshold = model_data.get('price_threshold', 0.5)
+        logger.info(f"✅ Fixed model loaded from {path}")
 
-    # Price Model  
-    xgb_reg = xgb.XGBRegressor(
-        objective='reg:squarederror',
-        random_state=42,
-        n_estimators=200,
-        max_depth=5,
-        learning_rate=0.1,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=0.1
-    )
+# ===== MAIN TRAINING FUNCTION =====
 
-    param_grid_reg = {
-        'n_estimators': [150, 200, 250],
-        'max_depth': [4, 5, 6],
-        'learning_rate': [0.05, 0.1, 0.15]
-    }
-    
-    grid_reg = GridSearchCV(xgb_reg, param_grid_reg, cv=3, scoring='neg_mean_squared_error', n_jobs=-1)
-    grid_reg.fit(X_train_price, y_train_price)
-    
-    xgb_reg = grid_reg.best_estimator_
-    logger.info(f"Best Price Model params: {grid_reg.best_params_}")
-
-    # Predictions
-    y_pred_dir = xgb_clf.predict(X_test_dir)
-    y_pred_dir_proba = xgb_clf.predict_proba(X_test_dir)[:, 1]
-    y_pred_price = xgb_reg.predict(X_test_price)
-
-    # NO CLIPPING - Keep raw predictions for transparency
-    
-    # Model evaluation
-    dir_accuracy = accuracy_score(y_test_dir, y_pred_dir)
-    price_rmse = np.sqrt(mean_squared_error(y_test_price, y_pred_price))
-    price_r2 = r2_score(y_test_price, y_pred_price)
-
-    logger.info(f"Direction Accuracy: {dir_accuracy:.4f}")
-    logger.info(f"Price RMSE: {price_rmse:.4f}")
-    logger.info(f"Price R²: {price_r2:.4f}")
-
-    # Feature importance
-    dir_importance = pd.DataFrame({
-        'feature': dir_features,
-        'importance': xgb_clf.feature_importances_
-    }).sort_values('importance', ascending=False)
-    
-    price_importance = pd.DataFrame({
-        'feature': price_features,
-        'importance': xgb_reg.feature_importances_
-    }).sort_values('importance', ascending=False)
-
-    logger.info("Top Direction Features:")
-    logger.info(dir_importance.head(8).to_string(index=False))
-    
-    logger.info("Top Price Features:")
-    logger.info(price_importance.head(8).to_string(index=False))
-
-    # Save models
-    joblib.dump(xgb_clf, 'transparent_xgb_classifier.pkl')
-    joblib.dump(xgb_reg, 'transparent_xgb_regressor.pkl')
-
-except Exception as e:
-    logger.error(f"Error in model training: {str(e)}")
-    raise
-
-## ----------------------------------
-## 5. Transparent Prediction Function
-## ----------------------------------
-
-def predict_with_transparency(new_data, return_diagnostics=True):
-    """
-    ทำนายแบบโปร่งใส - แสดงทั้งผลดิบและคำเตือน
-    """
+def train_fixed_system():
+    """Train the fixed system"""
     try:
-        # Load models and scalers
-        scaler_dir = joblib.load('robust_scaler_dir.pkl')
-        scaler_price = joblib.load('robust_scaler_price.pkl')
-        xgb_clf = joblib.load('transparent_xgb_classifier.pkl')
-        xgb_reg = joblib.load('transparent_xgb_regressor.pkl')
-        dir_features = joblib.load('transparent_dir_features.pkl')
-        price_features = joblib.load('transparent_price_features.pkl')
+        logger.info("🚀 Starting Fixed Unified Training...")
         
-        # Preprocess new data (same as training)
-        processed_data = new_data.copy()
-        processed_data = add_market_features_transparent(processed_data)
-        processed_data = create_prediction_quality_metrics(processed_data)
-        processed_data = detect_prediction_anomalies(processed_data)
-        processed_data = create_robust_features(processed_data)
+        # Load data
+        lstm_path = "../LSTM_model/all_predictions_per_day_multi_task.csv"
+        gru_path = "../GRU_Model/all_predictions_per_day_multi_task.csv"
         
-        # Handle missing values
-        numeric_cols = ['RSI', 'SMA_20', 'MACD', 'BB_Upper', 'BB_Lower', 'BB_Position', 'ATR']
-        for col in numeric_cols:
-            if col in processed_data.columns:
-                processed_data[col] = processed_data.groupby('Ticker')[col].ffill().bfill()
-                if processed_data[col].isna().any():
-                    processed_data[col] = processed_data[col].fillna(processed_data[col].median())
+        if not os.path.exists(lstm_path) or not os.path.exists(gru_path):
+            raise FileNotFoundError("Required data files not found")
         
-        # Make predictions
-        X_dir = scaler_dir.transform(processed_data[dir_features])
-        X_price = scaler_price.transform(processed_data[price_features])
+        lstm_df = pd.read_csv(lstm_path)
+        gru_df = pd.read_csv(gru_path)
         
-        pred_dir = xgb_clf.predict(X_dir)
-        pred_dir_proba = xgb_clf.predict_proba(X_dir)[:, 1]
-        pred_price_raw = xgb_reg.predict(X_price)  # RAW predictions
-        
-        # Calculate prediction quality metrics
-        price_change_pct = ((pred_price_raw - processed_data['Actual_Price']) / processed_data['Actual_Price']) * 100
-        
-        # Create transparency metrics
-        def get_reliability_score(row, pred_price, price_change):
-            score = 1.0
-            warnings = []
-            
-            # Check for extreme predictions
-            if abs(price_change) > 50:
-                score *= 0.1
-                warnings.append("EXTREME_CHANGE")
-            elif abs(price_change) > 20:
-                score *= 0.3
-                warnings.append("HIGH_CHANGE")
-            
-            # Check for negative prices
-            if pred_price <= 0:
-                score *= 0.0
-                warnings.append("NEGATIVE_PRICE")
-            
-            # Check model agreement
-            if row.get('Price_Agreement', 1) < 0.7:
-                score *= 0.7
-                warnings.append("LOW_AGREEMENT")
-            
-            # Check for anomalies
-            if row.get('Anomaly_Flags', 'NORMAL') != 'NORMAL':
-                score *= 0.5
-                warnings.append("ANOMALY_DETECTED")
-            
-            return score, '|'.join(warnings) if warnings else 'RELIABLE'
-        
-        reliability_scores = []
-        reliability_warnings = []
-        
-        for idx, row in processed_data.iterrows():
-            score, warning = get_reliability_score(row, pred_price_raw[idx], price_change_pct.iloc[idx])
-            reliability_scores.append(score)
-            reliability_warnings.append(warning)
-        
-        # Create comprehensive results
-        results = pd.DataFrame({
-            'Ticker': processed_data['Ticker'],
-            'Date': processed_data['Date'],
-            'Market_Name': processed_data['Market_Name'],
-            'Last_Close': processed_data['Actual_Price'],
-            
-            # RAW PREDICTIONS (no clipping)
-            'Predicted_Price_Raw': pred_price_raw,
-            'Price_Change_Percent_Raw': price_change_pct,
-            'Predicted_Direction': pred_dir,
-            'Direction_Confidence': pred_dir_proba,
-            
-            # QUALITY METRICS
-            'Reliability_Score': reliability_scores,
-            'Reliability_Warning': reliability_warnings,
-            'Model_Agreement': processed_data.get('Price_Agreement', 1.0),
-            'Anomaly_Flags': processed_data.get('Anomaly_Flags', 'NORMAL'),
-            
-            # SUGGESTED ACTIONS (based on reliability)
-            'Suggested_Action': ['INVEST' if (rel > 0.7 and abs(change) < 20) 
-                               else 'CAUTION' if rel > 0.3 
-                               else 'AVOID' 
-                               for rel, change in zip(reliability_scores, price_change_pct)]
+        # Combine data
+        df = pd.DataFrame({
+            "Ticker": lstm_df["Ticker"],
+            "Date": pd.to_datetime(lstm_df["Date"]),
+            "Actual_Price": lstm_df["Actual_Price"],
+            "Predicted_Price_LSTM": lstm_df["Predicted_Price"],
+            "Predicted_Price_GRU": gru_df["Predicted_Price"],
+            "Actual_Direction": lstm_df["Actual_Dir"],
+            "Predicted_Dir_LSTM": lstm_df["Predicted_Dir"],
+            "Predicted_Dir_GRU": gru_df["Predicted_Dir"]
         })
         
-        # Add conservative estimates for high-risk predictions
-        def get_conservative_estimate(row):
-            if row['Reliability_Score'] < 0.3:
-                # Very unreliable - use minimal change
-                return row['Last_Close'] * (1 + np.sign(row['Price_Change_Percent_Raw']) * 0.02)
-            elif row['Reliability_Score'] < 0.7:
-                # Somewhat unreliable - reduce the change
-                conservative_change = row['Price_Change_Percent_Raw'] * 0.3
-                return row['Last_Close'] * (1 + conservative_change/100)
-            else:
-                # Reliable - use raw prediction
-                return row['Predicted_Price_Raw']
+        logger.info(f"   Raw data: {len(df)} records")
         
-        results['Predicted_Price_Conservative'] = results.apply(get_conservative_estimate, axis=1)
-        results['Price_Change_Percent_Conservative'] = ((results['Predicted_Price_Conservative'] - results['Last_Close']) / results['Last_Close']) * 100
+        # Initialize and train fixed system
+        trading_system = FixedUnifiedTradingSystem(price_threshold=0.5)
+        training_stats = trading_system.train_simple_model(df)
         
-        if return_diagnostics:
-            # Print diagnostic summary
-            print("\n🔍 PREDICTION TRANSPARENCY REPORT")
-            print("=" * 50)
-            
-            reliability_dist = pd.Series(reliability_warnings).value_counts()
-            print("\nReliability Distribution:")
-            for warning, count in reliability_dist.items():
-                print(f"  {warning}: {count} predictions")
-            
-            extreme_predictions = results[abs(results['Price_Change_Percent_Raw']) > 30]
-            if len(extreme_predictions) > 0:
-                print(f"\n⚠️  EXTREME PREDICTIONS (>30% change): {len(extreme_predictions)}")
-                for _, row in extreme_predictions.iterrows():
-                    print(f"     {row['Ticker']}: {row['Price_Change_Percent_Raw']:.1f}% (Warning: {row['Reliability_Warning']})")
-            
-            negative_predictions = results[results['Predicted_Price_Raw'] <= 0]
-            if len(negative_predictions) > 0:
-                print(f"\n❌ NEGATIVE PRICE PREDICTIONS: {len(negative_predictions)}")
-                for _, row in negative_predictions.iterrows():
-                    print(f"     {row['Ticker']}: ${row['Predicted_Price_Raw']:.2f}")
-            
-            print(f"\n📊 SUMMARY:")
-            print(f"   Reliable predictions (>0.7): {len(results[results['Reliability_Score'] > 0.7])}")
-            print(f"   Questionable predictions (0.3-0.7): {len(results[(results['Reliability_Score'] > 0.3) & (results['Reliability_Score'] <= 0.7)])}")
-            print(f"   Unreliable predictions (<0.3): {len(results[results['Reliability_Score'] <= 0.3])}")
-            
-        return results
+        # Save model
+        trading_system.save_model('./fixed_unified_trading_model.pkl')
+        
+        # Display results
+        logger.info("\n🎉 Fixed Training Results:")
+        logger.info(f"   Price R²: {training_stats['test_price_r2']:.4f}")
+        logger.info(f"   Direction Accuracy: {training_stats['test_direction_accuracy']:.4f}")
+        logger.info(f"   🎯 Model Consistency: {training_stats['test_consistency']:.4f}")
+        
+        # Quality assessment
+        if training_stats['test_consistency'] >= 0.8:
+            logger.info("✅ EXCELLENT: High model consistency!")
+        elif training_stats['test_consistency'] >= 0.7:
+            logger.info("✅ GOOD: Acceptable model consistency")
+        else:
+            logger.warning("⚠️ POOR: Low model consistency - needs improvement")
+        
+        return trading_system, training_stats
         
     except Exception as e:
-        logger.error(f"Error in transparent prediction: {str(e)}")
+        logger.error(f"❌ Fixed training failed: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
-# Example usage function
-def demonstrate_transparency():
-    """แสดงตัวอย่างการใช้งานแบบโปร่งใส"""
-    
-    print("\n🎓 HOW TO USE TRANSPARENT PREDICTIONS:")
-    print("=" * 50)
-    print("1. Check 'Reliability_Score' (0-1, higher = better)")
-    print("2. Read 'Reliability_Warning' for specific issues")
-    print("3. Use 'Predicted_Price_Raw' for full transparency")
-    print("4. Use 'Predicted_Price_Conservative' for safer estimates")
-    print("5. Follow 'Suggested_Action' (INVEST/CAUTION/AVOID)")
-    print("\n💡 INTERPRETATION GUIDE:")
-    print("   Reliability > 0.7: High confidence, use raw prediction")
-    print("   Reliability 0.3-0.7: Medium confidence, use conservative estimate")
-    print("   Reliability < 0.3: Low confidence, avoid or investigate further")
+# ===== USAGE EXAMPLE =====
 
 if __name__ == "__main__":
-    logger.info("Transparent ensemble model training completed!")
-    demonstrate_transparency()
+    print("🚀 Starting Fixed XGBoost Training...")
+    
+    try:
+        # Train fixed system
+        trading_system, stats = train_fixed_system()
+        
+        print("\n📊 Final Results Summary:")
+        print(f"   Price R²: {stats['test_price_r2']:.4f}")
+        print(f"   Direction Accuracy: {stats['test_direction_accuracy']:.4f}")
+        print(f"   🎯 Model Consistency: {stats['test_consistency']:.4f}")
+        
+        # Test prediction
+        print("\n🧪 Testing Fixed Prediction...")
+        sample_data = {
+            'Ticker': ['AAPL'],
+            'Date': ['2025-07-30'],
+            'Actual_Price': [213.88],  # ใช้เป็น current price
+            'Predicted_Price_LSTM': [215.50],
+            'Predicted_Price_GRU': [214.80],
+            'Predicted_Dir_LSTM': [0.65],  # ขึ้น
+            'Predicted_Dir_GRU': [0.62]    # ขึ้น
+        }
+        
+        signals = trading_system.predict_signals(sample_data)
+        result = signals.iloc[0]
+        
+        print(f"\nFixed prediction for {result['Ticker']}:")
+        print(f"   Current Price: ${result['Current_Price']:.2f}")
+        print(f"   Predicted Price: ${result['Predicted_Price']:.2f}")
+        print(f"   Expected Return: {result['Predicted_Return_Pct']:+.2f}%")
+        print(f"   Direction: {'📈 UP' if result['Predicted_Direction'] == 1 else '📉 DOWN'}")
+        print(f"   Confidence: {result['Confidence']:.3f}")
+        print(f"   Is Inconsistent: {'Yes' if result['Is_Inconsistent'] else 'No'}")
+        print(f"   Model Consistency: {result['Model_Consistency']:.3f}")
+        
+        print(f"\n✅ Fixed model saved as: ./fixed_unified_trading_model.pkl")
+        
+    except Exception as e:
+        print(f"❌ Training failed: {e}")
+        import traceback
+        print(traceback.format_exc())
