@@ -139,7 +139,7 @@ app.post("/api/register/email", async (req, res) => {
 
               // ถ้า Email นี้เคยลงทะเบียนแล้วและเป็น Active
               if (user.Status === "active" && user.Password) {
-                  return res.status(400).json({ error: "อีเมลนี้ถูกลงทะเบียนแล้ว" });
+                  return res.status(400).json({ error: "Email Already use" });
               }
 
               // ถ้าเคยสมัครแต่เป็น deactivated ให้เปิดใช้งานอีกครั้ง
@@ -1065,7 +1065,7 @@ app.get("/api/favorites", verifyToken, (req, res) => {
 
   // ✅ ดึงหุ้นที่ผู้ใช้ติดตาม พร้อมชื่อบริษัทและ FollowDate เรียงตาม FollowDate จากใหม่ไปเก่า
   const fetchFavoritesSql = `
-    SELECT fs.FollowID, fs.StockSymbol, fs.FollowDate, s.CompanyName
+    SELECT fs.FollowID, fs.StockSymbol, fs.FollowDate, s.CompanyName ,s.Market
     FROM FollowedStocks fs
     JOIN Stock s ON fs.StockSymbol = s.StockSymbol
     WHERE fs.UserID = ?
@@ -1103,7 +1103,8 @@ app.get("/api/favorites", verifyToken, (req, res) => {
           FollowID: stock.FollowID,
           StockSymbol: stock.StockSymbol,
           CompanyName: stock.CompanyName,
-          FollowDate: stock.FollowDate, // ✅ เพิ่ม FollowDate
+          FollowDate: stock.FollowDate,
+          Market: stock.Market,
           LastPrice: null,
           LastChange: null,
           HistoricalPrices: []
@@ -1393,6 +1394,101 @@ app.get("/api/news-by-source", async (req, res) => {
   }
 });
 
+app.get("/api/recommentnews-stockdetail", async (req, res) => {
+  try {
+    const stockSymbol = req.query.symbol;
+
+    if (!stockSymbol) {
+      return res.status(400).json({ error: "Missing StockSymbol in query parameters" });
+    }
+
+     const newsRecommentQuery = `
+      SELECT 
+        ns.StockSymbol,
+        ns.NewsID,
+        n.Title,
+        n.Source,
+        n.PublishedDate,
+        n.Sentiment,
+        n.Img
+      FROM newsstock ns
+      JOIN news n ON ns.NewsID = n.NewsID
+      WHERE ns.StockSymbol = ?
+      ORDER BY n.PublishedDate DESC
+      LIMIT 10
+    `;
+
+    pool.query(newsRecommentQuery, [stockSymbol], (err, results) => {
+      if (err) {
+        console.error("Database error fetching news detail:", err);
+        return res.status(500).json({ error: "Database error fetching news detail" });
+      }
+
+      if (results.length === 0) {
+        if (results.length === 0) {
+  return res.json([]);
+}
+        return res.status(404).json({ error: "News not found" });
+      }
+
+      res.json(results);
+    });
+
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+
+
+app.get("/api/recommentnews-stockdetail", async (req, res) => {
+  try {
+    const stockSymbol = req.query.symbol;
+
+    if (!stockSymbol) {
+      return res.status(400).json({ error: "Missing StockSymbol in query parameters" });
+    }
+
+     const newsRecommentQuery = `
+      SELECT 
+        ns.StockSymbol,
+        ns.NewsID,
+        n.Title,
+        n.Source,
+        n.PublishedDate,
+        n.Sentiment,
+        n.Img
+      FROM newsstock ns
+      JOIN news n ON ns.NewsID = n.NewsID
+      WHERE ns.StockSymbol = ?
+      ORDER BY n.PublishedDate DESC
+      LIMIT 10
+    `;
+
+    pool.query(newsRecommentQuery, [stockSymbol], (err, results) => {
+      if (err) {
+        console.error("Database error fetching news detail:", err);
+        return res.status(500).json({ error: "Database error fetching news detail" });
+      }
+
+      if (results.length === 0) {
+        if (results.length === 0) {
+  return res.json([]);
+}
+        return res.status(404).json({ error: "News not found" });
+      }
+
+      res.json(results);
+    });
+
+  } catch (error) {
+    console.error("Internal server error:", error.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 
 //Detail News
 app.get("/api/news-detail", async (req, res) => {
@@ -1426,15 +1522,15 @@ app.get("/api/news-detail", async (req, res) => {
       const confidencePercentage = `${(news.ConfidenceScore * 100).toFixed(0)}%`;
 
       res.json({
-  NewsID: news.NewsID,
-  Title: news.Title,
-  Sentiment: news.Sentiment,
-  Source: news.Source,
-  PublishedDate: news.PublishedDate,
-  ConfidenceScore: confidencePercentage, // แสดงค่าเป็นเปอร์เซ็นต์
-  Content: news.Content,
-  ImageURL: news.Img, // <-- แก้ตรงนี้
-  URL: news.URL
+      NewsID: news.NewsID,
+      Title: news.Title,
+      Sentiment: news.Sentiment,
+      Source: news.Source,
+      PublishedDate: news.PublishedDate,
+      ConfidenceScore: confidencePercentage, 
+      Content: news.Content,
+      ImageURL: news.Img, 
+      URL: news.URL
 });
 
     });
@@ -1501,7 +1597,9 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
           s.Industry, 
           s.Description, 
           sd.OpenPrice, 
+          sd.HighPrice,
           sd.ClosePrice, 
+          sd.MarketCap,
           sd.Changepercen AS ChangePercentage, 
           sd.Volume
         FROM Stock s
@@ -1587,11 +1685,14 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
               SelectedTimeframe: timeframe,
               HistoricalPrices: historyResults,
               Overview: {
+                High: stock.HighPrice,
                 Open: stock.OpenPrice,
                 Close: stock.ClosePrice,
-                AvgVolume30D: formattedAvgVolume30D
+                AvgVolume30D: formattedAvgVolume30D,
+                Marketcap : stock.MarketCap
               },
               Profile: {
+                Market: stock.Market,
                 Sector: stock.Sector,
                 Industry: stock.Industry,
                 Description: stock.Description
