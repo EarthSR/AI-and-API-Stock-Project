@@ -139,7 +139,7 @@ app.post("/api/register/email", async (req, res) => {
 
               // ถ้า Email นี้เคยลงทะเบียนแล้วและเป็น Active
               if (user.Status === "active" && user.Password) {
-                  return res.status(400).json({ error: "อีเมลนี้ถูกลงทะเบียนแล้ว" });
+                  return res.status(400).json({ error: "Email Already use" });
               }
 
               // ถ้าเคยสมัครแต่เป็น deactivated ให้เปิดใช้งานอีกครั้ง
@@ -1549,7 +1549,9 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
           s.Industry, 
           s.Description, 
           sd.OpenPrice, 
+          sd.HighPrice,
           sd.ClosePrice, 
+          sd.MarketCap,
           sd.Changepercen AS ChangePercentage, 
           sd.Volume
         FROM Stock s
@@ -1635,11 +1637,14 @@ app.get("/api/stock-detail/:symbol", async (req, res) => {
               SelectedTimeframe: timeframe,
               HistoricalPrices: historyResults,
               Overview: {
+                High: stock.HighPrice,
                 Open: stock.OpenPrice,
                 Close: stock.ClosePrice,
-                AvgVolume30D: formattedAvgVolume30D
+                AvgVolume30D: formattedAvgVolume30D,
+                Marketcap : stock.MarketCap
               },
               Profile: {
+                Market: stock.Market,
                 Sector: stock.Sector,
                 Industry: stock.Industry,
                 Description: stock.Description
