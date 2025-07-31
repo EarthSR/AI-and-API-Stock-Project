@@ -2190,6 +2190,37 @@ app.get('/price/:symbol', async (req, res) => {
   }
 });
 
+// API สำหรับดึงข้อมูล Portfolio ของผู้ใช้
+app.get("/api/portfolio", verifyToken, async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.promise().getConnection();
+
+    // ดึงข้อมูล portfolio ของผู้ใช้ที่ล็อกอินอยู่
+    const [rows] = await connection.query(
+      "SELECT * FROM portfolio WHERE UserID = ?",
+      [req.userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "ไม่พบ Portfolio สำหรับผู้ใช้นี้" });
+    }
+
+    const portfolio = rows[0];
+
+    res.status(200).json({
+      message: "ดึงข้อมูล Portfolio สำเร็จ",
+      data: portfolio,
+    });
+  } catch (error) {
+    console.error("Error fetching portfolio:", error);
+    res.status(500).json({ error: "Internal server error" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+
 app.post("/api/create-demo", verifyToken, async (req, res) => {
   let connection;
   try {
@@ -2239,6 +2270,9 @@ app.post("/api/create-demo", verifyToken, async (req, res) => {
     if (connection) connection.release();
   }
 });
+
+
+
 
 //-----------------------------------------------------------------------------------------------------------------------------------------------//
 
