@@ -2170,6 +2170,7 @@ app.get("/api/most-held-th-stocks", async (req, res) => {
 
 const API_KEY = process.env.FINNHUB_API_KEY; // ใส่ key ใน .env
 const cheerio = require('cheerio');
+const { timeStamp } = require("console");
 async function getTradingViewPrice(symbol, market = 'thailand', retries = 3) {
   const marketConfig = {
     thailand: { endpoint: 'https://scanner.tradingview.com/thailand/scan', prefixes: ['SET:'] },
@@ -2292,6 +2293,7 @@ function getMarketStatus(market) {
     return 'UNKNOWN';
 }
 
+
 // API สำหรับดึงข้อมูล Portfolio ของผู้ใช้ พร้อมคำนวณกำไร/ขาดทุน
 app.get("/api/portfolio", verifyToken, async (req, res) => {
   let connection;
@@ -2326,17 +2328,16 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
     );
 
     // 3. ดึงราคาปัจจุบันของหุ้นทุกตัวพร้อมกันเพื่อประสิทธิภาพ
-    const pricePromises = holdingsRows.map(holding => {
-      const apiSymbol = holding.Market === 'Thailand' ? `${holding.StockSymbol.toUpperCase()}.BK` : holding.StockSymbol.toUpperCase();
-      const url = `https://finnhub.io/api/v1/quote?symbol=${apiSymbol}&token=${process.env.FINNHUB_API_KEY}`;
-      return axios.get(url)
-        .then(response => ({ symbol: holding.StockSymbol, price: response.data.c || 0 }))
-        .catch(error => {
-          console.error(`Could not fetch price for ${holding.StockSymbol}:`, error.message);
-          return { symbol: holding.StockSymbol, price: 0, error: true };
-        });
+    const pricePromises = holdingsRows.map(async (holding) => {
+      try {
+        const tradingViewMarket = holding.Market === 'Thailand' ? 'thailand' : 'usa';
+        const priceData = await getTradingViewPrice(holding.StockSymbol, tradingViewMarket);
+        return { symbol: holding.StockSymbol, price: priceData.price };
+      } catch (error) {
+        console.error(`Could not fetch price for ${holding.StockSymbol} using TradingView:`, error.message);
+        return { symbol: holding.StockSymbol, price: 0, error: true };
+      }
     });
-
     const prices = await Promise.all(pricePromises);
     const priceMap = prices.reduce((map, item) => {
       map[item.symbol] = item.price;
@@ -2407,7 +2408,6 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
   }
 });
 
-// API สำหรับการซื้อ-ขายหุ้นในพอร์ตจำลอง
 app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
   let connection;
   try {
@@ -2434,13 +2434,13 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
       await connection.rollback();
       return res.status(404).json({ error: `ไม่พบข้อมูลหุ้น ${normalizedSymbol}` });
     }
-    const market = stockInfoRows[0].Market; // 'Thailand' or 'America'
+    const market = stockInfoRows[0].Market;
 
-    const marketStatus = getMarketStatus(market);
-    if (marketStatus === 'CLOSED') {
-      await connection.rollback();
-      return res.status(400).json({ error: `ตลาดหุ้นปิดทำการ ไม่สามารถทำรายการได้` });
-    }
+    // const marketStatus = getMarketStatus(market);
+    // if (marketStatus === 'CLOSED') {
+    //   await connection.rollback();
+    //   return res.status(400).json({ error: `ตลาดหุ้นปิดทำการ ไม่สามารถทำรายการได้` });
+    // }
 
     // 3. ดึงราคาหุ้นปัจจุบันด้วยฟังก์ชันใหม่
     let currentPrice;
@@ -2462,18 +2462,18 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
     }
     const portfolio = portfolioRows[0];
     const portfolioId = portfolio.PaperPortfolioID;
-    let balanceUSD = parseFloat(portfolio.Balance); // Balance is now treated as USD
+    let balanceUSD = parseFloat(portfolio.Balance);
 
     const isThaiStock = market === 'Thailand';
     let totalCostOrValueUSD;
 
     if (isThaiStock) {
-      // Stock price is in THB, convert cost to USD for balance calculation
+      // For Thai stocks, the price is in THB. We need to convert it to USD for balance calculations.
       const thbToUsdRate = await getThbToUsdRate();
-      const totalCostTHB = parsedQuantity * currentPrice;
-      totalCostOrValueUSD = totalCostTHB * thbToUsdRate;
+      const totalValueTHB = parsedQuantity * currentPrice;
+      totalCostOrValueUSD = totalValueTHB * thbToUsdRate;
     } else {
-      // Stock price is already in USD
+      // For US stocks, the price is already in USD.
       totalCostOrValueUSD = parsedQuantity * currentPrice;
     }
 
@@ -2486,7 +2486,6 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
 
       await connection.query("UPDATE papertradeportfolio SET Balance = ? WHERE PaperPortfolioID = ?", [balanceUSD - totalCostOrValueUSD, portfolioId]);
 
-      // Insert holding with its native price (THB for Thai, USD for US)
       await connection.query(
         "INSERT INTO paperportfolioholdings (PaperPortfolioID, StockSymbol, Quantity, BuyPrice) VALUES (?, ?, ?, ?)",
         [portfolioId, normalizedSymbol, parsedQuantity, currentPrice]
@@ -2524,11 +2523,24 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
       }
     }
 
+    // 5.5 บันทึกประวัติการทำรายการลงในตารางสำหรับ Paper Trading
+    await connection.query(
+      "INSERT INTO papertrade (StockSymbol, TradeType, Quantity, Price, TradeDate, UserID) VALUES (?, ?, ?, ?, NOW(), ?)",
+      [normalizedSymbol, tradeType, parsedQuantity, currentPrice, userId]
+    );
+    
     // 6. Commit Transaction
     await connection.commit();
     res.status(200).json({
       message: `ทำรายการ ${tradeType === 'buy' ? 'ซื้อ' : 'ขาย'} สำเร็จ`,
-      trade: { type: tradeType, symbol: normalizedSymbol, quantity: parsedQuantity, price: currentPrice }
+      trade: {
+        type: tradeType,
+        symbol: normalizedSymbol,
+        quantity: parsedQuantity,
+        price: currentPrice,
+        priceCurrency: isThaiStock ? 'THB' : 'USD',
+        totalValueUSD: totalCostOrValueUSD.toFixed(2)
+      }
     });
 
   } catch (error) {
@@ -2540,6 +2552,48 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
   }
 });
 
+app.get("/api/portfolio/history", verifyToken, async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.promise().getConnection();
+    const userId = req.userId;
+
+    // 1. ค้นหา PaperPortfolioID ของผู้ใช้
+    const [portfolioRows] = await connection.query(
+      "SELECT PaperPortfolioID FROM papertradeportfolio WHERE UserID = ?",
+      [userId]
+    );
+
+    if (portfolioRows.length === 0) {
+      // ถ้าผู้ใช้ยังไม่มีพอร์ต ก็จะยังไม่มีประวัติการทำรายการ
+      return res.status(200).json({
+        message: "ไม่พบพอร์ตการลงทุน จึงไม่มีประวัติการทำรายการ",
+        data: []
+      });
+    }
+
+    const portfolioId = portfolioRows[0].PaperPortfolioID;
+
+    // 2. ดึงประวัติการทำรายการทั้งหมดสำหรับพอร์ตนั้นๆ
+    const [transactions] = await connection.query(
+      `SELECT StockSymbol, TradeType, Quantity, Price, TradeDate
+       FROM papertrade
+       WHERE UserID = ?
+       ORDER BY TradeDate DESC`,
+      [userId]
+    );
+
+    res.status(200).json({
+      message: "ดึงข้อมูลประวัติการทำรายการสำเร็จ",
+      data: transactions,
+    });
+  } catch (error) {
+    console.error("Error fetching transaction history:", error);
+    res.status(500).json({ error: "Internal server error" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
 
 app.post("/api/create-demo", verifyToken, async (req, res) => {
   let connection;
