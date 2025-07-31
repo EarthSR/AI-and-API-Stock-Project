@@ -1,6 +1,7 @@
 const express = require("express");
 const bodyParser = require("body-parser");
 const mysql = require("mysql2");
+const mysqlpromise = require('mysql2/promise');
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const admin = require("firebase-admin");
@@ -15,6 +16,14 @@ const path = require("path");
 const JWT_SECRET = process.env.JWT_SECRET;
 const app = express();
 const { PythonShell } = require('python-shell');
+const serviceAccount = require("./config/trademine-a3921-firebase-adminsdk-fbsvc-ff0de5bd4d.json");
+
+
+
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
 
 // Middleware
 app.use(bodyParser.json());
@@ -35,7 +44,20 @@ const pool = mysql.createPool({
     connectTimeout: 60000,
   });
 
+  const pool_notification = mysqlpromise.createPool({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    port: process.env.DB_PORT,
+    waitForConnections: true,
+    connectionLimit: 20,
+    queueLimit: 0,
+    connectTimeout: 60000,
+  });
 
+
+  
   // ฟังก์ชันสำหรับตรวจสอบ JWT token
 const verifyToken = (req, res, next) => {
   const token = req.headers["authorization"];
@@ -240,17 +262,17 @@ app.post("/api/register/verify-otp", async (req, res) => {
 
         // ถ้าไม่พบ OTP ในฐานข้อมูล
         if (otpResults.length === 0) {
-          return res.status(400).json({ error: "OTP ไม่ถูกต้อง" });
+          return res.status(400).json({ error: "Invalid OTP" });
         }
 
         // ตรวจสอบว่า OTP ยังไม่หมดอายุ
         const { Expires_At } = otpResults[0];
         if (new Date() > new Date(Expires_At)) {
-          return res.status(400).json({ error: "OTP หมดอายุ" });
+          return res.status(400).json({ error: "Expired OTP" });
         }
 
         // ถ้า OTP ถูกต้องและไม่หมดอายุ
-        res.status(200).json({ message: "OTP ถูกต้อง คุณสามารถตั้งรหัสผ่านได้" });
+        res.status(200).json({ message: "OTP is correct, you can set a password." });
       });
     });
   } catch (error) {
@@ -264,7 +286,7 @@ app.post("/api/register/set-password", async (req, res) => {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ error: "Email และ Password ต้องถูกต้อง" });
+      return res.status(400).json({ error: "Password is required" });
     }
 
     const hash = await bcrypt.hash(password, 10);
@@ -277,7 +299,7 @@ app.post("/api/register/set-password", async (req, res) => {
       }
 
       if (results.length === 0) {
-        return res.status(404).json({ error: "ไม่พบบัญชีที่ใช้ Email นี้" });
+        return res.status(404).json({ error: "No account found with this Email" });
       }
 
       const userId = results[0].UserID;
@@ -293,7 +315,7 @@ app.post("/api/register/set-password", async (req, res) => {
           }
 
           if (results.affectedRows === 0) {
-            return res.status(404).json({ error: "ไม่สามารถอัปเดตรหัสผ่านได้" });
+            return res.status(404).json({ error: "Unable to update password" });
           }
 
           // ลบ OTP ที่เกี่ยวข้องกับ UserID
@@ -307,7 +329,7 @@ app.post("/api/register/set-password", async (req, res) => {
             const token = jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: "7d" });
 
             res.status(200).json({
-              message: "รหัสผ่านถูกตั้งเรียบร้อยแล้ว กรุณาตั้งค่าโปรไฟล์",
+              message: "Password has been set successfully. Please complete your profile.",
               token: token
             });
           });
@@ -540,7 +562,7 @@ app.post("/api/resend-otp/reset-password", async (req, res) => {
     const { email } = req.body; 
 
     if (!email) {
-      return res.status(400).json({ error: "Email is required" });
+      return res.status(400).json({ error: "Please Enter You Email" });
     }
 
     // ตรวจสอบว่ามี Email นี้ในตาราง User
@@ -962,38 +984,127 @@ function calculateAge(birthday) {
   return age;
 }
 
-// ----Noti---- //
 
-app.get("/api/news-notifications", verifyToken, (req, res) => {
-  const today = new Date().toISOString().split("T")[0]; // ดึงวันที่ปัจจุบัน (YYYY-MM-DD)
-  
-  const fetchNewsNotificationsSql = `
-    SELECT 
-      n.NewsID,
-      n.Title, 
-      n.PublishedDate
-    FROM News n
-    WHERE DATE(n.PublishedDate) = ?
-    ORDER BY n.PublishedDate DESC;
-  `;
+app.get("/api/news-notifications", verifyToken, async (req, res) => {
+  try {
+    // ดึงข่าวล่าสุด 1 ข่าว
+    const [newsResults] = await pool_notification.query(`
+      SELECT NewsID, Title, PublishedDate
+      FROM News
+      ORDER BY PublishedDate DESC
+      LIMIT 1;
+    `);
 
-  pool.query(fetchNewsNotificationsSql, [today], (error, results) => {
-    if (error) {
-      console.error("Database error during fetching news notifications:", error);
-      return res.status(500).json({ error: "Error fetching news notifications" });
+    if (newsResults.length === 0) {
+      return res.json({ message: "ยังไม่มีข่าวในฐานข้อมูล" });
     }
 
-    res.json({ 
-      message: "ข่าวสารประจำวันที่", 
-      date: today, 
-      news: results.map(news => ({
-        NewsID: news.NewsID, // ✅ เพิ่มค่า NewsID
-        Title: news.Title,
-        PublishedDate: news.PublishedDate
-      }))
-    });
-  });
+    const latestNews = newsResults[0]; // ข่าวล่าสุด
+
+    const userResults = [
+      {
+        fcm_token: "fLmzIwKYS2SuSkidLdjGjs:APA91bFnyXm3-myy4U3Eg1yjwR4ahvtmgHdwLHP4WD-e0StfE4ws6A6oP-cn0HkqW_8YN7mwxpCi4-aScGF_kdjI2chdhQmYxkvkpWCfMSVmt1hCz6Vzf8Q"
+      }
+    ];
+
+    const messages = userResults.map(user => ({
+      notification: {
+        title: "📰 Latest News",
+        body: latestNews.Title,
+      },
+      token: user.fcm_token,
+    }));
+
+    // ส่ง notification แบบ bulk ด้วย sendAll (ถ้ารองรับ)
+    if (typeof admin.messaging().sendAll === 'function') {
+      const response = await admin.messaging().sendAll(messages);
+      console.log("✅ Notifications sent:", response.successCount, "successes");
+      res.json({
+        message: "📤 Push notification ส่งสำเร็จ",
+        successCount: response.successCount,
+        totalUsers: userResults.length,
+        news: latestNews,
+      });
+    } else {
+      const messaging = admin.messaging();
+      let successCount = 0;
+      for (const msg of messages) {
+        try {
+          await messaging.send(msg);
+          successCount++;
+        } catch (error) {
+          console.error("Error sending notification:", error);
+        }
+      }
+      console.log("✅ Notifications sent (fallback):", successCount);
+      res.json({
+        message: "📤 Push notification ส่งสำเร็จ (fallback)",
+        successCount,
+        totalUsers: userResults.length,
+        news: latestNews,
+      });
+    }
+
+  } catch (err) {
+    console.error("❌ Error pushing notifications:", err);
+    res.status(500).json({ error: "เกิดข้อผิดพลาดขณะดึงข่าวหรือส่ง noti" });
+  }
 });
+
+
+
+// // ดึงข้อมูลข่าวและ push noti
+// app.get("/api/news-notifications", verifyToken, async (req, res) => {
+//   const today = new Date().toISOString().split("T")[0];
+
+//   const fetchNewsNotificationsSql = `
+//     SELECT 
+//       n.NewsID,
+//       n.Title, 
+//       n.PublishedDate
+//     FROM News n
+//     WHERE DATE(n.PublishedDate) = ?
+//     ORDER BY n.PublishedDate DESC;
+//   `;
+
+//   try {
+//     const [newsResults] = await pool.promise().query(fetchNewsNotificationsSql, [today]);
+
+//     // ถ้ามีข่าวใหม่
+//     if (newsResults.length > 0) {
+//       const latestNews = newsResults[0]; // ข่าวล่าสุด
+
+//       // ดึงรายชื่อผู้ใช้พร้อม FCM Token
+//       userResults = "fLmzIwKYS2SuSkidLdjGjs:APA91bFnyXm3-myy4U3Eg1yjwR4ahvtmgHdwLHP4WD-e0StfE4ws6A6oP-cn0HkqW_8YN7mwxpCi4-aScGF_kdjI2chdhQmYxkvkpWCfMSVmt1hCz6Vzf8Q"
+//       ฝฝconst [userResults] = await pool.promise().query("SELECT fcm_token FROM users WHERE fcm_token IS NOT NULL");
+
+//       // สร้าง message สำหรับแต่ละ user
+//       const messages = userResults.map(user => ({
+//         notification: {
+//           title: "📰 ข่าวสารวันนี้",
+//           body: latestNews.Title,
+//         },
+//         token: user.fcm_token,
+//       }));
+
+//       // ส่ง FCM ครั้งละหลาย token ด้วย sendAll
+//       const response = await admin.messaging().sendAll(messages);
+//       console.log("✅ Notifications sent:", response.successCount, "successes");
+
+//       res.json({
+//         message: "📤 Push notification ส่งสำเร็จ",
+//         successCount: response.successCount,
+//         totalUsers: userResults.length,
+//         news: latestNews,
+//       });
+//     } else {
+//       res.json({ message: "ไม่มีข่าวใหม่ในวันนี้", date: today });
+//     }
+//   } catch (err) {
+//     console.error("❌ Error pushing notifications:", err);
+//     res.status(500).json({ error: "เกิดข้อผิดพลาดขณะดึงข่าวหรือส่ง noti" });
+//   }
+// });
 
 
 // ---- Favorites ---- //
