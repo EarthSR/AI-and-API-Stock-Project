@@ -2168,6 +2168,78 @@ app.get("/api/most-held-th-stocks", async (req, res) => {
 });
 
 
+const API_KEY = process.env.FINNHUB_API_KEY; // ใส่ key ใน .env
+
+app.get('/price/:symbol', async (req, res) => {
+  const { symbol } = req.params;
+  try {
+    const url = `https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`;
+    const { data } = await axios.get(url);
+
+    if (!data.c) {
+      throw new Error('Price not available');
+    }
+
+    res.json({
+      symbol: symbol.toUpperCase(),
+      price: data.c,
+      previousClose: data.pc
+    });
+  } catch (e) {
+    res.status(500).json({ detail: 'Could not fetch price: ' + e.message });
+  }
+});
+
+app.post("/api/create-demo", verifyToken, async (req, res) => {
+  let connection;
+  try {
+    // Use the promise-wrapped pool for async/await
+    connection = await pool.promise().getConnection();
+    const { amount } = req.body;
+
+    // Check for required data, allowing amount to be 0
+    if (amount === undefined) {
+      return res.status(400).json({ error: "Amount is required" });
+    }
+
+    // Validate that amount is a valid number
+    const parsedAmount = parseFloat(amount);
+    if (isNaN(parsedAmount) || parsedAmount < 0) {
+      return res.status(400).json({ error: "Invalid amount" });
+    }
+
+    // Check if the user already has a portfolio
+    const [existingRows] = await connection.query(
+      "SELECT UserID FROM portfolio WHERE UserID = ?",
+      [req.userId]
+    );
+
+    if (existingRows.length > 0) {
+      return res.status(400).json({ message: "User already has a portfolio" });
+    }
+
+    // Create a new portfolio with the specified amount
+    await connection.query(
+      "INSERT INTO portfolio (UserID, Balance) VALUES (?, ?)",
+      [req.userId, parsedAmount]
+    );
+
+    res.status(201).json({
+      message: "Portfolio created successfully",
+      data: {
+        UserID: req.userId,
+        Balance: parsedAmount,
+        createdAt: new Date(),
+      },
+    });
+  } catch (error) {
+    console.error("Error creating portfolio:", error);
+    res.status(500).json({ error: "Internal server error" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 //-----------------------------------------------------------------------------------------------------------------------------------------------//
 
 // Middleware to verify admin role
@@ -2244,7 +2316,6 @@ app.post("/api/admin/login", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
-
 
 
 // Start the server
