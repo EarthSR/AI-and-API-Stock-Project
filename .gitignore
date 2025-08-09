@@ -148,4 +148,6 @@ uploads/
 *.npy
 *.sh
 
+CLAUDE.md
+
 trademine-a3921-firebase-adminsdk-fbsvc-ff0de5bd4d.json

@@ -1,0 +1,27 @@
+{
+  "timestamp": "2025-08-04 17:40:22",
+  "gru_inspired_parameters": {
+    "seq_length": 10,
+    "retrain_frequency": 3,
+    "chunk_size": 100,
+    "embedding_dim": 24,
+    "lstm_units_1": 48,
+    "lstm_units_2": 24,
+    "dropout_rate": 0.15,
+    "dense_units": 66,
+    "learning_rate": 0.00017
+  },
+  "performance_summary": {
+    "avg_mae": 6.453338908219001,
+    "avg_direction_accuracy": 0.7068824572998921,
+    "avg_r2_score": 0.7586059550638582,
+    "total_tickers_evaluated": 19,
+    "total_predictions_made": 6782
+  },
+  "model_info": {
+    "approach": "GRU-inspired Parameters for LSTM",
+    "source": "Best performing GRU hyperparameters applied to LSTM",
+    "hyperparameter_tuning": "Skipped - using GRU-proven optimal values",
+    "validation_method": "walk_forward_validation_multi_task_batch"
+  }
+}

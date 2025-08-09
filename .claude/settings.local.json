@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda activate:*)",
+      "Bash(python:*)",
+      "Bash(mv:*)",
+      "Bash(rm:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(dir \"*.csv\" /od)"
+    ],
+    "deny": []
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "model_config": {
+    "seq_length": 10,
+    "chunk_size": 100,
+    "retrain_frequency": 3,
+    "embedding_dim": 24,
+    "LSTM_units_1": 48,
+    "LSTM_units_2": 24,
+    "dropout_rate": 0.15,
+    "dense_units": 48,
+    "learning_rate": 0.00022
+  },
+  "training_config": {
+    "batch_size": 33,
+    "validation_split": 0.12,
+    "expected_epochs": 105,
+    "early_stopping_patience": 20,
+    "lr_scheduler_patience": 7
+  },
+  "performance_benchmarks": {
+    "target_mae": 6.0,
+    "target_direction_accuracy": 0.6,
+    "minimum_r2_score": 0.0
+  }
+}
