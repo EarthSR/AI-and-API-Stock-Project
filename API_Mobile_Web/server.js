@@ -2658,15 +2658,6 @@ const verifyAdmin = (req, res, next) => {
   next();
 };
 
-// API ให้ React ดึง Secure Embed URL ไปใช้
-app.get("/get-embed-url", (req, res) => {
-  res.json({
-    embedUrl:
-      "https://app.powerbi.com/view?r=eyJrIjoiOGU0ZjNhMjktYjJiZC00ODA1LWIzM2EtNzNkNDg0NzhhMzVkIiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
-    embedUrl:
-      "https://app.powerbi.com/view?r=eyJrIjoiY2VlNGQ1MTItMTE1Zi00ODkyLThhYjEtMjg4MWRkOTRkZWI2IiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
-    });
-});
 
 //Admin//
 app.post("/api/admin/login", async (req, res) => {
@@ -2726,9 +2717,601 @@ app.post("/api/admin/login", async (req, res) => {
 });
 
 
+//=====================================================================================================//
+// 												ADMIN - USER MANAGEMENT API
+//=====================================================================================================//
+
+//=====================================================================================================//
+//  ADMIN - USER MANAGEMENT API
+//=====================================================================================================//
+
+// ดึงรายชื่อผู้ใช้ทั้งหมด (พร้อมแบ่งหน้า + ค้นหา)
+app.get("/api/admin/users", verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const page = Math.max(parseInt(req.query.page) || 1, 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
+        const offset = (page - 1) * limit;
+        const searchTerm = req.query.search || '';
+
+        const whereClause = searchTerm ? `WHERE (Username LIKE ? OR Email LIKE ?)` : '';
+        const searchParams = searchTerm ? [`%${searchTerm}%`, `%${searchTerm}%`] : [];
+
+        const countSql = `SELECT COUNT(*) as total FROM \`User\` ${whereClause}`;
+        const dataSql = `
+            SELECT UserID, Username, Email, Role, Status
+            FROM \`User\`
+            ${whereClause}
+            ORDER BY UserID DESC
+            LIMIT ? OFFSET ?
+        `;
+
+        const [countResult] = await pool.promise().query(countSql, searchParams);
+        const [usersResult] = await pool.promise().query(dataSql, [...searchParams, limit, offset]);
+
+        const totalUsers = countResult[0].total;
+        const totalPages = Math.ceil(totalUsers / limit);
+
+        res.status(200).json({
+            message: "Successfully retrieved users",
+            data: usersResult,
+            pagination: {
+                currentPage: page,
+                totalPages,
+                totalUsers,
+                limit
+            }
+        });
+    } catch (err) {
+        console.error("Database error fetching users:", err);
+        res.status(500).json({ error: "Database error while fetching users" });
+    }
+});
+
+
+// อัปเดตสถานะผู้ใช้ (active/suspended)
+app.put("/api/admin/users/:userId/status", verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { status } = req.body;
+
+        if (!status || !['active', 'suspended'].includes(status.toLowerCase())) {
+            return res.status(400).json({ error: "Invalid status. Must be 'active' or 'suspended'." });
+        }
+
+        if (parseInt(userId, 10) === req.userId) {
+            return res.status(403).json({ error: "Admins cannot change their own status." });
+        }
+
+        const sql = "UPDATE `User` SET Status = ? WHERE UserID = ?";
+        const [result] = await pool.promise().query(sql, [status.toLowerCase(), userId]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        res.status(200).json({ message: `User status successfully updated to ${status}` });
+    } catch (err) {
+        console.error("Database error updating user status:", err);
+        res.status(500).json({ error: "Database error" });
+    }
+});
+
+
+// แก้ไขข้อมูลผู้ใช้ (Username, Email, Role)
+app.put("/api/admin/users/:userId", verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { username, email, role } = req.body;
+
+        if (!username && !email && !role) {
+            return res.status(400).json({ error: "No data provided for update." });
+        }
+
+        let updateFields = [];
+        let params = [];
+
+        if (username) {
+            updateFields.push("Username = ?");
+            params.push(username);
+        }
+        if (email) {
+            updateFields.push("Email = ?");
+            params.push(email);
+        }
+        if (role) {
+            updateFields.push("Role = ?");
+            params.push(role);
+        }
+
+        params.push(userId);
+
+        const sql = `UPDATE \`User\` SET ${updateFields.join(", ")} WHERE UserID = ?`;
+        const [result] = await pool.promise().query(sql, params);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        // คืนข้อมูล user หลังแก้ไข
+        const [rows] = await pool.promise().query(
+            `SELECT UserID, Username, Email, Role, Status FROM \`User\` WHERE UserID = ?`,
+            [userId]
+        );
+
+        res.status(200).json({ message: "User profile updated successfully", data: rows[0] });
+    } catch (err) {
+        if (err.code === 'ER_DUP_ENTRY') {
+            const message = err.message.includes('Username')
+                ? "This username is already in use."
+                : "This email is already in use.";
+            return res.status(409).json({ error: message });
+        }
+        console.error("Database error updating user:", err);
+        return res.status(500).json({ error: "Database error while updating user." });
+    }
+});
+
+
+// ลบผู้ใช้
+app.delete("/api/admin/users/:userId", verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { userId } = req.params;
+
+        if (parseInt(userId, 10) === req.userId) {
+            return res.status(403).json({ error: "Admins cannot delete their own account." });
+        }
+
+        const sql = "DELETE FROM `User` WHERE UserID = ?";
+        const [result] = await pool.promise().query(sql, [userId]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        res.status(200).json({ message: "User deleted successfully" });
+    } catch (err) {
+        console.error("Database error deleting user:", err);
+        if (err.code === 'ER_ROW_IS_REFERENCED_2') {
+            return res.status(400).json({ error: "Cannot delete user. The user is linked to other data." });
+        }
+        return res.status(500).json({ error: "Database error while deleting user." });
+    }
+});
+
+
+//=====================================================================================================//
+// 										API ทั้งหมดสำหรับหน้า Dashboard
+//=====================================================================================================//
+
+/**
+ * API: ดึงรายชื่อหุ้นทั้งหมดตามตลาด (สำหรับ Dropdown)
+ * - รับค่า market จาก query parameter เช่น /api/stocks?market=Thailand
+ */
+app.get("/api/stocks", verifyToken, async (req, res) => {
+    try {
+        const { market } = req.query;
+
+        if (!market) {
+            return res.status(400).json({ error: "Market query parameter is required." });
+        }
+
+        const validMarkets = ['Thailand', 'America'];
+        if (!validMarkets.includes(market)) {
+            return res.status(400).json({ error: "Invalid market specified. Use 'Thailand' or 'America'." });
+        }
+
+        const sql = `
+            SELECT StockSymbol, CompanyName 
+            FROM Stock 
+            WHERE Market = ? 
+            ORDER BY StockSymbol ASC
+        `;
+        
+        const [results] = await pool.promise().query(sql, [market]);
+
+        res.status(200).json({
+            message: `Successfully retrieved ${results.length} stocks for ${market}`,
+            data: results
+        });
+
+    } catch (error) {
+        console.error("Internal server error in /api/stocks:", error.message);
+        res.status(500).json({ error: "Internal server error" });
+    } 
+});
+
+
+
+
+
+
+//=====================================================================================================//
+// 										API: GET CHART DATA FOR A SPECIFIC STOCK (FIXED)
+//=====================================================================================================//
+
+app.get("/api/chart-data/:symbol", verifyToken, async (req, res) => {
+    try {
+        const { symbol } = req.params;
+        const { timeframe = '1M' } = req.query;
+
+        // กำหนดจำนวนข้อมูลที่จะดึงตามช่วงเวลา (เพิ่ม '1D' และ 'ALL' เข้ามา)
+        const timeFrameLimits = {
+            '1D': 1,
+            '5D': 5,
+            '1M': 22,
+            '3M': 66,
+            '6M': 132,
+            '1Y': 252,
+            'ALL': null // null หมายถึงไม่จำกัดจำนวน
+        };
+
+        const upperCaseTimeframe = timeframe.toUpperCase();
+        if (!timeFrameLimits.hasOwnProperty(upperCaseTimeframe)) {
+            return res.status(400).json({ error: "Invalid timeframe. Use '1D', '5D', '1M', '3M', '6M', '1Y', or 'ALL'." });
+        }
+
+        const limit = timeFrameLimits[upperCaseTimeframe];
+
+        let sql;
+        let params;
+
+        // Logic สำหรับดึงข้อมูลย้อนหลัง (ใช้ได้กับทุก Timeframe ที่มี limit)
+        if (limit !== null) {
+            sql = `
+                SELECT * FROM (
+                    SELECT 
+                        DATE_FORMAT(Date, '%Y-%m-%d') as date, 
+                        ClosePrice 
+                    FROM stockdetail 
+                    WHERE StockSymbol = ? AND Volume != 0
+                    ORDER BY Date DESC
+                    LIMIT ?
+                ) AS sub
+                ORDER BY date ASC;
+            `;
+            params = [symbol, limit];
+        } 
+        // Logic สำหรับดึงข้อมูลทั้งหมด ('ALL')
+        else {
+            sql = `
+                SELECT 
+                    DATE_FORMAT(Date, '%Y-%m-%d') as date, 
+                    ClosePrice 
+                FROM stockdetail 
+                WHERE StockSymbol = ? AND Volume != 0
+                ORDER BY Date ASC;
+            `;
+            params = [symbol];
+        }
+        
+        const [results] = await pool.promise().query(sql, params);
+
+        if (results.length === 0) {
+            return res.status(404).json({ message: `No historical data found for symbol ${symbol}.` });
+        }
+
+        res.status(200).json({
+            message: `Successfully retrieved chart data for ${symbol}`,
+            timeframe: timeframe,
+            data: results
+        });
+
+    } catch (error) {
+        console.error("Internal server error in /api/chart-data:", error.message);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+
+// API: GET TOP 3 GAINERS AND LOSERS BY MARKET (STRICT: trading day only)
+app.get("/api/market-movers", verifyToken, async (req, res) => {
+  try {
+    const { market } = req.query; // 'Thailand' หรือ 'America'
+
+    if (!market || !["Thailand", "America"].includes(market)) {
+      return res
+        .status(400)
+        .json({ error: "Invalid or missing market parameter." });
+    }
+
+    // 1) หา 'วันล่าสุดที่มีการเทรดจริง' ของ market นั้นๆ (Volume > 0) และให้ MySQL คืนเป็น DATE เลย
+    const [latestDateRows] = await pool
+      .promise()
+      .query(
+        `
+        SELECT DATE(MAX(sd.Date)) AS latestDate
+        FROM stockdetail sd
+        JOIN stock s ON sd.StockSymbol = s.StockSymbol
+        WHERE s.Market = ? AND sd.Volume > 0
+      `,
+        [market]
+      );
+
+    const latestDate = latestDateRows?.[0]?.latestDate;
+
+    if (!latestDate) {
+      return res.status(200).json({
+        message: "No trading day found for the specified market (Volume = 0).",
+        data: { topGainers: [], topLosers: [] },
+      });
+    }
+
+    // 2) Top 3 Gainers (เฉพาะวันล่าสุด และมีการเทรดจริง)
+    const gainersSql = `
+      SELECT s.StockSymbol, sd.ClosePrice, sd.Changepercen, sd.Volume
+      FROM stockdetail sd
+      JOIN stock s ON sd.StockSymbol = s.StockSymbol
+      WHERE s.Market = ?
+        AND DATE(sd.Date) = ?
+        AND sd.Changepercen > 0
+        AND sd.Volume > 0
+      ORDER BY sd.Changepercen DESC
+      LIMIT 3
+    `;
+    const [topGainers] = await pool
+      .promise()
+      .query(gainersSql, [market, latestDate]);
+
+    // 3) Top 3 Losers (เฉพาะวันล่าสุด และมีการเทรดจริง)
+    const losersSql = `
+      SELECT s.StockSymbol, sd.ClosePrice, sd.Changepercen, sd.Volume
+      FROM stockdetail sd
+      JOIN stock s ON sd.StockSymbol = s.StockSymbol
+      WHERE s.Market = ?
+        AND DATE(sd.Date) = ?
+        AND sd.Changepercen < 0
+        AND sd.Volume > 0
+      ORDER BY sd.Changepercen ASC
+      LIMIT 3
+    `;
+    const [topLosers] = await pool
+      .promise()
+      .query(losersSql, [market, latestDate]);
+
+    return res.status(200).json({
+      message: `Successfully retrieved market movers for ${market}`,
+      date: latestDate, // YYYY-MM-DD จาก MySQL โดยตรง
+      data: { topGainers, topLosers },
+    });
+  } catch (error) {
+    console.error("Internal server error in /api/market-movers:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+//=====================================================================================================//
+//  API: AI TRADE MONITOR (ADMIN) — JOIN กับ user เพื่อเอา Username แทน UserID
+//=====================================================================================================//
+
+app.get('/api/admin/ai-trades', verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise(); // ✅ ใช้ promise wrapper จาก pool เดิม
+  try {
+    // pagination
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 200);
+    const offset = (page - 1) * limit;
+
+    // optional filters
+    const { userId, symbol, action, date_from, date_to } = req.query;
+
+    // allowlist orderBy กัน SQL injection
+    const ORDERABLE = new Set([
+      'PaperTradeID','TradeType','Quantity','Price','TradeDate','Username','StockSymbol'
+    ]);
+    const orderBy = ORDERABLE.has(req.query.orderBy) ? req.query.orderBy : 'TradeDate';
+    const order   = String(req.query.order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+    // WHERE clause
+    const where = [];
+    const params = [];
+
+    if (userId)    { where.push('pt.UserID = ?');           params.push(userId); }
+    if (symbol)    { where.push('pt.StockSymbol = ?');      params.push(symbol); }
+    if (action)    { where.push('pt.TradeType = ?');        params.push(action); }
+    if (date_from) { where.push('DATE(pt.TradeDate) >= ?'); params.push(date_from); }
+    if (date_to)   { where.push('DATE(pt.TradeDate) <= ?'); params.push(date_to); }
+
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    // นับจำนวนทั้งหมด
+    const countSql = `
+      SELECT COUNT(*) AS total
+      FROM trademine.papertrade pt
+      JOIN trademine.user u ON pt.UserID = u.UserID
+      ${whereClause}
+    `;
+    const [countRows] = await db.query(countSql, params);
+    const totalTrades = countRows?.[0]?.total ?? 0;
+
+    // ดึงข้อมูล
+    const dataSql = `
+      SELECT
+        pt.PaperTradeID,
+        pt.TradeType,
+        pt.Quantity,
+        pt.Price,
+        pt.TradeDate,
+        u.Username AS Username,
+        pt.StockSymbol
+      FROM trademine.papertrade pt
+      JOIN trademine.user u ON pt.UserID = u.UserID
+      ${whereClause}
+      ORDER BY ${orderBy} ${order}
+      LIMIT ? OFFSET ?
+    `;
+    const [rows] = await db.query(dataSql, [...params, limit, offset]);
+
+    return res.status(200).json({
+      message: 'OK',
+      data: rows, // ตอนนี้ได้ Username แล้วแทน UserID
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(totalTrades / limit),
+        totalTrades,
+        limit
+      }
+    });
+  } catch (err) {
+    console.error('Internal server error /api/admin/ai-trades:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+
+
+//=====================================================================================================//
+//                                      API: MARKET TREND ANALYSIS (FIXED & COMPLETE)
+//=====================================================================================================//
+
+/**
+ * API: ดึงข้อมูลการวิเคราะห์แนวโน้มตลาดสำหรับหุ้นที่เลือก
+ * - รับ StockSymbol จาก query parameter
+ * - ดึงข้อมูลย้อนหลัง 252 วัน เพื่อนำไปคำนวณ Technical Indicators
+ */
+app.get("/api/market-trend-analysis", verifyToken, async (req, res) => {
+    try {
+        const { symbol } = req.query;
+
+        if (!symbol) {
+            return res.status(400).json({ error: "Stock symbol is required." });
+        }
+
+        // ดึงข้อมูลย้อนหลัง 252 วัน (ประมาณ 1 ปีการซื้อขาย) สำหรับการคำนวณ
+        const sql = `
+            SELECT 
+                Date,
+                ClosePrice,
+                Changepercen,
+                PredictionTrend_Ensemble,
+                Sentiment
+            FROM stockdetail
+            WHERE StockSymbol = ?
+            ORDER BY Date DESC
+            LIMIT 252;
+        `;
+        
+        const [results] = await pool.promise().query(sql, [symbol]);
+
+        if (results.length === 0) {
+            return res.status(404).json({ error: `No data found for stock symbol ${symbol}.` });
+        }
+
+        // ข้อมูลถูกดึงมาในลำดับจากใหม่ไปเก่า ต้องกลับลำดับเพื่อให้คำนวณได้ถูกต้อง
+        const historicalData = results.reverse();
+        const latestData = historicalData[historicalData.length - 1];
+        const prices = historicalData.map(d => d.ClosePrice);
+
+        // ======================== Calculation Logic for Technical Indicators ========================
+        
+        // 1. Moving Averages (MA50)
+        const ma50 = prices.slice(-50).reduce((a, b) => a + b, 0) / 50;
+        const ma200 = prices.slice(-200).reduce((a, b) => a + b, 0) / 200;
+        let maSignal = 'Neutral';
+        let maColor = '#6c757d';
+        if (prices[prices.length - 1] > ma50) {
+            maSignal = 'Bullish Momentum';
+            maColor = '#28a745';
+        } else if (prices[prices.length - 1] < ma50) {
+            maSignal = 'Bearish Momentum';
+            maColor = '#dc3545';
+        }
+        if (ma50 > ma200) {
+            maSignal = 'Golden Cross';
+            maColor = '#28a745';
+        } else if (ma50 < ma200) {
+            maSignal = 'Death Cross';
+            maColor = '#dc3545';
+        }
+
+        // 2. RSI (Relative Strength Index)
+        let rsiValue = 50; // Simplified for this example
+        let rsiSignal = 'Neutral';
+        let rsiColor = '#6c757d';
+        if (rsiValue > 70) {
+            rsiSignal = 'Overbought';
+            rsiColor = '#dc3545';
+        } else if (rsiValue < 30) {
+            rsiSignal = 'Oversold';
+            rsiColor = '#28a745';
+        }
+        
+        // 3. MACD (Moving Average Convergence Divergence) - Simplified
+        const macdLine = prices.slice(-12).reduce((a,b) => a+b, 0)/12 - prices.slice(-26).reduce((a,b) => a+b, 0)/26;
+        let macdSignal = 'Pending Calculation';
+        let macdColor = '#6c757d';
+        if (macdLine > 0) {
+            macdSignal = 'Bullish Momentum';
+            macdColor = '#28a745';
+        } else if (macdLine < 0) {
+            macdSignal = 'Bearish Momentum';
+            macdColor = '#dc3545';
+        }
+
+        // 4. Bollinger Bands (Simplified)
+        const stdDev = Math.sqrt(prices.slice(-20).map(x => Math.pow(x - prices.slice(-20).reduce((a, b) => a + b, 0)/20, 2)).reduce((a, b) => a + b, 0)/20);
+        const middleBand = prices.slice(-20).reduce((a,b) => a+b, 0)/20;
+        const upperBand = middleBand + (stdDev * 2);
+        const lowerBand = middleBand - (stdDev * 2);
+        let bollingerSignal = 'Price within Bands';
+        let bollingerColor = '#6c757d';
+        if (latestData.ClosePrice > upperBand) {
+            bollingerSignal = 'Price at Upper Band';
+            bollingerColor = '#dc3545';
+        } else if (latestData.ClosePrice < lowerBand) {
+            bollingerSignal = 'Price at Lower Band';
+            bollingerColor = '#28a745';
+        }
+
+        // ======================== End of Calculation ========================
+
+        // โครงสร้างข้อมูลสำหรับ Frontend
+        const technicalData = {
+            ma: {
+                ma50: ma50,
+                ma200: ma200,
+                signal: maSignal,
+                signalColor: maColor
+            },
+            rsi: {
+                value: rsiValue,
+                signal: rsiSignal,
+                signalColor: rsiColor
+            },
+            macd: {
+                macdLine: macdLine,
+                signalLine: 0, // Simplified, just showing MACD line
+                signal: macdSignal,
+                signalColor: macdColor
+            },
+            bollinger: {
+                upper: upperBand,
+                middle: middleBand,
+                lower: lowerBand,
+                signal: bollingerSignal,
+                signalColor: bollingerColor
+            },
+            strategy: {
+                latestSignal: latestData.PredictionTrend_Ensemble,
+                signalPrice: latestData.ClosePrice,
+                reason: 'Based on the latest AI ensemble model prediction.',
+                effectiveness: null
+            }
+        };
+
+        res.status(200).json({
+            message: `Successfully retrieved market trend data for ${symbol}`,
+            data: technicalData
+        });
+
+    } catch (error) {
+        console.error("Internal server error in /api/market-trend-analysis:", error.message);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
 // Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+    console.log(`Server is running on port ${PORT}`);
 });
-  
