@@ -1,0 +1,25 @@
+{
+  "timestamp": "2025-08-07 01:17:24",
+  "best_parameters": {
+    "chunk_size": 100,
+    "embedding_dim": 24,
+    "GRU_units_1": 48,
+    "GRU_units_2": 24,
+    "dropout_rate": 0.15,
+    "dense_units": 48,
+    "learning_rate": 0.00017,
+    "retrain_frequency": 3,
+    "seq_length": 10
+  },
+  "performance_summary": {
+    "avg_mae": 6.081647733309034,
+    "avg_direction_accuracy": 0.708205576730988,
+    "avg_r2_score": 0.8479586197973239,
+    "total_tickers_evaluated": 19,
+    "total_predictions_made": 6782
+  },
+  "tuning_summary": {
+    "total_trials_completed": 15,
+    "best_combined_score": 1.703286217387423
+  }
+}

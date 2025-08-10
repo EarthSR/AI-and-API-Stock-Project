@@ -140,7 +140,7 @@ trading_days = nyse.schedule(start_date=start_date, end_date=end_date).index
 def is_trading_day(date, trading_days):
     return pd.Timestamp(date) in trading_days
 
-# ✅ ฟังก์ชันเติมข้อมูลวันหยุดด้วย Forward Fill และ Rolling Mean
+# ✅ ฟังก์ชันเติมข้อมูลวันหยุดด้วย Forward Fill และ Rolling Mean (ปรับปรุง Volume)
 def impute_holiday_data(ticker_data, all_dates, ticker, window=3):
     ticker_data = ticker_data.copy()
     required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -149,6 +149,11 @@ def impute_holiday_data(ticker_data, all_dates, ticker, window=3):
         return pd.DataFrame()
     
     ticker_data.index = pd.to_datetime(ticker_data.index).tz_localize(None)
+    
+    # เก็บข้อมูล Volume เดิมก่อน reindex
+    original_volume = ticker_data['Volume'].copy()
+    original_volume = original_volume[original_volume > 0]  # เก็บเฉพาะค่าที่มากกว่า 0
+    
     ticker_data = ticker_data.reindex(all_dates, method=None)
     
     missing_percentage = ticker_data[required_columns].isnull().mean() * 100
@@ -156,17 +161,78 @@ def impute_holiday_data(ticker_data, all_dates, ticker, window=3):
     if missing_percentage.sum() > 20:
         print(f"⚠️ Warning: Excessive missing data for {ticker} ({missing_percentage.sum():.2f}%).")
 
+    # จัดการ Price data (Open, High, Low, Close)
     ticker_data[['Open', 'High', 'Low', 'Close']] = (
         ticker_data[['Open', 'High', 'Low', 'Close']]
         .ffill(limit=2)
         .bfill(limit=2)
         .rolling(window=window, min_periods=1).mean()
     )
-    ticker_data['Volume'] = ticker_data['Volume'].fillna(0)
+    
+    # จัดการ Volume แยกต่างหาก - ปรับปรุงการจัดการ Volume
+    nyse_cal = get_calendar('NYSE')
+    trading_schedule = nyse_cal.schedule(start_date=all_dates[0], end_date=all_dates[-1])
+    trading_days_set = set(trading_schedule.index.normalize())
+    
+    # คำนวณ Volume เฉลี่ยจากข้อมูลเดิม
+    avg_volume = original_volume.mean() if len(original_volume) > 0 else 1000000
+    
+    for date in ticker_data.index:
+        date_normalized = pd.Timestamp(date).normalize()
+        
+        if date_normalized in trading_days_set:
+            # วันซื้อขาย: จัดการ Volume ที่หายไป
+            if pd.isna(ticker_data.loc[date, 'Volume']) or ticker_data.loc[date, 'Volume'] == 0:
+                # ใช้ forward fill จากข้อมูลก่อนหน้า
+                prev_volumes = ticker_data.loc[:date, 'Volume'].dropna()
+                prev_volumes = prev_volumes[prev_volumes > 0]
+                
+                if len(prev_volumes) > 0:
+                    # ใช้ค่าเฉลี่ยของ 3 วันล่าสุด
+                    recent_avg = prev_volumes.tail(3).mean()
+                    ticker_data.loc[date, 'Volume'] = recent_avg
+                else:
+                    # ใช้ค่าเฉลี่ยโดยรวม
+                    ticker_data.loc[date, 'Volume'] = avg_volume
+                    
+                print(f"🔄 Imputed volume for {ticker} on {date.strftime('%Y-%m-%d')}: {ticker_data.loc[date, 'Volume']:,.0f}")
+        else:
+            # วันหยุด: ตั้งเป็น 0
+            ticker_data.loc[date, 'Volume'] = 0
+    
+    # คำนวณ Change percent
     ticker_data['Changepercent'] = (ticker_data['Close'] - ticker_data['Open']) / ticker_data['Open'] * 100
     ticker_data['Changepercent'] = ticker_data['Changepercent'].fillna(0)
 
     return ticker_data
+
+# ✅ เพิ่มฟังก์ชันตรวจสอบ Volume anomalies
+def check_volume_anomalies(data):
+    """ตรวจสอบและรายงาน Volume ที่ผิดปกติ"""
+    print("\n🔍 Volume Analysis:")
+    
+    for ticker in data['Ticker'].unique():
+        ticker_data = data[data['Ticker'] == ticker].copy()
+        ticker_data['Date'] = pd.to_datetime(ticker_data['Date'])
+        
+        # หาวันซื้อขายที่ Volume = 0
+        zero_volume_trading_days = ticker_data[
+            (ticker_data['Volume'] == 0) & 
+            (ticker_data['Date'].dt.dayofweek < 5)  # จันทร์-ศุกร์
+        ]
+        
+        if len(zero_volume_trading_days) > 0:
+            print(f"⚠️ {ticker}: Found {len(zero_volume_trading_days)} trading days with Volume = 0")
+            print(f"   Dates: {zero_volume_trading_days['Date'].dt.strftime('%Y-%m-%d').tolist()}")
+        
+        # สถิติ Volume
+        non_zero_volume = ticker_data[ticker_data['Volume'] > 0]['Volume']
+        if len(non_zero_volume) > 0:
+            print(f"✅ {ticker}: Avg Volume = {non_zero_volume.mean():,.0f}, "
+                  f"Min = {non_zero_volume.min():,.0f}, "
+                  f"Max = {non_zero_volume.max():,.0f}")
+        else:
+            print(f"❌ {ticker}: No valid volume data found!")
 
 # ✅ สร้างช่วงวันที่ทั้งหมด (รวมวันหยุด)
 all_dates = pd.date_range(start=start_date, end=end_date, freq='D')
@@ -184,6 +250,12 @@ for ticker in tickers:
             if not ticker_data.empty:
                 print(f"✅ Retrieved data for {ticker}: {len(ticker_data)} rows")
                 print(f"📋 Sample data for {ticker}:\n{ticker_data.head()}")
+                
+                # แสดงข้อมูล Volume ก่อนการประมวลผล
+                original_volumes = ticker_data['Volume'][ticker_data['Volume'] > 0]
+                if len(original_volumes) > 0:
+                    print(f"🔵 Original volume stats for {ticker}: Mean={original_volumes.mean():,.0f}, Min={original_volumes.min():,.0f}, Max={original_volumes.max():,.0f}")
+                
                 ticker_data = impute_holiday_data(ticker_data, all_dates, ticker, window=3)
                 ticker_data['Ticker'] = ticker
                 data_dict[ticker] = ticker_data
@@ -255,6 +327,31 @@ print(f"🔹 กรองข้อมูลแล้ว: {before_filter} -> {aft
 cleaned_data = cleaned_data.sort_values(['Date', 'Ticker']).reset_index(drop=True)
 cleaned_data = cleaned_data.drop_duplicates(subset=['Date', 'Ticker'], keep='first')
 
+# ✅ เพิ่มการตรวจสอบ Volume หลังประมวลผลข้อมูล
+check_volume_anomalies(cleaned_data)
+
+# ✅ เพิ่มการกรองข้อมูลที่มี Volume = 0 ในวันซื้อขาย (ถ้าต้องการ)
+print("\n🔧 Checking for zero volume on trading days...")
+cleaned_data['Date_dt'] = pd.to_datetime(cleaned_data['Date'])
+cleaned_data['is_weekday'] = cleaned_data['Date_dt'].dt.dayofweek < 5
+
+# นับจำนวนแถวที่มี Volume = 0 ในวันซื้อขาย
+zero_volume_weekdays = cleaned_data[(cleaned_data['Volume'] == 0) & (cleaned_data['is_weekday'])]
+if len(zero_volume_weekdays) > 0:
+    print(f"⚠️ Found {len(zero_volume_weekdays)} records with zero volume on weekdays")
+    
+    # แสดงรายละเอียด
+    for ticker in zero_volume_weekdays['Ticker'].unique():
+        ticker_zeros = zero_volume_weekdays[zero_volume_weekdays['Ticker'] == ticker]
+        print(f"   {ticker}: {len(ticker_zeros)} days - {ticker_zeros['Date'].tolist()}")
+
+# หมายเหตุ: ไม่กรองข้อมูล Volume = 0 ออก เพราะอาจเป็นวันหยุดจริง
+# หากต้องการกรองออก ให้ uncomment บรรทัดด้านล่าง
+# cleaned_data = cleaned_data[~((cleaned_data['Volume'] == 0) & (cleaned_data['is_weekday']))]
+
+# ลบคอลัมน์ช่วยเหลือ
+cleaned_data = cleaned_data.drop(['Date_dt', 'is_weekday'], axis=1)
+
 # ✅ บันทึกข้อมูลเป็นไฟล์ CSV
 output_path = os.path.join(os.path.dirname(__file__), "Stock", "stock_data_usa.csv")
 cleaned_data.to_csv(output_path, index=False)
@@ -267,7 +364,8 @@ if not cleaned_data.empty:
     print(f"🔹 ช่วงวันที่: {cleaned_data['Date'].min()} ถึง {cleaned_data['Date'].max()}")
     for ticker in cleaned_data['Ticker'].unique():
         ticker_data = cleaned_data[cleaned_data['Ticker'] == ticker]
-        print(f"🔹 {ticker}: {len(ticker_data)} แถว, วันที่ล่าสุด {ticker_data['Date'].max()}")
+        avg_volume = ticker_data[ticker_data['Volume'] > 0]['Volume'].mean()
+        print(f"🔹 {ticker}: {len(ticker_data)} แถว, วันที่ล่าสุด {ticker_data['Date'].max()}, Avg Volume: {avg_volume:,.0f}")
     print("\n📋 ตัวอย่างข้อมูล:")
     print(cleaned_data.head(10))
 else:
