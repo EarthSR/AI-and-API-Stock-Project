@@ -985,9 +985,53 @@ function calculateAge(birthday) {
 }
 
 
+app.post("/api/update-fcm-token", verifyToken, async (req, res) => {
+  const { fcm_token } = req.body;
+
+  if (!fcm_token) {
+    return res.status(400).json({ error: "fcm_token ห้ามว่าง" });
+  }
+
+  try {
+    const userId = req.userId;
+
+    const [rows] = await pool_notification.query(
+      "SELECT fcm_token FROM user WHERE UserID = ?",
+      [userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: "ไม่พบผู้ใช้งาน" });
+    }
+
+    const currentToken = rows[0].fcm_token;
+
+    // ถ้า fcm_token ใหม่ไม่เหมือนเดิม หรือเดิมเป็นค่าว่าง ให้ update
+    if (!currentToken || currentToken.trim() === "" || currentToken !== fcm_token) {
+      await pool_notification.query(
+        "UPDATE user SET fcm_token = ? WHERE UserID = ?",
+        [fcm_token, userId]
+      );
+      return res.json({ message: "อัปเดต fcm_token เรียบร้อย", fcm_token });
+    }
+
+    // ถ้าเหมือนกัน ไม่ต้อง update
+    return res.json({
+      message: "fcm_token เหมือนเดิม ไม่ต้องอัปเดต",
+      fcm_token: currentToken,
+    });
+
+  } catch (err) {
+    console.error("❌ Error updating fcm_token:", err);
+    res.status(500).json({ error: "เกิดข้อผิดพลาดในระบบ" });
+  }
+});
+
+
+
 app.get("/api/news-notifications", verifyToken, async (req, res) => {
   try {
-    // ดึงข่าวล่าสุด 1 ข่าว
+    // 1. ดึงข่าวล่าสุด
     const [newsResults] = await pool_notification.query(`
       SELECT NewsID, Title, PublishedDate
       FROM News
@@ -1001,26 +1045,43 @@ app.get("/api/news-notifications", verifyToken, async (req, res) => {
 
     const latestNews = newsResults[0]; // ข่าวล่าสุด
 
-    const userResults = [
-      {
-        fcm_token: "fLmzIwKYS2SuSkidLdjGjs:APA91bFnyXm3-myy4U3Eg1yjwR4ahvtmgHdwLHP4WD-e0StfE4ws6A6oP-cn0HkqW_8YN7mwxpCi4-aScGF_kdjI2chdhQmYxkvkpWCfMSVmt1hCz6Vzf8Q"
-      }
-    ];
+    // 2. ดึง fcm_token และ UserID จากตาราง user (สมมติชื่อคอลัมน์ UserID, fcm_token)
+    const [userResults] = await pool_notification.query(`
+      SELECT UserID, fcm_token
+      FROM user
+      WHERE fcm_token IS NOT NULL AND fcm_token != ''
+    `);
 
-    const messages = userResults.map(user => ({
+    if (userResults.length === 0) {
+      return res.json({ message: "ยังไม่มีผู้ใช้ที่มี fcm_token" });
+    }
+
+    // 3. บันทึกลง table notification
+    for (const user of userResults) {
+      await pool_notification.query(
+        `
+        INSERT INTO notification (Message, Date, NewsID, UserID)
+        VALUES (?, NOW(), ?, ?)
+      `,
+        [latestNews.Title, latestNews.NewsID, user.UserID]
+      );
+    }
+
+    // 4. เตรียมข้อความส่ง FCM
+    const messages = userResults.map((user) => ({
       notification: {
-        title: "📰 Latest News",
+        title: "📰 ข่าวล่าสุด",
         body: latestNews.Title,
       },
       token: user.fcm_token,
     }));
 
-    // ส่ง notification แบบ bulk ด้วย sendAll (ถ้ารองรับ)
-    if (typeof admin.messaging().sendAll === 'function') {
+    // 5. ส่ง Notification
+    if (typeof admin.messaging().sendAll === "function") {
       const response = await admin.messaging().sendAll(messages);
       console.log("✅ Notifications sent:", response.successCount, "successes");
       res.json({
-        message: "📤 Push notification ส่งสำเร็จ",
+        message: "📤 ส่ง Push notification สำเร็จ",
         successCount: response.successCount,
         totalUsers: userResults.length,
         news: latestNews,
@@ -1038,18 +1099,48 @@ app.get("/api/news-notifications", verifyToken, async (req, res) => {
       }
       console.log("✅ Notifications sent (fallback):", successCount);
       res.json({
-        message: "📤 Push notification ส่งสำเร็จ (fallback)",
+        message: "📤 ส่ง Push notification สำเร็จ (fallback)",
         successCount,
         totalUsers: userResults.length,
         news: latestNews,
       });
     }
-
   } catch (err) {
     console.error("❌ Error pushing notifications:", err);
     res.status(500).json({ error: "เกิดข้อผิดพลาดขณะดึงข่าวหรือส่ง noti" });
   }
 });
+
+
+// API สำหรับดึงข่าว notification ล่าสุดที่ถูกบันทึก (ของทุก user หรือ กรอง userId ก็ได้)
+app.get("/api/latest-notification", verifyToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    const [results] = await pool_notification.query(`
+      SELECT n.NotificationID, n.Message, n.Date, n.NewsID, n.UserID, nw.Title AS NewsTitle, nw.PublishedDate
+      FROM notification n
+      LEFT JOIN News nw ON n.NewsID = nw.NewsID
+      WHERE n.UserID = ?
+      ORDER BY n.Date DESC
+      LIMIT 10;
+    `, [userId]);
+
+    if (results.length === 0) {
+      return res.json({ message: "ไม่มีการแจ้งเตือนล่าสุด" });
+    }
+
+    res.json({
+      notifications: results
+    });
+  } catch (error) {
+    console.error("Error fetching latest notifications:", error);
+    res.status(500).json({ error: "เกิดข้อผิดพลาดขณะดึงข้อมูลการแจ้งเตือน" });
+  }
+});
+
+
+
 
 
 
@@ -1245,7 +1336,7 @@ app.get("/api/favorites", verifyToken, (req, res) => {
 // API สำหรับดึงหุ้นที่มีการเปลี่ยนแปลงสูงสุด 10 อันดับ พร้อมราคาปิด และ ID
 app.get("/api/top-10-stocks", async (req, res) => {
   try {
-    // ดึงวันที่ล่าสุดที่มีข้อมูล
+    // ดึงวันที่ล่าสุด
     const latestDateQuery = "SELECT MAX(Date) AS LatestDate FROM StockDetail";
     pool.query(latestDateQuery, (dateErr, dateResults) => {
       if (dateErr) {
@@ -1253,19 +1344,23 @@ app.get("/api/top-10-stocks", async (req, res) => {
         return res.status(500).json({ error: "Database error fetching latest date" });
       }
 
-      const latestDate = dateResults[0].LatestDate;
+      const latestDate = dateResults[0]?.LatestDate;
       if (!latestDate) {
         return res.status(404).json({ error: "No stock data available" });
       }
 
-      // คิวรี่หุ้นที่มีการเปลี่ยนแปลงสูงสุด 10 อันดับ พร้อมราคาปิด และ StockDetailID
+      // ดึง 10 หุ้นที่เปอร์เซ็นต์ขึ้นสูงสุดในวันล่าสุด
       const query = `
-        SELECT sd.StockDetailID, s.StockSymbol, sd.Changepercen AS ChangePercentage, sd.ClosePrice
+        SELECT 
+          sd.StockDetailID, 
+          s.StockSymbol, 
+          sd.Changepercen AS ChangePercentage, 
+          sd.ClosePrice
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ?
         ORDER BY sd.Changepercen DESC
-        LIMIT 10;
+        LIMIT 10
       `;
 
       pool.query(query, [latestDate], (err, results) => {
@@ -1277,7 +1372,7 @@ app.get("/api/top-10-stocks", async (req, res) => {
         res.json({
           date: latestDate,
           topStocks: results.map(stock => ({
-            StockDetailID: stock.StockDetailID, // ✅ เพิ่ม ID ของหุ้น
+            StockDetailID: stock.StockDetailID,
             StockSymbol: stock.StockSymbol,
             ChangePercentage: stock.ChangePercentage,
             ClosePrice: stock.ClosePrice
@@ -1290,6 +1385,7 @@ app.get("/api/top-10-stocks", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 // API สำหรับดึง 3 หุ้นที่มีการเปลี่ยนแปลงสูงสุด พร้อมข้อมูลย้อนหลัง 5 วัน
 app.get("/api/trending-stocks", async (req, res) => {
@@ -2259,37 +2355,37 @@ async function getThbToUsdRate() {
 // Helper function to check market status
 function getMarketStatus(market) {
     const now = new Date();
-    // US Market (ET, UTC-4 for EDT)
-    if (market === 'America') {
-        const nowET = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-        const day = nowET.getDay(); // 0=Sun, 6=Sat
-        const hour = nowET.getHours();
-        const minute = nowET.getMinutes();
+    // // US Market (ET, UTC-4 for EDT)
+    // if (market === 'America') {
+    //     const nowET = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    //     const day = nowET.getDay(); // 0=Sun, 6=Sat
+    //     const hour = nowET.getHours();
+    //     const minute = nowET.getMinutes();
 
-        if (day >= 1 && day <= 5) { // Mon-Fri
-            if ((hour > 9 || (hour === 9 && minute >= 30)) && hour < 16) {
-                return 'OPEN';
-            }
-        }
-        return 'CLOSED';
-    }
-    // Thai Market (ICT, UTC+7)
-    if (market === 'Thailand') {
-        const nowICT = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }));
-        const day = nowICT.getDay();
-        const hour = nowICT.getHours();
-        const minute = nowICT.getMinutes();
+    //     if (day >= 1 && day <= 5) { // Mon-Fri
+    //         if ((hour > 9 || (hour === 9 && minute >= 30)) && hour < 16) {
+    //             return 'OPEN';
+    //         }
+    //     }
+    //     return 'CLOSED';
+    // }
+    // // Thai Market (ICT, UTC+7)
+    // if (market === 'Thailand') {
+    //     const nowICT = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }));
+    //     const day = nowICT.getDay();
+    //     const hour = nowICT.getHours();
+    //     const minute = nowICT.getMinutes();
 
-        if (day >= 1 && day <= 5) { // Mon-Fri
-            const isMorningSession = (hour >= 10 && (hour < 12 || (hour === 12 && minute <= 30)));
-            const isAfternoonSession = ((hour > 14 || (hour === 14 && minute >= 30)) && (hour < 16 || (hour === 16 && minute <= 30)));
-            if (isMorningSession || isAfternoonSession) {
-                return 'OPEN';
-            }
-        }
-        return 'CLOSED';
-    }
-    return 'UNKNOWN';
+    //     if (day >= 1 && day <= 5) { // Mon-Fri
+    //         const isMorningSession = (hour >= 10 && (hour < 12 || (hour === 12 && minute <= 30)));
+    //         const isAfternoonSession = ((hour > 14 || (hour === 14 && minute >= 30)) && (hour < 16 || (hour === 16 && minute <= 30)));
+    //         if (isMorningSession || isAfternoonSession) {
+    //             return 'OPEN';
+    //         }
+    //     }
+    //     return 'CLOSED';
+    // }
+    // return 'UNKNOWN';
 }
 
 // API สำหรับดึงข้อมูล Portfolio ของผู้ใช้ พร้อมคำนวณกำไร/ขาดทุน
@@ -2590,7 +2686,6 @@ app.post("/api/create-demo", verifyToken, async (req, res) => {
     if (connection) connection.release();
   }
 });
-
 
 
 
