@@ -2395,7 +2395,7 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
     connection = await pool.promise().getConnection();
     const thbToUsdRate = await getThbToUsdRate();
 
-    // 1. ดึงข้อมูล portfolio หลักของผู้ใช้
+    // 1. ดึงข้อมูล portfolio ของผู้ใช้
     const [portfolioRows] = await connection.query(
       "SELECT * FROM papertradeportfolio WHERE UserID = ?",
       [req.userId]
@@ -2407,7 +2407,7 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
 
     const portfolio = portfolioRows[0];
 
-    // 2. ดึงข้อมูลหุ้นทั้งหมดที่ถือครองในพอร์ต พร้อม Market
+    // 2. ดึงหุ้นทั้งหมดใน portfolio
     const [holdingsRows] = await connection.query(
       `SELECT 
          h.PaperHoldingID, 
@@ -2421,12 +2421,20 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
       [portfolio.PaperPortfolioID]
     );
 
-    // 3. ดึงราคาปัจจุบันของหุ้นทุกตัวพร้อมกันเพื่อประสิทธิภาพ
+    // 3. ดึงราคาปัจจุบันจาก Finnhub
     const pricePromises = holdingsRows.map(holding => {
-      const apiSymbol = holding.Market === 'Thailand' ? `${holding.StockSymbol.toUpperCase()}.BK` : holding.StockSymbol.toUpperCase();
+      const apiSymbol = holding.Market === 'Thailand'
+        ? `${holding.StockSymbol.toUpperCase()}.BK`
+        : holding.StockSymbol.toUpperCase();
+
       const url = `https://finnhub.io/api/v1/quote?symbol=${apiSymbol}&token=${process.env.FINNHUB_API_KEY}`;
+
       return axios.get(url)
-        .then(response => ({ symbol: holding.StockSymbol, price: response.data.c || 0 }))
+        .then(response => {
+          const price = Number(response.data.c) || 0; // แปลงเป็น number, fallback เป็น 0
+          console.log(`Fetched price for ${holding.StockSymbol} (${apiSymbol}):`, price);
+          return { symbol: holding.StockSymbol, price };
+        })
         .catch(error => {
           console.error(`Could not fetch price for ${holding.StockSymbol}:`, error.message);
           return { symbol: holding.StockSymbol, price: 0, error: true };
@@ -2439,7 +2447,7 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
       return map;
     }, {});
 
-    // 4. จัดกลุ่มหุ้นตามสัญลักษณ์ (StockSymbol) และคำนวณค่ารวม
+    // 4. รวม holdings ตาม StockSymbol
     const groupedHoldings = holdingsRows.reduce((acc, holding) => {
       const symbol = holding.StockSymbol;
       if (!acc[symbol]) {
@@ -2450,26 +2458,25 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
           TotalCostBasis: 0,
         };
       }
-      acc[symbol].TotalQuantity += holding.Quantity;
-      acc[symbol].TotalCostBasis += holding.BuyPrice * holding.Quantity;
+      acc[symbol].TotalQuantity += Number(holding.Quantity) || 0;
+      acc[symbol].TotalCostBasis += (Number(holding.BuyPrice) || 0) * (Number(holding.Quantity) || 0);
       return acc;
     }, {});
 
-    // 5. คำนวณมูลค่าและกำไร/ขาดทุนสำหรับแต่ละกลุ่ม และรวมมูลค่าพอร์ตทั้งหมดในสกุลเงิน USD
+    // 5. คำนวณมูลค่า, กำไร/ขาดทุน และเปอร์เซ็นต์
     let totalHoldingsValueUSD = 0;
     const holdingsWithPL = Object.values(groupedHoldings).map(group => {
-      const currentPrice = priceMap[group.StockSymbol] || 0; // ราคาในสกุลเงินเดิม
+      const currentPrice = priceMap[group.StockSymbol] || 0;
       const isThaiStock = group.Market === 'Thailand';
-      
-      // แปลงค่าเงินทั้งหมดเป็น USD เพื่อการแสดงผลที่สอดคล้องกัน
+
       const costBasisUSD = isThaiStock ? group.TotalCostBasis * thbToUsdRate : group.TotalCostBasis;
-      const currentValueUSD = isThaiStock ? (currentPrice * group.TotalQuantity) * thbToUsdRate : (currentPrice * group.TotalQuantity);
+      const currentValueUSD = isThaiStock ? currentPrice * group.TotalQuantity * thbToUsdRate : currentPrice * group.TotalQuantity;
       const avgBuyPriceUSD = group.TotalQuantity > 0 ? costBasisUSD / group.TotalQuantity : 0;
       const currentPriceUSD = isThaiStock ? currentPrice * thbToUsdRate : currentPrice;
 
       const unrealizedPL_USD = currentValueUSD - costBasisUSD;
       const unrealizedPLPercent = costBasisUSD > 0 ? (unrealizedPL_USD / costBasisUSD) * 100 : 0;
-      
+
       totalHoldingsValueUSD += currentValueUSD;
 
       return {
@@ -2485,9 +2492,9 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
       };
     });
 
-    // 6. คำนวณมูลค่ารวมของพอร์ตเป็น USD (เงินสดในพอร์ตเป็น USD อยู่แล้ว)
-    const balanceUSD = parseFloat(portfolio.Balance); // Balance in DB is already USD
-    portfolio.TotalPortfolioValueUSD = balanceUSD + totalHoldingsValueUSD; 
+    // 6. รวมมูลค่าพอร์ต
+    const balanceUSD = parseFloat(portfolio.Balance);
+    portfolio.TotalPortfolioValueUSD = balanceUSD + totalHoldingsValueUSD;
     portfolio.BalanceUSD = balanceUSD.toFixed(2);
     portfolio.holdings = holdingsWithPL;
 
@@ -2495,6 +2502,7 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
       message: "ดึงข้อมูล Portfolio สำเร็จ",
       data: portfolio,
     });
+
   } catch (error) {
     console.error("Error fetching portfolio:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -2502,6 +2510,7 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
     if (connection) connection.release();
   }
 });
+
 
 // API สำหรับการซื้อ-ขายหุ้นในพอร์ตจำลอง
 app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
