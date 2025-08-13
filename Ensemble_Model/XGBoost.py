@@ -440,16 +440,28 @@ def train_fixed_system():
         lstm_df = pd.read_csv(lstm_path)
         gru_df = pd.read_csv(gru_path)
         
-        # Combine data
+        # Check columns in both dataframes
+        print(f"LSTM columns: {list(lstm_df.columns)}")
+        print(f"GRU columns: {list(gru_df.columns)}")
+        
+        # Merge dataframes on Ticker and Date
+        merged_df = pd.merge(
+            lstm_df, 
+            gru_df, 
+            on=['Ticker', 'Date'], 
+            suffixes=('_LSTM', '_GRU')
+        )
+        
+        # Create final dataframe
         df = pd.DataFrame({
-            "Ticker": lstm_df["Ticker"],
-            "Date": pd.to_datetime(lstm_df["Date"]),
-            "Actual_Price": lstm_df["Actual_Price"],
-            "Predicted_Price_LSTM": lstm_df["Predicted_Price"],
-            "Predicted_Price_GRU": gru_df["Predicted_Price"],
-            "Actual_Direction": lstm_df["Actual_Dir"],
-            "Predicted_Dir_LSTM": lstm_df["Predicted_Dir"],
-            "Predicted_Dir_GRU": gru_df["Predicted_Dir"]
+            "Ticker": merged_df["Ticker"],
+            "Date": pd.to_datetime(merged_df["Date"]),
+            "Actual_Price": merged_df["Actual_Price_LSTM"],  # ใช้จาก LSTM (ควรเหมือนกัน)
+            "Predicted_Price_LSTM": merged_df["Predicted_Price_LSTM"],
+            "Predicted_Price_GRU": merged_df["Predicted_Price_GRU"],
+            "Actual_Direction": merged_df["Actual_Dir_LSTM"],  # ใช้จาก LSTM (ควรเหมือนกัน)
+            "Predicted_Dir_LSTM": merged_df["Predicted_Dir_LSTM"],
+            "Predicted_Dir_GRU": merged_df["Predicted_Dir_GRU"]
         })
         
         logger.info(f"   Raw data: {len(df)} records")
@@ -486,19 +498,19 @@ def train_fixed_system():
 # ===== USAGE EXAMPLE =====
 
 if __name__ == "__main__":
-    print("🚀 Starting Fixed XGBoost Training...")
+    print("Starting Fixed XGBoost Training...")
     
     try:
         # Train fixed system
         trading_system, stats = train_fixed_system()
         
-        print("\n📊 Final Results Summary:")
+        print("\nFinal Results Summary:")
         print(f"   Price R²: {stats['test_price_r2']:.4f}")
         print(f"   Direction Accuracy: {stats['test_direction_accuracy']:.4f}")
-        print(f"   🎯 Model Consistency: {stats['test_consistency']:.4f}")
+        print(f"   Model Consistency: {stats['test_consistency']:.4f}")
         
         # Test prediction
-        print("\n🧪 Testing Fixed Prediction...")
+        print("\nTesting Fixed Prediction...")
         sample_data = {
             'Ticker': ['AAPL'],
             'Date': ['2025-07-30'],
@@ -516,14 +528,14 @@ if __name__ == "__main__":
         print(f"   Current Price: ${result['Current_Price']:.2f}")
         print(f"   Predicted Price: ${result['Predicted_Price']:.2f}")
         print(f"   Expected Return: {result['Predicted_Return_Pct']:+.2f}%")
-        print(f"   Direction: {'📈 UP' if result['Predicted_Direction'] == 1 else '📉 DOWN'}")
+        print(f"   Direction: {'UP' if result['Predicted_Direction'] == 1 else 'DOWN'}")
         print(f"   Confidence: {result['Confidence']:.3f}")
         print(f"   Is Inconsistent: {'Yes' if result['Is_Inconsistent'] else 'No'}")
         print(f"   Model Consistency: {result['Model_Consistency']:.3f}")
         
-        print(f"\n✅ Fixed model saved as: ./fixed_unified_trading_model.pkl")
+        print(f"\nFixed model saved as: ./fixed_unified_trading_model.pkl")
         
     except Exception as e:
-        print(f"❌ Training failed: {e}")
+        print(f"Training failed: {e}")
         import traceback
         print(traceback.format_exc())

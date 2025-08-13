@@ -16,6 +16,7 @@
     "mysql2": "^3.14.1",
     "node-fetch": "^2.7.0",
     "nodemailer": "^7.0.3",
+    "nodemon": "^3.1.10",
     "python-shell": "^5.0.0"
   }
 }

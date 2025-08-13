@@ -44,17 +44,8 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# Load class weights from LSTM model (primary model)
-try:
-    with open('../LSTM_model/class_weights.pkl', 'rb') as f:
-        class_weights_dict = pickle.load(f)
-    print(f"✅ Loaded class weights: {class_weights_dict}")
-except FileNotFoundError:
-    print("⚠️ class_weights.pkl not found, using balanced weights")
-    class_weights_dict = {0: 1.0, 1: 1.0}  # Default balanced weights
-except Exception as e:
-    print(f"⚠️ Error loading class weights: {e}, using balanced weights")
-    class_weights_dict = {0: 1.0, 1: 1.0}  # Default balanced weights
+with open('../LSTM_model/class_weights.pkl', 'rb') as f:
+    class_weights_dict = pickle.load(f)
 
 def focal_weighted_binary_crossentropy(class_weights, gamma=2.0, alpha_pos=0.7):
     def loss(y_true, y_pred):
@@ -1315,22 +1306,28 @@ def create_unified_ticker_scalers(df, feature_columns, scaler_file_path="../LSTM
             features = handle_infinite_values(features)
             features = features.fillna(features.mean()).fillna(0)
             
-            # ✅ ต้องใช้ scaler จากการเทรนเท่านั้น - ห้ามสร้างใหม่!
-            if ticker_id in pre_trained_scalers:
-                # ใช้ scaler ที่เทรนไว้แล้ว
-                scaler_info = pre_trained_scalers[ticker_id]
-                scaler_info.update({
-                    'ticker_symbol': ticker_name,
-                    'ticker': ticker_name,  # compatibility
-                    'data_points': len(ticker_data)
-                })
-                ticker_scalers[ticker_id] = scaler_info
-                print(f"   ✅ {ticker_name} (ID: {ticker_id}): Using trained scaler")
-            else:
-                print(f"   ❌ {ticker_name} (ID: {ticker_id}): No trained scaler found - SKIPPING!")
-                print(f"       Available scaler IDs: {list(pre_trained_scalers.keys())}")
-                continue
+            # เตรียม price data
+            price_data = ticker_data[['Close']].copy()
+            price_data = handle_infinite_values(price_data)
+            price_data = price_data.fillna(price_data.mean())
             
+            # สร้าง scalers
+            feature_scaler = RobustScaler()
+            price_scaler = RobustScaler()
+            
+            feature_scaler.fit(features)
+            price_scaler.fit(price_data)
+            
+            # บันทึก scaler พร้อม metadata (ตามโครงสร้างโค้ดเทรน)
+            ticker_scalers[ticker_id] = {
+                'feature_scaler': feature_scaler,
+                'price_scaler': price_scaler,
+                'ticker': ticker_name,  # สำหรับ compatibility กับโค้ดเทรน
+                'ticker_symbol': ticker_name,  # สำหรับระบบปัจจุบัน
+                'data_points': len(ticker_data)
+            }
+            
+            print(f"   ✅ {ticker_name} (ID: {ticker_id}): Created new scaler with {len(ticker_data)} data points")
             
         except Exception as e:
             print(f"   ❌ {ticker_name}: Error creating scaler - {e}")
@@ -1552,53 +1549,6 @@ def calculate_dynamic_weights(df_ticker, price_weight_factor=0.6, direction_weig
     return 0.5, 0.5
 
 
-def fix_stock_split_scalers(ticker_scalers):
-    """
-    🛠️ แก้ไข scaler สำหรับหุ้นที่มี stock split (Quick Fix)
-    - NVDA: 10:1 split ในมิ.ย. 2024
-    - AVGO: 10:1 split ในก.ค. 2024
-    """
-    print(f"🛠️ Applying stock split fixes...")
-    
-    # กำหนด stock split ratios และการปรับราคา
-    stock_adjustments = {
-        'NVDA': 10.0,   # 10:1 stock split มิ.ย. 2024
-        'AVGO': 10.0,   # 10:1 stock split ก.ค. 2024
-        'META': 3.7,    # AI boom growth (ไม่ใช่ split แต่ราคาเปลี่ยนมาก)
-        'TSM': 3.0,     # semiconductor demand growth
-        'MSFT': 2.3     # AI และ cloud growth
-    }
-    
-    fixed_count = 0
-    for ticker_id, scaler_info in ticker_scalers.items():
-        ticker_name = scaler_info.get('ticker', '')
-        
-        if ticker_name in stock_adjustments:
-            adjustment_ratio = stock_adjustments[ticker_name]
-            
-            # แก้ไข price scaler
-            price_scaler = scaler_info['price_scaler']
-            
-            # ปรับ center และ scale ตาม split ratio
-            if hasattr(price_scaler, 'center_') and hasattr(price_scaler, 'scale_'):
-                original_center = price_scaler.center_[0] if isinstance(price_scaler.center_, np.ndarray) else price_scaler.center_
-                original_scale = price_scaler.scale_[0] if isinstance(price_scaler.scale_, np.ndarray) else price_scaler.scale_
-                
-                # ปรับค่าตาม adjustment ratio
-                price_scaler.center_ = np.array([original_center * adjustment_ratio])
-                price_scaler.scale_ = np.array([original_scale * adjustment_ratio])
-                
-                print(f"   ✅ {ticker_name}: แก้ไข scaler (×{adjustment_ratio:.1f})")
-                print(f"      Old center: {original_center:.2f} → New: {price_scaler.center_[0]:.2f}")
-                fixed_count += 1
-    
-    if fixed_count > 0:
-        print(f"🎯 แก้ไข scaler สำเร็จ: {fixed_count} tickers")
-    else:
-        print(f"ℹ️ ไม่มี stock split ที่ต้องแก้ไข")
-    
-    return ticker_scalers
-
 def load_training_scalers(scaler_path="../LSTM_model/ticker_scalers.pkl"):
     """
     โหลด ticker_scalers จากตอนเทรน
@@ -1632,9 +1582,6 @@ def load_training_scalers(scaler_path="../LSTM_model/ticker_scalers.pkl"):
             
             if len(ticker_scalers) > 5:
                 print(f"      ... และอีก {len(ticker_scalers) - 5} tickers")
-            
-            # 🛠️ แก้ไข scaler สำหรับ stock split (Quick Fix)
-            ticker_scalers = fix_stock_split_scalers(ticker_scalers)
             
             return ticker_scalers, True
         else:
@@ -1819,10 +1766,10 @@ class WalkForwardMiniRetrainManager:
     - เสถียรและมีประสิทธิภาพ
     """
     def __init__(self, 
-                 lstm_model_path="../LSTM_model/best_hypertuned_model.keras",     # Optimal model
-                 gru_model_path="../GRU_Model/best_hypertuned_model.keras",       # Optimal model
-                 retrain_frequency=3,  # Optimal from hyperparameter tuning
-                 chunk_size=100,       # Optimal from hyperparameter tuning
+                 lstm_model_path="../LSTM_model/best_v6_plus_minimal_tuning_v2_final_model.keras",
+                 gru_model_path="../GRU_Model/best_v6_plus_minimal_tuning_v2_final_model.keras",
+                 retrain_frequency=5,  
+                 chunk_size=200,       
                  seq_length=10):
         
         self.lstm_model_path = lstm_model_path
@@ -2091,7 +2038,101 @@ class XGBoostEnsembleMetaLearner:
         self.model_path = model_path
         self.trading_system = None
         self.performance_history = {}
-        self.load_model()
+        
+        # 📊 Historical Performance Data จาก metrics ที่ให้มา
+        self.stock_performance = {
+            # Stock: {metric: (LSTM_value, GRU_value)}
+            'AAPL': {
+                'MAE': (7.1761, 4.7221),
+                'R2': (0.7203, 0.8783),
+                'Direction_Acc': (0.6455, 0.6499)
+            },
+            'ADVANC': {
+                'MAE': (6.5163, 5.6464),
+                'R2': (0.8814, 0.9046),
+                'Direction_Acc': (0.6888, 0.7056)
+            },
+            'AMD': {
+                'MAE': (4.3655, 3.6774),
+                'R2': (0.9354, 0.9613),
+                'Direction_Acc': (0.7695, 0.7533)
+            },
+            'AMZN': {
+                'MAE': (6.1828, 7.5087),
+                'R2': (0.8641, 0.8300),
+                'Direction_Acc': (0.6686, 0.6472)
+            },
+            'AVGO': {
+                'MAE': (14.2846, 13.0835),
+                'R2': (0.7351, 0.8006),
+                'Direction_Acc': (0.6542, 0.6366)
+            },
+            'DIF': {
+                'MAE': (0.2062, 0.1458),
+                'R2': (0.6259, 0.7279),
+                'Direction_Acc': (0.7147, 0.6844)
+            },
+            'DITTO': {
+                'MAE': (1.3103, 0.6702),
+                'R2': (0.7695, 0.9302),
+                'Direction_Acc': (0.6945, 0.6844)
+            },
+            'GOOGL': {
+                'MAE': (5.1876, 5.3210),
+                'R2': (0.7843, 0.7746),
+                'Direction_Acc': (0.7320, 0.7215)
+            },
+            'HUMAN': {
+                'MAE': (0.2718, 0.1781),
+                'R2': (0.9480, 0.9737),
+                'Direction_Acc': (0.7630, 0.7686)
+            },
+            'INET': {
+                'MAE': (0.1599, 0.1269),
+                'R2': (0.8131, 0.8977),
+                'Direction_Acc': (0.7378, 0.7162)
+            },
+            'INSET': {
+                'MAE': (0.0824, 0.0539),
+                'R2': (0.9629, 0.9832),
+                'Direction_Acc': (0.7262, 0.7427)
+            },
+            'JAS': {
+                'MAE': (0.0678, 0.0705),
+                'R2': (0.9710, 0.9726),
+                'Direction_Acc': (0.7378, 0.7507)
+            },
+            'JMART': {
+                'MAE': (0.8154, 0.5712),
+                'R2': (0.8850, 0.9508),
+                'Direction_Acc': (0.7378, 0.7666)
+            },
+            'META': {
+                'MAE': (22.3500, 28.5451),
+                'R2': (0.8665, 0.7128),
+                'Direction_Acc': (0.6340, 0.6658)
+            },
+            'MSFT': {
+                'MAE': (16.2797, 8.9404),
+                'R2': (0.6759, 0.9007),
+                'Direction_Acc': (0.6282, 0.6101)
+            },
+            'NVDA': {
+                'MAE': (12.2969, 9.9044),
+                'R2': (0.1414, 0.4617),
+                'Direction_Acc': (0.5303, 0.5199)
+            },
+            'TRUE': {
+                'MAE': (0.3843, 0.2568),
+                'R2': (0.7830, 0.8893),
+                'Direction_Acc': (0.7176, 0.6844)
+            },
+            'TSLA': {
+                'MAE': (19.3031, 7.7488),
+                'R2': (0.8700, 0.9774),
+                'Direction_Acc': (0.6916, 0.6790)
+            },
+        # XGBoost model will handle all the ensemble logic
     
     def load_model(self):
         """Load XGBoost ensemble model"""
@@ -2116,7 +2157,356 @@ class XGBoostEnsembleMetaLearner:
         print(f"🎨 Model path: {self.model_path}")
         print(f"🎯 Expected: 72% direction accuracy, 93% consistency")
         print(f"🔥 **XGBoost Ensemble Ready** 🔥")
-
+    
+    def predict_meta(self, df):
+        
+        perf = self.stock_performance[ticker]
+        lstm_mae, gru_mae = perf['MAE']
+        lstm_r2, gru_r2 = perf['R2']
+        lstm_dir, gru_dir = perf['Direction_Acc']
+        
+        # คำนวณ performance advantage ของ GRU
+        mae_advantage = (lstm_mae - gru_mae) / lstm_mae if lstm_mae > 0 else 0  # GRU better if positive
+        r2_advantage = (gru_r2 - lstm_r2) / lstm_r2 if lstm_r2 > 0 else 0      # GRU better if positive
+        dir_advantage = (gru_dir - lstm_dir) / lstm_dir if lstm_dir > 0 else 0  # GRU better if positive
+        
+        # รวม advantages (weighted)
+        total_advantage = (0.5 * mae_advantage + 0.3 * r2_advantage + 0.2 * dir_advantage)
+        
+        # แปลงเป็น bonus multiplier (1.0 - 2.0) - increased max bonus
+        adaptive_bonus = 1.0 + max(0, min(1.0, total_advantage * 2))  # Doubled the multiplier
+        
+        logger.debug(f"{ticker}: Adaptive GRU bonus = {adaptive_bonus:.3f} "
+                    f"[MAE:{mae_advantage:.2f}, R²:{r2_advantage:.2f}, Dir:{dir_advantage:.2f}]")
+        
+        return adaptive_bonus
+    
+    def calculate_stock_specific_weights(self, ticker):
+        """
+        🎯 คำนวณน้ำหนักเฉพาะหุ้นจาก historical performance พร้อม GRU Bias
+        """
+        
+        if ticker not in self.stock_performance:
+            logger.warning(f"No historical performance data for {ticker}, using GRU-biased equal weights")
+            # แม้ไม่มีข้อมูล ก็ให้ GRU น้ำหนักมากกว่า
+            biased_gru_weight = 0.5 * self.gru_bias_factor
+            total = 0.5 + biased_gru_weight
+            return 0.5 / total, biased_gru_weight / total
+        
+        perf = self.stock_performance[ticker]
+        
+        # Extract metrics (LSTM, GRU)
+        lstm_mae, gru_mae = perf['MAE']
+        lstm_r2, gru_r2 = perf['R2']
+        lstm_dir, gru_dir = perf['Direction_Acc']
+        
+        # 1. MAE Score (inverse - lower is better)
+        mae_lstm_score = 1 / (lstm_mae + 1e-8)
+        mae_gru_score = 1 / (gru_mae + 1e-8)
+        mae_total = mae_lstm_score + mae_gru_score
+        mae_lstm_weight = mae_lstm_score / mae_total
+        mae_gru_weight = mae_gru_score / mae_total
+        
+        # 2. R² Score (direct - higher is better)
+        r2_total = lstm_r2 + gru_r2
+        r2_lstm_weight = lstm_r2 / r2_total if r2_total > 0 else 0.5
+        r2_gru_weight = gru_r2 / r2_total if r2_total > 0 else 0.5
+        
+        # 3. Direction Accuracy (direct - higher is better)
+        dir_total = lstm_dir + gru_dir
+        dir_lstm_weight = lstm_dir / dir_total if dir_total > 0 else 0.5
+        dir_gru_weight = gru_dir / dir_total if dir_total > 0 else 0.5
+        
+        # 🏆 Combined weighted score - ปรับให้เน้น MAE มากขึ้น (GRU มักดีกว่าใน MAE)
+        # MAE มีน้ำหนัก 50%, R² มีน้ำหนัก 35%, Direction Accuracy มีน้ำหนัก 15%
+        lstm_base_weight = (0.5 * mae_lstm_weight + 
+                           0.35 * r2_lstm_weight + 
+                           0.15 * dir_lstm_weight)
+        
+        gru_base_weight = (0.5 * mae_gru_weight + 
+                          0.35 * r2_gru_weight + 
+                          0.15 * dir_gru_weight)
+        
+        # 🎯 Apply GRU Bias Factor
+        adaptive_bonus = self.calculate_adaptive_gru_bonus(ticker)
+        total_gru_bias = self.gru_bias_factor * adaptive_bonus
+        
+        gru_biased_weight = gru_base_weight * total_gru_bias
+        
+        # Normalize to ensure sum = 1
+        total_weight = lstm_base_weight + gru_biased_weight
+        if total_weight > 0:
+            lstm_final_weight = lstm_base_weight / total_weight
+            gru_final_weight = gru_biased_weight / total_weight
+        else:
+            # Fallback with GRU bias
+            lstm_final_weight = 0.4
+            gru_final_weight = 0.6
+        
+        logger.debug(f"{ticker}: LSTM={lstm_final_weight:.3f}, GRU={gru_final_weight:.3f} "
+                    f"[Base: {lstm_base_weight:.2f}/{gru_base_weight:.2f}, "
+                    f"GRU_Bias: {total_gru_bias:.2f}]")
+        
+        return lstm_final_weight, gru_final_weight
+    
+    def calculate_dynamic_weights(self, ticker, recent_performance):
+        """
+        🎯 Dynamic Weighting Algorithm - ผสมระหว่าง historical และ recent performance พร้อม GRU Bias
+        """
+        
+        # Get stock-specific historical weights (already GRU-biased)
+        hist_lstm_weight, hist_gru_weight = self.calculate_stock_specific_weights(ticker)
+        
+        # If insufficient recent data, use historical weights
+        if len(recent_performance) < 3:
+            logger.debug(f"{ticker}: Using GRU-biased historical weights (insufficient recent data)")
+            return hist_lstm_weight, hist_gru_weight
+        
+        try:
+            # Calculate recent performance weights
+            actual_prices = recent_performance['Actual_Price'].values
+            lstm_predictions = recent_performance['Predicted_Price_LSTM'].values
+            gru_predictions = recent_performance['Predicted_Price_GRU'].values
+            
+            # Recent MAE calculation
+            lstm_recent_mae = mean_absolute_error(actual_prices, lstm_predictions)
+            gru_recent_mae = mean_absolute_error(actual_prices, gru_predictions)
+            
+            # Recent weights (inverse MAE) with GRU bias
+            lstm_recent_inv = 1 / (lstm_recent_mae + 1e-8)
+            gru_recent_inv = (1 / (gru_recent_mae + 1e-8)) * self.gru_bias_factor  # 🎯 Apply GRU bias to recent performance too
+            
+            total_recent_inv = lstm_recent_inv + gru_recent_inv
+            
+            recent_lstm_weight = lstm_recent_inv / total_recent_inv
+            recent_gru_weight = gru_recent_inv / total_recent_inv
+            
+            # 🏆 Adaptive blending: ใช้ historical 60% + recent 40% (เพิ่ม recent weight เพื่อให้ GRU bias มีผลมากขึ้น)
+            alpha = 0.4  # recent performance weight (increased from 0.3)
+            final_lstm_weight = (1 - alpha) * hist_lstm_weight + alpha * recent_lstm_weight
+            final_gru_weight = (1 - alpha) * hist_gru_weight + alpha * recent_gru_weight
+            
+            logger.debug(f"{ticker}: GRU-Biased weights - LSTM={final_lstm_weight:.3f}, GRU={final_gru_weight:.3f} "
+                        f"[Hist: {hist_lstm_weight:.2f}/{hist_gru_weight:.2f}, "
+                        f"Recent: {recent_lstm_weight:.2f}/{recent_gru_weight:.2f}]")
+            
+            return final_lstm_weight, final_gru_weight
+            
+        except Exception as e:
+            logger.warning(f"Error calculating dynamic weights for {ticker}: {e}")
+            return hist_lstm_weight, hist_gru_weight
+    
+    def get_performance_summary(self, ticker):
+        """📊 Get performance summary for a stock with GRU bias indication"""
+        if ticker not in self.stock_performance:
+            return "No historical data"
+        
+        perf = self.stock_performance[ticker]
+        lstm_mae, gru_mae = perf['MAE']
+        lstm_r2, gru_r2 = perf['R2']
+        lstm_dir, gru_dir = perf['Direction_Acc']
+        
+        # Determine better model for each metric
+        mae_winner = "LSTM" if lstm_mae < gru_mae else "GRU⭐"
+        r2_winner = "LSTM" if lstm_r2 > gru_r2 else "GRU⭐"
+        dir_winner = "LSTM" if lstm_dir > gru_dir else "GRU⭐"
+        
+        # Count GRU wins for bias indication
+        gru_wins = sum([lstm_mae >= gru_mae, lstm_r2 <= gru_r2, lstm_dir <= gru_dir])
+        bias_indicator = f"GRU_Advantage:{gru_wins}/3" if gru_wins >= 2 else f"Mixed_Performance:{gru_wins}/3"
+        
+        return f"MAE:{mae_winner}, R²:{r2_winner}, Dir:{dir_winner} [{bias_indicator}]"
+    
+    def prepare_data_for_model(self, df):
+        """เตรียมข้อมูลสำหรับ ensemble"""
+        
+        prepared_df = df.copy()
+        
+        # Map column names
+        column_mapping = {
+            'StockSymbol': 'Ticker',
+            'Close': 'Current_Price',
+            'PredictionClose_LSTM': 'Predicted_Price_LSTM',
+            'PredictionClose_GRU': 'Predicted_Price_GRU',
+            'PredictionTrend_LSTM': 'Predicted_Dir_LSTM',
+            'PredictionTrend_GRU': 'Predicted_Dir_GRU'
+        }
+        
+        for old_name, new_name in column_mapping.items():
+            if old_name in prepared_df.columns:
+                prepared_df[new_name] = prepared_df[old_name]
+        
+        # Add Date if missing
+        if 'Date' not in prepared_df.columns:
+            prepared_df['Date'] = datetime.now().strftime('%Y-%m-%d')
+        prepared_df['Date'] = pd.to_datetime(prepared_df['Date'])
+        
+        # Filter valid data
+        prediction_mask = (
+            prepared_df['Predicted_Price_LSTM'].notna() & 
+            prepared_df['Predicted_Price_GRU'].notna() &
+            prepared_df['Predicted_Dir_LSTM'].notna() & 
+            prepared_df['Predicted_Dir_GRU'].notna() &
+            (prepared_df['Current_Price'] > 0)
+        )
+        
+        prepared_df = prepared_df[prediction_mask].copy()
+        
+        if len(prepared_df) == 0:
+            logger.error("No valid data for prediction")
+            return None
+        
+        logger.info(f"✅ Data prepared: {len(prepared_df)} rows")
+        return prepared_df
+    
+    def predict_single_stock(self, stock_data, ticker):
+        """🎯 Enhanced Stock-Specific Ensemble Prediction with GRU Bias"""
+        
+        current_price = stock_data['Current_Price']
+        lstm_price = stock_data['Predicted_Price_LSTM']
+        gru_price = stock_data['Predicted_Price_GRU']
+        lstm_dir = stock_data['Predicted_Dir_LSTM']
+        gru_dir = stock_data['Predicted_Dir_GRU']
+        
+        # Get recent performance for dynamic weighting
+        recent_performance = self.performance_history.get(ticker, pd.DataFrame())
+        
+        # Calculate stock-specific dynamic weights (with GRU bias)
+        lstm_weight, gru_weight = self.calculate_dynamic_weights(ticker, recent_performance)
+        
+        # 🏆 GRU-Biased Weighted Prediction
+        ensemble_price = lstm_weight * lstm_price + gru_weight * gru_price
+        
+        # Direction prediction (weighted voting) - GRU already has higher weight
+        lstm_dir_weighted = lstm_weight * lstm_dir
+        gru_dir_weighted = gru_weight * gru_dir
+        ensemble_dir_prob = lstm_dir_weighted + gru_dir_weighted
+        ensemble_direction = 1 if ensemble_dir_prob >= 0.5 else 0
+        
+        # Price change analysis
+        price_change_pct = ((ensemble_price - current_price) / current_price) * 100
+        price_implied_direction = 1 if price_change_pct > 0.5 else 0
+        
+        # 🧠 Smart Consistency Check - consider GRU dominance and magnitude
+        basic_consistency = (ensemble_direction == price_implied_direction)
+        
+        if self.smart_consistency_check:
+            # If GRU dominates and price change is significant, trust GRU more
+            if gru_weight > 0.6 and abs(price_change_pct) > 2.0:
+                smart_consistency = True  # Trust GRU-dominant prediction
+                consistency_note = "GRU_DOMINANT_TRUSTED"
+            # If models agree on direction probability trend
+            elif (lstm_dir > 0.5 and gru_dir > 0.5) or (lstm_dir < 0.5 and gru_dir < 0.5):
+                smart_consistency = True
+                consistency_note = "DIRECTIONAL_AGREEMENT"
+            else:
+                smart_consistency = basic_consistency
+                consistency_note = "BASIC_CHECK"
+        else:
+            smart_consistency = basic_consistency
+            consistency_note = "BASIC_CHECK"
+        
+        is_consistent = smart_consistency
+        
+        # Enhanced confidence calculation with ultra-aggressive GRU bias boost
+        direction_confidence = abs(ensemble_dir_prob - 0.5) * 2.5  # Increased multiplier from 2.2
+        price_confidence = min(abs(price_change_pct) / 5, 1.0)  # Reduced divisor for even higher confidence
+        
+        # Add historical performance boost to confidence (with ultra-aggressive GRU weighting)
+        if ticker in self.stock_performance:
+            perf = self.stock_performance[ticker]
+            # Give ultra-dominant weight to GRU performance in confidence calculation
+            weighted_r2 = (0.05 * perf['R2'][0] + 0.95 * perf['R2'][1])  # 95% GRU
+            weighted_dir_acc = (0.05 * perf['Direction_Acc'][0] + 0.95 * perf['Direction_Acc'][1])  # 95% GRU
+            historical_confidence = (weighted_r2 + weighted_dir_acc) / 2
+            
+            # Blend current confidence with historical performance (more historical weight for stable base)
+            overall_confidence = 0.4 * ((direction_confidence + price_confidence) / 2) + 0.6 * historical_confidence
+        else:
+            overall_confidence = (direction_confidence + price_confidence) / 2
+        
+        # Ultra-Aggressive GRU Dominance Bonus - massive boost when GRU dominates
+        if gru_weight > lstm_weight:
+            dominance_ratio = gru_weight / (lstm_weight + 0.01)  # Avoid division by zero
+            gru_dominance_bonus = min(dominance_ratio * 0.35 * self.confidence_boost, 0.5)  # Up to 50% bonus
+            overall_confidence = min(overall_confidence + gru_dominance_bonus, 0.95)
+        
+        # Performance-based confidence boost for high-performing stocks
+        if ticker in self.stock_performance:
+            perf = self.stock_performance[ticker]
+            gru_r2, gru_dir = perf['R2'][1], perf['Direction_Acc'][1]
+            if gru_r2 > 0.9 and gru_dir > 0.7:  # High-performance GRU
+                performance_boost = 0.15
+                overall_confidence = min(overall_confidence + performance_boost, 0.95)
+        
+        # Smart Consistency bonus/penalty
+        if is_consistent:
+            if consistency_note == "GRU_DOMINANT_TRUSTED":
+                overall_confidence = min(overall_confidence * 1.35, 0.95)  # 35% bonus for trusted GRU
+            elif consistency_note == "DIRECTIONAL_AGREEMENT":
+                overall_confidence = min(overall_confidence * 1.3, 0.95)   # 30% bonus for directional agreement
+            else:
+                overall_confidence = min(overall_confidence * 1.25, 0.95)  # 25% bonus for normal consistency
+        else:
+            # Very reduced penalty when GRU is dominant (trust GRU heavily)
+            if gru_weight > 0.7:
+                overall_confidence = max(overall_confidence * 0.95, 0.2)  # Only 5% penalty for strong GRU
+            elif gru_weight > 0.6:
+                overall_confidence = max(overall_confidence * 0.9, 0.15)   # 10% penalty for moderate GRU
+            else:
+                overall_confidence = max(overall_confidence * 0.8, 0.1)    # 20% penalty for weak GRU
+        
+        # Enhanced minimum confidence floor based on GRU dominance and performance
+        if gru_weight > 0.7:
+            overall_confidence = max(overall_confidence, 0.35)  # Strong GRU minimum 35%
+        elif gru_weight > 0.6:
+            overall_confidence = max(overall_confidence, 0.3)   # Moderate GRU minimum 30%
+        elif gru_weight > 0.5:
+            overall_confidence = max(overall_confidence, 0.25)  # Weak GRU minimum 25%
+        
+        # Ultra-lenient risk assessment for GRU-biased predictions
+        perf_summary = self.get_performance_summary(ticker)
+        gru_dominance = gru_weight / (lstm_weight + gru_weight) if (lstm_weight + gru_weight) > 0 else 0.5
+        
+        # Ultra-lenient thresholds that favor GRU-dominant predictions
+        if not is_consistent and overall_confidence < 0.2 and gru_weight < 0.5:  # Only penalize weak non-GRU cases
+            risk_level = "🔴 HIGH_RISK"
+            warning = f"INCONSISTENT_LOW_CONFIDENCE - {perf_summary} [GRU:{gru_dominance:.1%}]"
+            action = "EXERCISE_EXTREME_CAUTION"
+        elif abs(price_change_pct) > 30:  # Very high volatility threshold
+            risk_level = "🟡 MEDIUM_RISK"
+            warning = f"EXTREME_VOLATILITY_PREDICTION - {perf_summary} [GRU_Biased:{gru_dominance:.1%}]"
+            action = "HIGH_RISK"
+        elif overall_confidence >= 0.45:  # Significantly lowered threshold
+            risk_level = "🟢 LOW_RISK"
+            warning = f"HIGH_CONFIDENCE - {perf_summary} [GRU_Preferred:{gru_dominance:.1%}] [{consistency_note}]"
+            action = "CONSIDER"
+        elif overall_confidence >= 0.25:  # Very generous medium risk threshold
+            risk_level = "🟡 MEDIUM_RISK"
+            warning = f"MODERATE_CONFIDENCE - {perf_summary} [GRU_Weighted:{gru_dominance:.1%}] [{consistency_note}]"
+            action = "CAUTION"
+        else:
+            risk_level = "🔴 HIGH_RISK"
+            warning = f"LOW_CONFIDENCE - {perf_summary} [GRU_Bias:{gru_dominance:.1%}] [{consistency_note}]"
+            action = "AVOID"
+        
+        return {
+            'predicted_price': ensemble_price,
+            'predicted_direction': ensemble_direction,
+            'direction_probability': ensemble_dir_prob,
+            'confidence': overall_confidence,
+            'price_change_pct': price_change_pct,
+            'is_consistent': is_consistent,
+            'consistency_note': consistency_note,
+            'lstm_weight': lstm_weight,
+            'gru_weight': gru_weight,
+            'gru_dominance': gru_dominance,
+            'risk_level': risk_level,
+            'warning': warning,
+            'action': action,
+            'performance_summary': perf_summary
+        }
+    
     def predict_meta(self, df):
         """Main Prediction Method using XGBoost Ensemble"""
         
@@ -2265,8 +2655,31 @@ class XGBoostEnsembleMetaLearner:
         
         return df
     
+    def update_performance_history(self, ticker, actual_price, lstm_pred, gru_pred, date):
+        """Update performance history for dynamic weighting"""
+        
+        if ticker not in self.performance_history:
+            self.performance_history[ticker] = pd.DataFrame()
+        
+        new_record = pd.DataFrame({
+            'Date': [date],
+            'Actual_Price': [actual_price],
+            'Predicted_Price_LSTM': [lstm_pred],
+            'Predicted_Price_GRU': [gru_pred]
+        })
+        
+        self.performance_history[ticker] = pd.concat([
+            self.performance_history[ticker], 
+            new_record
+        ], ignore_index=True)
+        
+        # Keep only recent records
+        max_history = self.window_size * 3
+        if len(self.performance_history[ticker]) > max_history:
+            self.performance_history[ticker] = self.performance_history[ticker].tail(max_history)
+    
     def get_stock_recommendations(self):
-        """Get stock recommendations based on XGBoost performance"""
+        """📈 Get stock recommendations based on GRU-biased performance"""
         recommendations = {}
         
         # Since XGBoost handles ensemble automatically, provide general recommendations
@@ -2305,13 +2718,6 @@ class XGBoostEnsembleMetaLearner:
     
     def validate_predictions(self, df):
         return 'XGB_Predicted_Price' in df.columns and df['XGB_Predicted_Price'].notna().any()
-    
-    # Legacy compatibility methods (do nothing)
-    def update_performance_history(self, ticker, actual_price, lstm_pred, gru_pred, date):
-        pass
-    
-    def prepare_data_for_model(self, df):
-        return df
 
 # Backward compatibility - use XGBoost as default
 DynamicEnsembleMetaLearner = XGBoostEnsembleMetaLearner
@@ -2319,6 +2725,7 @@ XGBoostMetaLearner = XGBoostEnsembleMetaLearner
 UpdatedXGBoostMetaLearner = XGBoostEnsembleMetaLearner
 EnhancedDynamicEnsembleMetaLearner = XGBoostEnsembleMetaLearner
 EnhancedGRUBiasedEnsembleMetaLearner = XGBoostEnsembleMetaLearner
+
 # ======================== ENHANCED PREDICTION SYSTEM ========================
 
 # โหลด configuration และตรวจสอบ environment
@@ -2368,10 +2775,10 @@ except Exception as e:
     exit()
 
 # ตั้งค่าตลาด    
-MODEL_LSTM_PATH = "../LSTM_model/best_hypertuned_model.keras"  # Optimal model from hyperparameter tuning
-MODEL_GRU_PATH = "../GRU_Model/best_hypertuned_model.keras"    # Optimal model from hyperparameter tuning
+MODEL_LSTM_PATH = "../LSTM_model/best_v6_plus_minimal_tuning_v2_final_model.keras"
+MODEL_GRU_PATH = "../GRU_Model/best_v6_plus_minimal_tuning_v2_final_model.keras"
 SEQ_LENGTH = 10
-RETRAIN_FREQUENCY = 3  # Optimal value from hyperparameter tuning
+RETRAIN_FREQUENCY = 5
 
 # Dynamic weight parameters
 WEIGHT_DECAY = 0.95
@@ -2641,8 +3048,8 @@ def verify_model_paths():
     """ตรวจสอบ path ของโมเดลก่อนใช้งาน"""
     import os
     
-    lstm_path = "../LSTM_model/best_hypertuned_model.keras"     # Optimal model from tuning
-    gru_path = "../GRU_Model/best_hypertuned_model.keras"       # Optimal model from tuning
+    lstm_path = "../LSTM_model/best_v6_plus_minimal_tuning_v2_final_model.keras"
+    gru_path = "../GRU_Model/best_v6_plus_minimal_tuning_v2_final_model.keras"
     scaler_path = "../LSTM_model/ticker_scalers.pkl"
     
     print("🔍 Verifying model paths...")
@@ -2675,508 +3082,16 @@ if not verify_model_paths():
     sys.exit(1)
 
 
-def check_last_retrain_date():
-    """
-    เช็ควันที่ retrain ล่าสุดและแสดงข้อมูล
-    """
-    print("\n📅 Checking last retrain dates...")
-    
-    retrain_files = [
-        ('last_retrain_model.txt', 'Model Retrain'),
-        ('last_retrain_walkforward.txt', 'Walk-Forward Validation'),
-        ('last_retrain_start.txt', 'Retrain Process Start')
-    ]
-    
-    for file_name, description in retrain_files:
-        try:
-            if os.path.exists(file_name):
-                with open(file_name, 'r', encoding='utf-8') as f:
-                    content = f.read().strip()
-                    first_line = content.split('\n')[0] if content else 'No data'
-                    print(f"   📄 {description}: {first_line}")
-                    
-                    # คำนวณวันที่ผ่านมา
-                    if 'Last' in first_line or 'Started' in first_line:
-                        try:
-                            date_str = first_line.split(': ')[1]
-                            last_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-                            days_since = (datetime.now() - last_date).days
-                            hours_since = (datetime.now() - last_date).total_seconds() / 3600
-                            
-                            if days_since > 0:
-                                print(f"      ⏰ {days_since} days ago ({hours_since:.1f} hours)")
-                            else:
-                                print(f"      ⏰ {hours_since:.1f} hours ago")
-                                
-                            # แจ้งเตือนถ้านานเกินไป
-                            if days_since > 7:
-                                print(f"      ⚠️ Warning: More than 7 days since last retrain!")
-                            elif days_since > 3:
-                                print(f"      💡 Info: Consider retraining soon")
-                                
-                        except (ValueError, IndexError) as e:
-                            print(f"      ❌ Cannot parse date: {e}")
-            else:
-                print(f"   ❌ {description}: File not found ({file_name})")
-                
-        except Exception as e:
-            print(f"   ❌ Error reading {file_name}: {e}")
-    
-    # เช็ค retrain logs directory
-    if os.path.exists('retrain_logs'):
-        log_files = [f for f in os.listdir('retrain_logs') if f.endswith('.csv')]
-        if log_files:
-            latest_log = max(log_files)
-            print(f"   📊 Latest retrain log: {latest_log}")
-        else:
-            print(f"   📊 No retrain logs found")
-    else:
-        print(f"   📊 Retrain logs directory not found")
-    
-    print("")
-
-def should_retrain_models():
-    """
-    ตรวจสอบจากไฟล์วันที่ว่าควร retrain หรือไม่
-    Returns: True ถ้าควร retrain, False ถ้าไม่ต้อง
-    """
-    try:
-        if not os.path.exists('last_retrain_model.txt'):
-            print("📅 ไม่พบไฟล์ last_retrain_model.txt -> ต้อง retrain")
-            return True
-            
-        with open('last_retrain_model.txt', 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-            first_line = content.split('\n')[0] if content else ''
-            
-            if 'Last Retrain:' in first_line:
-                date_str = first_line.split(': ')[1]
-                last_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-                days_since = (datetime.now() - last_date).days
-                
-                print(f"📅 Last retrain: {days_since} days ago")
-                
-                if days_since >= RETRAIN_FREQUENCY:
-                    print(f"🔄 ถึงเวลา retrain แล้ว (>= {RETRAIN_FREQUENCY} days)")
-                    return True
-                else:
-                    print(f"✅ ยังไม่ถึงเวลา retrain (< {RETRAIN_FREQUENCY} days)")
-                    return False
-            else:
-                print("📅 ไม่พบวันที่ใน last_retrain_model.txt -> ต้อง retrain")
-                return True
-                
-    except Exception as e:
-        print(f"📅 Error checking retrain date: {e} -> ต้อง retrain")
-        return True
-
 if __name__ == "__main__":
     print("\n🚀 เริ่มต้นระบบทำนายหุ้นแบบ Walk-Forward Validation Only")
-    print("🔧 Using Walk-Forward Validation with Mini-Retrain")  
-    print(f"⚡ ระบบจะ retrain ทุกๆ {RETRAIN_FREQUENCY} วันระหว่างการทำนาย (Optimal from hyperparameter tuning)")
-    print("🎯 Using optimal parameters:")
-    print("   - LSTM: chunk_size=100, units=48-24, retrain_freq=3, lr=1.70e-04")
-    print("   - GRU:  chunk_size=100, units=48-24, retrain_freq=3, lr=1.20e-04")
-    
-    # เช็ควันที่ retrain ล่าสุด
-    check_last_retrain_date()
-    
-    # ตรวจสอบว่าต้อง retrain หรือไม่
-    need_retrain = should_retrain_models()
-    
-    if not need_retrain:
-        print("\n🎯 ไม่ต้อง retrain - ใช้โมเดลที่มีอยู่เพื่อทำนายเท่านั้น")
-        print("✅ จะรันในโหมด Prediction Only")
-        
-        # โหลดโมเดลเพื่อทำนายเท่านั้น
-        MODEL_LSTM_PATH = "../LSTM_model/best_hypertuned_model.keras"
-        MODEL_GRU_PATH = "../GRU_Model/best_hypertuned_model.keras"
-        
-        if not verify_model_paths():
-            print("❌ Model path verification failed!")
-            sys.exit(1)
-            
-        # รันโหมด prediction only
-        print("🚀 เรียกใช้ prediction system...")
-        
-        try:
-            # สร้าง instance ของ WalkForwardMiniRetrainManager
-            manager = WalkForwardMiniRetrainManager(
-                lstm_model_path=MODEL_LSTM_PATH,
-                gru_model_path=MODEL_GRU_PATH,
-                retrain_frequency=RETRAIN_FREQUENCY
-            )
-            
-            # โหลดโมเดลสำหรับ prediction เท่านั้น (ไม่ compile)
-            model_lstm_pred = manager.load_models_for_prediction(model_path=MODEL_LSTM_PATH, compile_model=False)
-            model_gru_pred = manager.load_models_for_prediction(model_path=MODEL_GRU_PATH, compile_model=False)
-            
-            if model_lstm_pred is None or model_gru_pred is None:
-                print("❌ ไม่สามารถโหลดโมเดลได้")
-                sys.exit(1)
-                
-            print("✅ โหลดโมเดลสำหรับ prediction สำเร็จ!")
-            
-            # โหลด XGBoost Meta-Learner
-            print("🤖 กำลังโหลด XGBoost Ensemble...")
-            meta_learner = XGBoostEnsembleMetaLearner()
-            
-            if not meta_learner.is_model_available():
-                print("⚠️ XGBoost model ไม่พร้อมใช้งาน - จะใช้ fallback")
-            else:
-                print("✅ XGBoost Ensemble พร้อมใช้งาน!")
-            
-            # โหลดข้อมูลและ scalers (ใช้โค้ดจากส่วนหลัก)
-            print("📊 กำลังโหลดข้อมูลล่าสุด...")
-            
-            # โหลดข้อมูลดิบ
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.env')
-            load_dotenv(path)
-            
-            # ใช้ฟังก์ชั่นที่มีอยู่แล้ว
-            DB_CONNECTION = f"mysql+mysqlconnector://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}/{os.getenv('DB_NAME')}"
-            engine = sqlalchemy.create_engine(DB_CONNECTION)
-            
-            # ใช้ fetch_latest_data() ที่มีอยู่แล้ว ซึ่งจะคืนค่า processed data
-            df_processed = fetch_latest_data()
-            
-            if df_processed.empty:
-                print("❌ ไม่มีข้อมูลสำหรับประมวลผล")
-                sys.exit(1)
-                
-            print(f"📊 ได้รับข้อมูล: {len(df_processed)} แถว จาก {len(df_processed['StockSymbol'].unique())} หุ้น")
-            
-            # ใช้ feature columns ที่กำหนดไว้แล้ว
-            training_features = ['Open', 'High', 'Low', 'Close', 'Volume', 'P_BV_Ratio', 'Sentiment', 
-                               'Change_Percent', 'TotalRevenue', 'QoQGrowth', 'EPS', 'ROE', 
-                               'NetProfitMargin', 'DebtToEquity', 'PERatio', 'Dividend_Yield', 
-                               'positive_news', 'negative_news', 'neutral_news']
-            
-            # โหลด scalers ที่มีอยู่แล้ว
-            try:
-                ticker_scalers = joblib.load("../LSTM_model/ticker_scalers.pkl")
-                print(f"✅ โหลด scalers สำเร็จ: {len(ticker_scalers)} tickers")
-                print(f"🔍 Scaler keys: {list(ticker_scalers.keys())}")
-            except Exception as e:
-                print(f"❌ ไม่สามารถโหลด scalers: {e}")
-                sys.exit(1)
-            
-            # เตรียม encoders และ Ticker_ID
-            ticker_encoder = LabelEncoder()
-            ticker_encoder.fit(df_processed["StockSymbol"])
-            
-            # เพิ่ม Ticker_ID ใน dataframe
-            if 'Ticker_ID' not in df_processed.columns:
-                df_processed['Ticker_ID'] = ticker_encoder.transform(df_processed["StockSymbol"])
-                print(f"✅ เพิ่ม Ticker_ID: {dict(zip(df_processed['StockSymbol'].unique(), df_processed.groupby('StockSymbol')['Ticker_ID'].first()))}")
-            
-            us_stock = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
-            thai_stock = ['ADVANC', 'TRUE', 'DITTO', 'DIF', 'INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
-            
-            market_encoder = LabelEncoder()
-            market_encoder.fit(['US', 'TH', 'OTHER'])
-            
-            print(f"✅ โหลดข้อมูลสำเร็จ: {len(df_processed)} records, {len(ticker_scalers)} scalers")
-            
-            # ใช้ตัวแปรที่ถูกต้อง
-            df = df_processed
-            feature_columns = training_features
-            valid_scalers = ticker_scalers
-            
-            # ทำ prediction โดยใช้ LSTM และ GRU
-            print("🔮 กำลังทำ prediction ด้วย LSTM และ GRU...")
-            print(f"⚠️ โมเดลต้องการ sequence length = 10, features = 36")
-            print(f"   เตรียมข้อมูล sequence สำหรับแต่ละ ticker...")
-            
-            # เตรียมข้อมูล sequence (10 timesteps) สำหรับแต่ละ ticker
-            seq_length = 10
-            
-            prediction_map = {}
-            
-            print(f"🔍 Data info:")
-            print(f"   📊 Total data shape: {df.shape}")
-            print(f"   🏷️ Available columns: {len(df.columns)} columns")
-            print(f"   📋 Tickers: {df['StockSymbol'].unique()}")
-            print(f"   🔧 Feature columns: {len(feature_columns)} features")
-            print(f"   ⚖️ Valid scalers: {len(valid_scalers)} tickers")
-            
-            # วนลูปแต่ละ ticker
-            for ticker in df['StockSymbol'].unique():
-                print(f"\n🔍 Processing {ticker}...")
-                
-                # ดึงข้อมูลของ ticker นี้
-                ticker_data = df[df['StockSymbol'] == ticker].copy()
-                ticker_data = ticker_data.sort_values('Date').reset_index(drop=True)
-                
-                if len(ticker_data) < seq_length:
-                    print(f"   ❌ Not enough data: {len(ticker_data)} < {seq_length}")
-                    continue
-                
-                # ใช้ Ticker_ID เป็น key (เนื่องจาก scaler keys เป็นตัวเลข)
-                ticker_id = ticker_data['Ticker_ID'].iloc[0]
-                
-                if ticker_id in valid_scalers:
-                    scaler_key = ticker_id
-                    print(f"   ✅ Found scaler with Ticker_ID: {ticker_id}")
-                else:
-                    print(f"   ❌ No scaler for {ticker} (Ticker_ID: {ticker_id})")
-                    print(f"       Available keys: {list(valid_scalers.keys())[:5]}...")
-                    continue
-                    
-                try:
-                    # ใช้ Market_ID แทน Market string
-                    us_stock = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
-                    thai_stock = ['ADVANC', 'TRUE', 'DITTO', 'DIF', 'INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
-                    
-                    if ticker in us_stock:
-                        market_id = 0  # US
-                    elif ticker in thai_stock:
-                        market_id = 1  # TH  
-                    else:
-                        market_id = 2  # OTHER
-                    
-                    print(f"   🌍 Market ID: {market_id} ({'US' if market_id==0 else 'TH' if market_id==1 else 'OTHER'})")
-                    print(f"   📊 Available data: {len(ticker_data)} rows")
-                    
-                    # ใช้ข้อมูล 10 วันล่าสุด
-                    recent_data = ticker_data.tail(seq_length).copy()
-                    
-                    # ตรวจสอบ available columns
-                    all_cols = list(recent_data.columns)
-                    expected_features = 36  # โมเดลต้องการ 36 features
-                    
-                    print(f"   🔧 Available columns: {len(all_cols)}")
-                    print(f"   ⚠️ Model expects: {expected_features} features")
-                    
-                    # สร้าง feature matrix ขนาด (seq_length, expected_features)
-                    X_sequence = []
-                    
-                    for i in range(len(recent_data)):
-                        row = recent_data.iloc[i]
-                        row_features = []
-                        
-                        # ใช้ feature columns ที่มี + padding
-                        for col in feature_columns:
-                            if col in row and not pd.isna(row[col]):
-                                row_features.append(float(row[col]))
-                            else:
-                                row_features.append(0.0)
-                        
-                        # เพิ่ม features ให้ครบ 36 (padding ด้วย 0)
-                        while len(row_features) < expected_features:
-                            row_features.append(0.0)
-                        
-                        # ตัด features ถ้าเกิน 36
-                        row_features = row_features[:expected_features]
-                        
-                        X_sequence.append(row_features)
-                    
-                    X_features = np.array(X_sequence, dtype=np.float32).reshape(1, seq_length, expected_features)
-                    
-                    # Ticker และ Market ต้องเป็น sequence ด้วย (ซ้ำทุก timestep)
-                    ticker_id_encoded = ticker_encoder.transform([ticker])[0]  # ได้ตัวเลข
-                    X_ticker = np.full((1, seq_length), ticker_id_encoded, dtype=np.int32)  # Shape (1, 10)
-                    X_market = np.full((1, seq_length), market_id, dtype=np.int32)  # Shape (1, 10)
-                    
-                    print(f"   🔧 Input shapes: features={X_features.shape}, ticker={X_ticker.shape}, market={X_market.shape}")
-                    print(f"   ✅ All shapes ready for model (sequence format)!")
-                    
-                    # LSTM prediction
-                    lstm_pred = model_lstm_pred.predict([X_features, X_ticker, X_market], verbose=0)
-                    print(f"   🔍 LSTM prediction type: {type(lstm_pred)}, length: {len(lstm_pred)}")
-                    print(f"       Shapes: {[p.shape for p in lstm_pred]}")
-                    
-                    # GRU prediction
-                    gru_pred = model_gru_pred.predict([X_features, X_ticker, X_market], verbose=0)
-                    print(f"   🔍 GRU prediction type: {type(gru_pred)}, length: {len(gru_pred)}")
-                    print(f"       Shapes: {[p.shape for p in gru_pred]}")
-                    
-                    # ตรวจสอบ scaler structure
-                    scaler_data = valid_scalers[scaler_key]
-                    print(f"   🔍 Scaler type: {type(scaler_data)}")
-                    
-                    if isinstance(scaler_data, dict):
-                        # Scaler เป็น dict ที่มี price_scaler และ feature_scaler
-                        if 'price_scaler' in scaler_data:
-                            scaler_p = scaler_data['price_scaler']
-                            print(f"   ✅ Found price_scaler: {type(scaler_p)}")
-                        else:
-                            print(f"   ⚠️ No price_scaler in dict, using feature_scaler")
-                            scaler_p = scaler_data.get('feature_scaler', scaler_data)
-                    elif isinstance(scaler_data, tuple) and len(scaler_data) == 2:
-                        scaler_p, scaler_d = scaler_data
-                        print(f"   ✅ Found 2 scalers: price={type(scaler_p)}, direction={type(scaler_d)}")
-                    else:
-                        print(f"   ⚠️ Unexpected scaler structure: {scaler_data}")
-                        scaler_p = scaler_data
-                    
-                    # ใช้ output ที่ 0 สำหรับ price และ output ที่ 1 สำหรับ direction
-                    lstm_price = scaler_p.inverse_transform(lstm_pred[0].reshape(1, -1))[0, 0]
-                    lstm_direction = lstm_pred[1][0, 0]  # direction ไม่ต้อง inverse transform
-                    
-                    gru_price = scaler_p.inverse_transform(gru_pred[0].reshape(1, -1))[0, 0]
-                    gru_direction = gru_pred[1][0, 0]  # direction ไม่ต้อง inverse transform
-                    
-                    prediction_map[ticker] = {
-                        'PredictionClose_LSTM': lstm_price,
-                        'PredictionTrend_LSTM': lstm_direction,
-                        'PredictionClose_GRU': gru_price,
-                        'PredictionTrend_GRU': gru_direction
-                    }
-                    
-                    # คำนวณทิศทางเป็น text
-                    lstm_dir_text = "📈UP" if lstm_direction > 0.5 else "📉DOWN"
-                    gru_dir_text = "📈UP" if gru_direction > 0.5 else "📉DOWN"
-                    
-                    print(f"   ✅ {ticker:>6}: LSTM=${lstm_price:>7.2f} {lstm_dir_text} ({lstm_direction:.3f}) | GRU=${gru_price:>7.2f} {gru_dir_text} ({gru_direction:.3f})")
-                    
-                except Exception as e:
-                    print(f"   ❌ Error predicting {ticker}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    continue
-            
-            print(f"\n✅ Individual Model Predictions Complete: {len(prediction_map)} tickers")
-            print("=" * 70)
-            
-            # สรุป LSTM vs GRU predictions
-            if prediction_map:
-                lstm_ups = sum(1 for v in prediction_map.values() if v['PredictionTrend_LSTM'] > 0.5)
-                gru_ups = sum(1 for v in prediction_map.values() if v['PredictionTrend_GRU'] > 0.5)
-                total = len(prediction_map)
-                
-                print(f"📊 Direction Summary:")
-                print(f"   LSTM: 📈 {lstm_ups} UP, 📉 {total-lstm_ups} DOWN")
-                print(f"   GRU:  📈 {gru_ups} UP, 📉 {total-gru_ups} DOWN")
-                print("=" * 70)
-            
-            if len(prediction_map) == 0:
-                print("❌ ไม่มี predictions สำหรับ XGBoost")
-                sys.exit(1)
-            
-            # เพิ่ม predictions เข้าไปใน dataframe พร้อม XGBoost ensemble
-            print("🔗 กำลังรวม predictions ด้วย XGBoost Ensemble...")
-            
-            # เตรียม latest_data สำหรับ XGBoost (ข้อมูลล่าสุดของแต่ละ ticker)
-            latest_data = df.groupby('StockSymbol').tail(1).reset_index(drop=True)
-            latest_data_with_predictions = latest_data.copy()
-            
-            # เพิ่ม predictions เข้าไปใน dataframe ด้วย column names ที่ XGBoost ต้องการ
-            latest_data_with_predictions['Predicted_Price_LSTM'] = latest_data_with_predictions['StockSymbol'].map(
-                lambda x: prediction_map.get(x, {}).get('PredictionClose_LSTM', np.nan)
-            )
-            latest_data_with_predictions['Predicted_Price_GRU'] = latest_data_with_predictions['StockSymbol'].map(
-                lambda x: prediction_map.get(x, {}).get('PredictionClose_GRU', np.nan)
-            )
-            latest_data_with_predictions['Predicted_Dir_LSTM'] = latest_data_with_predictions['StockSymbol'].map(
-                lambda x: prediction_map.get(x, {}).get('PredictionTrend_LSTM', np.nan)
-            )
-            latest_data_with_predictions['Predicted_Dir_GRU'] = latest_data_with_predictions['StockSymbol'].map(
-                lambda x: prediction_map.get(x, {}).get('PredictionTrend_GRU', np.nan)
-            )
-            
-            # Filter เฉพาะ rows ที่มี predictions ครบ
-            valid_predictions = latest_data_with_predictions.dropna(subset=[
-                'Predicted_Price_LSTM', 'Predicted_Price_GRU', 
-                'Predicted_Dir_LSTM', 'Predicted_Dir_GRU'
-            ])
-            
-            if len(valid_predictions) == 0:
-                print("❌ ไม่มี valid predictions สำหรับ XGBoost")
-                sys.exit(1)
-            
-            print(f"📊 Valid predictions สำหรับ XGBoost: {len(valid_predictions)} tickers")
-            
-            # ใช้ XGBoost Ensemble
-            if meta_learner.is_model_available():
-                print("🎯 กำลังใช้ XGBoost Ensemble...")
-                final_predictions = meta_learner.predict_meta(valid_predictions)
-                
-                if final_predictions is not None and len(final_predictions) > 0:
-                    print("✅ XGBoost Ensemble Predictions สำเร็จ!")
-                    print(f"📈 Final predictions: {len(final_predictions)} tickers")
-                    
-                    # แสดงผลลัพธ์แบบละเอียด
-                    print("\n📈 Detailed Model Predictions (All Tickers):")
-                    print("=" * 95)
-                    print(f"{'Ticker':<8} {'LSTM':<12} {'GRU':<12} {'XGBoost':<12} {'Direction':<12} {'Confidence':<10}")
-                    print("-" * 95)
-                    
-                    for _, row in final_predictions.iterrows():
-                        ticker = row.get('Ticker', row.get('StockSymbol', 'Unknown'))
-                        
-                        # ราคาจากแต่ละโมเดล
-                        lstm_price = row.get('Predicted_Price_LSTM', 0)
-                        gru_price = row.get('Predicted_Price_GRU', 0)
-                        xgb_price = row.get('XGB_Predicted_Price', row.get('Predicted_Price', 0))
-                        
-                        # ทิศทางและ confidence
-                        direction = row.get('XGB_Predicted_Direction', row.get('Predicted_Direction', 0))
-                        confidence = row.get('Confidence', 0)
-                        
-                        # ถ้าไม่มี confidence ให้คำนวณจาก direction probability
-                        if confidence == 0:
-                            if direction > 0.5:
-                                confidence = direction  # ถ้าเป็น UP ใช้ค่า direction เป็น confidence
-                            else:
-                                confidence = 1 - direction  # ถ้าเป็น DOWN ใช้ 1-direction เป็น confidence
-                        
-                        # แสดงผล
-                        dir_text = f"{'📈UP' if direction > 0.5 else '📉DOWN'}"
-                        print(f"{ticker:<8} ${lstm_price:<11.2f} ${gru_price:<11.2f} ${xgb_price:<11.2f} {dir_text:<12} {confidence:<9.3f}")
-                    
-                    print("=" * 95)
-                    
-                    # สรุปสถิติ
-                    total_tickers = len(final_predictions)
-                    up_count = len(final_predictions[final_predictions.get('XGB_Predicted_Direction', final_predictions.get('Predicted_Direction', 0)) > 0.5])
-                    down_count = total_tickers - up_count
-                    
-                    # คำนวณ average confidence อย่างปลอดภัย
-                    if 'Confidence' in final_predictions.columns:
-                        avg_confidence = final_predictions['Confidence'].mean()
-                    else:
-                        # ถ้าไม่มี column Confidence ให้คำนวณจาก direction probability
-                        if 'XGB_Predicted_Direction' in final_predictions.columns:
-                            directions = final_predictions['XGB_Predicted_Direction'].values
-                            avg_confidence = abs(directions - 0.5).mean() * 2  # แปลงเป็น confidence 0-1
-                        else:
-                            avg_confidence = 0.0
-                    
-                    print(f"📊 Summary: {total_tickers} tickers | 📈 UP: {up_count} | 📉 DOWN: {down_count} | Avg Confidence: {avg_confidence:.3f}")
-                    
-                    # แสดงหุ้นที่มี confidence สูง
-                    if 'Confidence' in final_predictions.columns:
-                        high_conf = final_predictions[final_predictions['Confidence'] > 0.7]
-                        if not high_conf.empty:
-                            print(f"\n🎯 High Confidence Predictions (>70%):")
-                            for _, row in high_conf.iterrows():
-                                ticker = row.get('Ticker', row.get('StockSymbol', 'Unknown'))
-                                price = row.get('XGB_Predicted_Price', row.get('Predicted_Price', 0))
-                                direction = row.get('XGB_Predicted_Direction', row.get('Predicted_Direction', 0))
-                                confidence = row.get('Confidence', 0)
-                                dir_text = f"{'📈UP' if direction > 0.5 else '📉DOWN'}"
-                                print(f"   {ticker}: ${price:.2f} {dir_text} (Confidence: {confidence:.3f})")
-                else:
-                    print("⚠️ XGBoost ไม่สามารถทำ prediction ได้")
-            else:
-                print("⚠️ ใช้ fallback predictions (ไม่มี XGBoost)")
-            
-            print("✅ Prediction completed in prediction-only mode with XGBoost Ensemble!")
-            
-        except Exception as e:
-            print(f"❌ Error in prediction mode: {e}")
-            sys.exit(1)
-            
-        sys.exit(0)
-
-    print(f"\n🔄 ต้อง retrain โมเดล - เริ่มต้น Walk-Forward Validation")
+    print("🔧 Using Walk-Forward Validation with Mini-Retrain")
+    print("⚡ ระบบจะ retrain ทุกๆ 5 วันระหว่างการทำนาย")
 
     # โหลดโมเดล LSTM และ GRU
     print("\n🤖 กำลังโหลดโมเดล LSTM และ GRU...")
 
-    MODEL_LSTM_PATH = "../LSTM_model/best_hypertuned_model.keras"
-    MODEL_GRU_PATH = "../GRU_Model/best_hypertuned_model.keras"
+    MODEL_LSTM_PATH = "../LSTM_model/best_v6_plus_minimal_tuning_v2_final_model.keras"
+    MODEL_GRU_PATH = "../GRU_Model/best_v6_plus_minimal_tuning_v2_final_model.keras"
 
     if not verify_model_paths():
         print("❌ Model path verification failed!")
@@ -3240,16 +3155,24 @@ if __name__ == "__main__":
 
     # ======== TRAINING-COMPATIBLE SCALERS ========
     print("\n🔧 เริ่มต้นระบบ Training-Compatible Scalers...")
-    print("🔍 DEBUG: กำลังเรียก load_training_scalers()...")
     ticker_scalers, scalers_loaded = load_training_scalers("../LSTM_model/ticker_scalers.pkl")
-    print(f"🔍 DEBUG: scalers_loaded = {scalers_loaded}")
     
     if not scalers_loaded:
-        print("❌ ไม่สามารถโหลด trained scalers ได้!")
-        print("💡 กรุณาเทรนโมเดลใหม่ก่อนใช้งาน:")
-        print("   cd LSTM_model && python LSTM_model.py")
-        print("   cd GRU_Model && python GRU_model.py")
-        sys.exit(1)
+        print("💡 สร้าง scalers ใหม่...")
+        ticker_encoder_temp = LabelEncoder()
+        df_processed["Ticker_ID"] = ticker_encoder_temp.fit_transform(df_processed["StockSymbol"])
+        
+        us_stock = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
+        thai_stock = ['ADVANC', 'TRUE', 'DITTO', 'DIF', 'INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
+        df_processed['Market_ID'] = df_processed['StockSymbol'].apply(
+            lambda x: 0 if x in us_stock else 1 if x in thai_stock else 2
+        )
+        
+        ticker_scalers = create_unified_ticker_scalers(df_processed, training_features)
+        
+        if len(ticker_scalers) == 0:
+            print("❌ ไม่สามารถสร้าง scalers ได้")
+            sys.exit()
 
     # เตรียม prediction dataframe
     prediction_df = df_processed.copy()
@@ -3291,15 +3214,15 @@ if __name__ == "__main__":
     try:
         # เทรนโมเดลหลักทั้งคู่พร้อมกัน (LSTM และ GRU) พร้อม chunk_size ที่แตกต่างกัน
         print(f"🔧 กำลังรัน Walk-Forward Validation พร้อม Mini-Retrain สำหรับทั้ง LSTM และ GRU")
-        print(f"   📦 LSTM chunk_size: 100, GRU chunk_size: 100 (Optimal from hyperparameter tuning)")
+        print(f"   📦 LSTM chunk_size: 90, GRU chunk_size: 200")
         
         # เก็บผลลัพธ์จากทั้งสองโมเดล
         all_walk_predictions = []
         all_walk_metrics = []
         
         models_to_train = [
-            ("LSTM", model_lstm_retrain, 100),   # LSTM ใช้ optimal chunk_size = 100
-            ("GRU", model_gru_retrain, 100)      # GRU ใช้ optimal chunk_size = 100
+            ("LSTM", model_lstm_retrain, 90),   # LSTM ใช้ chunk_size = 90 และโมเดลที่ compile แล้ว
+            ("GRU", model_gru_retrain, 200)     # GRU ใช้ chunk_size = 200 และโมเดลที่ compile แล้ว
         ]
         
         for model_name, model, chunk_size in models_to_train:
@@ -3438,13 +3361,14 @@ if __name__ == "__main__":
                               f"Change: {stock['Ensemble_Change_Pct']:+.2f}%, "
                               f"Confidence: {stock['Confidence']:.3f})")
                 
-                # # บันทึกลงฐานข้อมูล
-                # print(f"\n💾 บันทึกผลการทำนายลงฐานข้อมูล...")
-                # save_success = save_predictions_simple(future_predictions)
-                # if save_success:
-                #     print("✅ บันทึกลงฐานข้อมูลสำเร็จ")
-                # else:
-                #     print("⚠️ บันทึกลงฐานข้อมูลไม่สำเร็จ")
+                # บันทึกลงฐานข้อมูล
+                print(f"\n💾 บันทึกผลการทำนายลงฐานข้อมูล...")
+                save_success = save_predictions_simple(future_predictions)
+                
+                if save_success:
+                    print("✅ บันทึกลงฐานข้อมูลสำเร็จ")
+                else:
+                    print("⚠️ บันทึกลงฐานข้อมูลไม่สำเร็จ")
                 
                 # ======== 🧠 XGBoost META-LEARNER ENSEMBLE ========
                 print(f"\n🧠 เริ่มต้น Enhanced XGBoost Meta-Learner...")
@@ -3462,26 +3386,19 @@ if __name__ == "__main__":
                         'PredictionTrend_GRU': pred['GRU_Direction']
                     }
                 
-                # เพิ่ม predictions เข้าไปใน dataframe ด้วย column names ที่ XGBoost ต้องการ
-                latest_data_with_predictions['Predicted_Price_LSTM'] = latest_data_with_predictions['StockSymbol'].map(
-                    lambda x: prediction_map.get(x, {}).get('PredictionClose_LSTM', np.nan)
-                )
-                latest_data_with_predictions['Predicted_Price_GRU'] = latest_data_with_predictions['StockSymbol'].map(
-                    lambda x: prediction_map.get(x, {}).get('PredictionClose_GRU', np.nan)
-                )
-                latest_data_with_predictions['Predicted_Dir_LSTM'] = latest_data_with_predictions['StockSymbol'].map(
-                    lambda x: prediction_map.get(x, {}).get('PredictionTrend_LSTM', np.nan)
-                )
-                latest_data_with_predictions['Predicted_Dir_GRU'] = latest_data_with_predictions['StockSymbol'].map(
-                    lambda x: prediction_map.get(x, {}).get('PredictionTrend_GRU', np.nan)
-                )
+                # เพิ่ม predictions เข้าไปใน dataframe
+                for col in ['PredictionClose_LSTM', 'PredictionTrend_LSTM', 
+                           'PredictionClose_GRU', 'PredictionTrend_GRU']:
+                    latest_data_with_predictions[col] = latest_data_with_predictions['StockSymbol'].map(
+                        lambda x: prediction_map.get(x, {}).get(col, np.nan)
+                    )
                 
                 # กรองเฉพาะข้อมูลล่าสุดที่มี predictions
                 latest_date = latest_data_with_predictions['Date'].max()
                 latest_data_filtered = latest_data_with_predictions[
                     (latest_data_with_predictions['Date'] == latest_date) &
-                    (latest_data_with_predictions['Predicted_Price_LSTM'].notna()) &
-                    (latest_data_with_predictions['Predicted_Price_GRU'].notna())
+                    (latest_data_with_predictions['PredictionClose_LSTM'].notna()) &
+                    (latest_data_with_predictions['PredictionClose_GRU'].notna())
                 ].copy()
                 
                 if not latest_data_filtered.empty:

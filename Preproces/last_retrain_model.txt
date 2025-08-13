@@ -1,1 +1,5 @@
-2025-07-28
+Last Retrain: 2025-08-08 20:20:44
+LSTM Retrain Frequency: 3 days
+GRU Retrain Frequency: 3 days
+Valid Scalers: 19 tickers
+Meta-Learner Status: XGBoost_Ensemble_v1.0_READY
