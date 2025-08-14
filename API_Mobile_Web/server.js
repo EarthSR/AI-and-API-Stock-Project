@@ -2973,6 +2973,273 @@ app.delete("/api/admin/users/:userId", verifyToken, verifyAdmin, async (req, res
     }
 });
 
+// =====================================================================================================
+//  ADMIN - USER DETAIL SNAPSHOT (user + portfolios + holdings)
+//  GET /api/admin/users/:userId/portfolio-snapshot
+//  - อ่านพอร์ตจาก papertradeportfolio
+//  - อ่าน holdings จาก paperportfolioholdings
+//  - ถ้า holdings ว่าง => fallback คำนวณจาก papertrade (buy=+, sell=-, AvgCost=ถ่วงน้ำหนักเฉพาะ buy)
+//  - MarketValue = Qty * AvgCost (ถ้ามีราคาจริงค่อย JOIN ทีหลัง)
+// =====================================================================================================
+app.get("/api/admin/users/:userId/portfolio-snapshot", verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const userId = parseInt(req.params.userId, 10);
+    if (!Number.isInteger(userId)) return res.status(400).json({ error: "Invalid userId" });
+
+    // 1) user
+    const [uRows] = await db.query(
+      "SELECT UserID, Username, Email, Role, Status FROM `user` WHERE UserID = ?",
+      [userId]
+    );
+    if (uRows.length === 0) return res.status(404).json({ error: "User not found" });
+    const user = uRows[0];
+
+    // 2) portfolios
+    const [pRows] = await db.query(
+      `SELECT PaperPortfolioID, Balance, UserID, NOW() AS CreatedAt
+       FROM trademine.papertradeportfolio
+       WHERE UserID = ?
+       ORDER BY PaperPortfolioID DESC`,
+      [userId]
+    );
+
+    const portfolios = [];
+    for (const p of pRows) {
+      // 3) holdings จากตารางสรุป
+      const [hSumRows] = await db.query(
+        `SELECT 
+           PaperHoldingID AS HoldingID,
+           StockSymbol,
+           Quantity,
+           BuyPrice AS AvgCost,
+           NOW() AS UpdatedAt
+         FROM trademine.paperportfolioholdings
+         WHERE PaperPortfolioID = ?
+         ORDER BY StockSymbol`,
+        [p.PaperPortfolioID]
+      );
+
+      let holdings = hSumRows.map(h => ({
+        HoldingID: h.HoldingID,
+        StockSymbol: h.StockSymbol,
+        Quantity: Number(h.Quantity || 0),
+        AvgCost: Number(h.AvgCost || 0),
+        MarketValue: Number(h.Quantity || 0) * Number(h.AvgCost || 0),
+        UpdatedAt: h.UpdatedAt
+      }));
+
+      // 4) ถ้าไม่มีใน holdings summary => คำนวณจาก papertrade
+      if (holdings.length === 0) {
+        const [calcRows] = await db.query(
+          `SELECT 
+             StockSymbol,
+             SUM(CASE WHEN TradeType='buy'  THEN Quantity ELSE -Quantity END) AS Quantity,
+             CASE 
+               WHEN SUM(CASE WHEN TradeType='buy' THEN Quantity ELSE 0 END) = 0 THEN 0
+               ELSE ROUND(
+                 SUM(CASE WHEN TradeType='buy' THEN Quantity * Price ELSE 0 END) /
+                 NULLIF(SUM(CASE WHEN TradeType='buy' THEN Quantity ELSE 0 END), 0)
+               , 4)
+             END AS AvgCost,
+             MAX(TradeDate) AS UpdatedAt
+           FROM trademine.papertrade
+           WHERE PaperPortfolioID = ?
+           GROUP BY StockSymbol
+           HAVING Quantity IS NOT NULL AND Quantity <> 0
+           ORDER BY StockSymbol`,
+          [p.PaperPortfolioID]
+        );
+
+        holdings = calcRows.map((r, idx) => ({
+          HoldingID: `${p.PaperPortfolioID}-${idx + 1}`,
+          StockSymbol: r.StockSymbol,
+          Quantity: Number(r.Quantity || 0),
+          AvgCost: Number(r.AvgCost || 0),
+          MarketValue: Number(r.Quantity || 0) * Number(r.AvgCost || 0),
+          UpdatedAt: r.UpdatedAt
+        }));
+      }
+
+      portfolios.push({
+        PortfolioID: p.PaperPortfolioID,
+        Name: `Paper Portfolio #${p.PaperPortfolioID}`,
+        Type: "paper",
+        CashBalance: Number(p.Balance || 0),
+        CreatedAt: p.CreatedAt,
+        Holdings: holdings
+      });
+    }
+
+    return res.status(200).json({
+      message: "Successfully retrieved portfolio snapshot",
+      data: {
+        UserID: user.UserID,
+        Username: user.Username,
+        Email: user.Email,
+        Role: user.Role,
+        Status: user.Status,
+        Portfolios: portfolios
+      }
+    });
+  } catch (err) {
+    console.error("GET /api/admin/users/:userId/portfolio-snapshot error:", err);
+    return res.status(500).json({ error: "Database error while fetching portfolio snapshot" });
+  }
+});
+
+
+// =====================================================================================================
+//  ADMIN - USER PORTFOLIOS (ย่อ)
+//  GET /api/admin/users/:userId/portfolios
+// =====================================================================================================
+app.get("/api/admin/users/:userId/portfolios", verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const userId = parseInt(req.params.userId, 10);
+    if (!Number.isInteger(userId)) return res.status(400).json({ error: "Invalid userId" });
+
+    const [rows] = await db.query(
+      `SELECT 
+         p.PaperPortfolioID   AS PortfolioID,
+         p.Balance            AS CashBalance,
+         p.UserID,
+         NOW()                AS CreatedAt,
+         COALESCE(hc.holding_count, 0) AS holding_count,
+         COALESCE(hc.quantity_total, 0) AS quantity_total
+       FROM trademine.papertradeportfolio p
+       LEFT JOIN (
+         SELECT PaperPortfolioID,
+                COUNT(*) AS holding_count,
+                SUM(Quantity) AS quantity_total
+         FROM trademine.paperportfolioholdings
+         GROUP BY PaperPortfolioID
+       ) hc ON hc.PaperPortfolioID = p.PaperPortfolioID
+       WHERE p.UserID = ?
+       ORDER BY p.PaperPortfolioID DESC`,
+      [userId]
+    );
+
+    return res.status(200).json({ message: "OK", data: rows });
+  } catch (err) {
+    console.error("GET /api/admin/users/:userId/portfolios error:", err);
+    return res.status(500).json({ error: "Database error while fetching portfolios" });
+  }
+});
+
+
+// =====================================================================================================
+//  ADMIN - HOLDINGS BY PORTFOLIO (ค้นหา/แบ่งหน้า/เรียงแบบ whitelist)
+//  GET /api/admin/portfolios/:portfolioId/holdings?search=&page=&limit=&sortBy=&sortDir=
+// =====================================================================================================
+app.get("/api/admin/portfolios/:portfolioId/holdings", verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const portfolioId = parseInt(req.params.portfolioId, 10);
+    if (!Number.isInteger(portfolioId)) return res.status(400).json({ error: "Invalid portfolioId" });
+
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
+    const offset = (page - 1) * limit;
+    const search = (req.query.search || '').trim();
+
+    const sortable = new Set(["StockSymbol", "Quantity", "AvgCost", "UpdatedAt"]);
+    const sortBy  = sortable.has(req.query.sortBy) ? req.query.sortBy : "UpdatedAt";
+    const sortDir = (req.query.sortDir || "DESC").toUpperCase() === "ASC" ? "ASC" : "DESC";
+
+    const where = ["pph.PaperPortfolioID = ?"];
+    const params = [portfolioId];
+    if (search) { where.push("pph.StockSymbol LIKE ?"); params.push(`%${search}%`); }
+
+    const [[{ total }]] = await db.query(
+      `SELECT COUNT(*) AS total
+       FROM trademine.paperportfolioholdings pph
+       WHERE ${ where.join(" AND ") }`,
+      params
+    );
+
+    const [rows] = await db.query(
+      `SELECT
+         pph.PaperHoldingID AS HoldingID,
+         pph.StockSymbol,
+         pph.Quantity,
+         pph.BuyPrice AS AvgCost,
+         NOW() AS UpdatedAt,
+         (pph.Quantity * pph.BuyPrice) AS MarketValue
+       FROM trademine.paperportfolioholdings pph
+       WHERE ${ where.join(" AND ") }
+       ORDER BY ${sortBy} ${sortDir}
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+
+    return res.status(200).json({
+      message: "OK",
+      data: rows,
+      pagination: { currentPage: page, totalPages: Math.ceil(total / limit), totalItems: total, limit }
+    });
+  } catch (err) {
+    console.error("GET /api/admin/portfolios/:portfolioId/holdings error:", err);
+    return res.status(500).json({ error: "Database error while fetching holdings" });
+  }
+});
+
+
+// =====================================================================================================
+//  ADMIN - USER HOLDINGS (Flat, ทุกพอร์ตของ user) — optional เผื่ออยากใช้แบบราบ
+//  GET /api/admin/users/:userId/holdings?search=&page=&limit=
+// =====================================================================================================
+app.get("/api/admin/users/:userId/holdings", verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const userId = parseInt(req.params.userId, 10);
+    if (!Number.isInteger(userId)) return res.status(400).json({ error: "Invalid userId" });
+
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
+    const offset = (page - 1) * limit;
+    const search = (req.query.search || '').trim();
+
+    const where = ["ptp.UserID = ?"];
+    const params = [userId];
+    if (search) { where.push("pph.StockSymbol LIKE ?"); params.push(`%${search}%`); }
+
+    const [[{ total }]] = await db.query(
+      `SELECT COUNT(*) AS total
+       FROM trademine.paperportfolioholdings pph
+       JOIN trademine.papertradeportfolio ptp ON ptp.PaperPortfolioID = pph.PaperPortfolioID
+       WHERE ${ where.join(" AND ") }`,
+      params
+    );
+
+    const [rows] = await db.query(
+      `SELECT 
+         ptp.PaperPortfolioID AS PortfolioID,
+         pph.PaperHoldingID   AS HoldingID,
+         pph.StockSymbol,
+         pph.Quantity,
+         pph.BuyPrice         AS AvgCost,
+         (pph.Quantity * pph.BuyPrice) AS MarketValue,
+         NOW() AS UpdatedAt
+       FROM trademine.paperportfolioholdings pph
+       JOIN trademine.papertradeportfolio ptp ON ptp.PaperPortfolioID = pph.PaperPortfolioID
+       WHERE ${ where.join(" AND ") }
+       ORDER BY ptp.PaperPortfolioID DESC, pph.StockSymbol ASC
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+
+    res.status(200).json({
+      message: "OK",
+      data: rows,
+      pagination: { currentPage: page, totalPages: Math.ceil(total / limit), totalItems: total, limit }
+    });
+  } catch (err) {
+    console.error("GET /api/admin/users/:userId/holdings error:", err);
+    return res.status(500).json({ error: "Database error while fetching user holdings" });
+  }
+});
+
 
 //=====================================================================================================//
 // 										API ทั้งหมดสำหรับหน้า Dashboard
