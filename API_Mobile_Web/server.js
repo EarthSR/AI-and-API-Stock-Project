@@ -42,6 +42,7 @@ const pool = mysql.createPool({
     connectionLimit: 20,
     queueLimit: 0,
     connectTimeout: 60000,
+
   });
 
   const pool_notification = mysqlpromise.createPool({
@@ -54,8 +55,8 @@ const pool = mysql.createPool({
     connectionLimit: 20,
     queueLimit: 0,
     connectTimeout: 60000,
-  });
 
+  });
 
   
   // ฟังก์ชันสำหรับตรวจสอบ JWT token
@@ -81,7 +82,7 @@ const verifyToken = (req, res, next) => {
 };
 
 
-module.exports = verifyToken; // เพื่อให้สามารถนำไปใช้ในไฟล์อื่นได้
+module.exports = verifyToken; 
 
 // Storage configuration for profile picture upload
 const storage = multer.diskStorage({
@@ -614,6 +615,7 @@ app.post("/api/resend-otp/reset-password", async (req, res) => {
 
 // Login
 app.post("/api/login", async (req, res) => {
+  let conn;
   try {
     const { email, password, googleId } = req.body;
     const ipAddress = req.headers["x-forwarded-for"] || req.connection.remoteAddress;
@@ -622,41 +624,114 @@ app.post("/api/login", async (req, res) => {
       return res.status(400).json({ message: "กรุณากรอกอีเมล" });
     }
 
-    // ค้นหาผู้ใช้ในฐานข้อมูล
-    const [rows] = await pool.promise().query("SELECT * FROM User WHERE Email = ?", [email]);
+    conn = await pool.promise().getConnection();
+    await conn.beginTransaction();
 
-    if (rows.length === 0) {
-      return res.status(404).json({ message: "ไม่พบบัญชีนี้" });
-    }
+    // หาผู้ใช้จากอีเมล
+    const [rows] = await conn.query("SELECT * FROM User WHERE Email = ?", [email]);
 
-    const user = rows[0];
-
-    // เช็คสถานะบัญชี
-    if (user.Status !== "active") {
-      return res.status(403).json({ message: "บัญชีถูกระงับการใช้งาน" });
-    }
-
-    // ถ้าใช้ Google Login
+    // --- กรณี Google Login ---
     if (googleId) {
+      // ถ้าไม่พบผู้ใช้ -> สมัครใหม่จาก Google + ล็อกอิน
+      if (rows.length === 0) {
+        // ป้องกันกรณี googleId นี้ไปอยู่กับบัญชีอื่น
+        const [dupGid] = await conn.query(
+          "SELECT UserID FROM User WHERE GoogleID = ? LIMIT 1",
+          [googleId]
+        );
+        if (dupGid.length > 0) {
+          await conn.rollback();
+          return res.status(409).json({ message: "บัญชี Google นี้ถูกใช้กับอีเมลอื่นแล้ว" });
+        }
+
+        // สร้าง username จากอีเมล (กันชนกันด้วย suffix ตัวเลข)
+        const baseUsername = email.split("@")[0].replace(/[^a-zA-Z0-9._-]/g, "").slice(0, 20) || "user";
+        let username = baseUsername;
+        let suffix = 0;
+        // ตรวจซ้ำ username
+        // (แนะนำทำ UNIQUE INDEX ที่คอลัมน์ Username เพื่อกันชนกันจริง ๆ)
+        while (true) {
+          const [u] = await conn.query("SELECT 1 FROM User WHERE Username = ? LIMIT 1", [username]);
+          if (u.length === 0) break;
+          suffix += 1;
+          username = `${baseUsername}${suffix}`;
+        }
+
+        // สมัครใหม่
+        const [ins] = await conn.query(
+          `INSERT INTO User (Email, Username, GoogleID, Status, Role , LastLogin, LastLoginIP)
+           VALUES (?, ?, ?, 'active', 'user', NOW(), ?)`,
+          [email, username, googleId, ipAddress]
+        );
+
+        const newUserId = ins.insertId;
+
+        // ออก token
+        const token = jwt.sign(
+          { id: newUserId, email, role: "user" },
+          JWT_SECRET,
+          { expiresIn: "7d" }
+        );
+
+        await conn.commit();
+        return res.status(200).json({
+          message: "สมัครและเข้าสู่ระบบด้วย Google สำเร็จ",
+          token,
+          user: {
+            id: newUserId,
+            email,
+            username,
+            role: "user",
+          },
+        });
+      }
+
+      // ถ้าพบผู้ใช้
+      const user = rows[0];
+
+      if (user.Status !== "active") {
+        await conn.rollback();
+        return res.status(403).json({ message: "บัญชีถูกระงับการใช้งาน" });
+      }
+
+      // ถ้าบัญชีนี้มี GoogleID อยู่แล้วแต่ไม่ตรง -> บล็อก
       if (user.GoogleID && user.GoogleID !== googleId) {
-        return res.status(400).json({ message: "บัญชีนี้ถูกลงทะเบียนด้วยอีเมลแล้ว โปรดเข้าสู่ระบบด้วยอีเมลและรหัสผ่าน" });
+        await conn.rollback();
+        return res.status(400).json({ message: "บัญชีนี้ถูกผูกกับ Google คนละไอดี" });
       }
 
+      // ถ้ายังไม่เคยผูก GoogleID -> ผูกให้เลย
       if (!user.GoogleID) {
-        // อัปเดต GoogleID ในบัญชีที่มีอยู่
-        await pool.promise().query("UPDATE User SET GoogleID = ? WHERE UserID = ?", [googleId, user.UserID]);
+        // ป้องกัน googleId ซ้ำกับบัญชีอื่น
+        const [dupGid2] = await conn.query(
+          "SELECT UserID FROM User WHERE GoogleID = ? AND UserID <> ? LIMIT 1",
+          [googleId, user.UserID]
+        );
+        if (dupGid2.length > 0) {
+          await conn.rollback();
+          return res.status(409).json({ message: "บัญชี Google นี้ถูกใช้กับอีเมลอื่นแล้ว" });
+        }
+
+        await conn.query(
+          "UPDATE User SET GoogleID = ? WHERE UserID = ?",
+          [googleId, user.UserID]
+        );
       }
 
-      // ตรวจสอบว่าอีเมลจาก Google ตรงกับฐานข้อมูลหรือไม่
-      if (user.Email !== email) {
-        return res.status(400).json({ message: "อีเมลนี้ไม่ตรงกับข้อมูลในระบบ" });
-      }
+      // อัปเดต last login
+      await conn.query(
+        "UPDATE User SET LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?",
+        [ipAddress, user.UserID]
+      );
 
-      // สร้าง Token และบันทึกการเข้าสู่ระบบ
-      const token = jwt.sign({ id: user.UserID, email: user.Email, role: user.Role }, JWT_SECRET);
-      await pool.promise().query("UPDATE User SET LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?", [ipAddress, user.UserID]);
+      // ออก token
+      const token = jwt.sign(
+        { id: user.UserID, email: user.Email, role: user.Role },
+        JWT_SECRET,
+        { expiresIn: "7d" }
+      );
 
-      console.log(`User logged in with Google: ${user.Email}, Role: ${user.Role}`);
+      await conn.commit();
       return res.status(200).json({
         message: "เข้าสู่ระบบด้วย Google สำเร็จ",
         token,
@@ -669,34 +744,55 @@ app.post("/api/login", async (req, res) => {
       });
     }
 
-    // ถ้าไม่ได้ใส่รหัสผ่าน
+    // --- กรณีอีเมล/รหัสผ่าน ---
+    if (rows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ message: "ไม่พบบัญชีนี้" });
+    }
+
+    const user = rows[0];
+
     if (!password) {
+      await conn.rollback();
       return res.status(400).json({ message: "กรุณากรอกรหัสผ่าน" });
     }
 
-    // ป้องกันการล็อกอินผิดพลาดบ่อย
+    if (user.Status !== "active") {
+      await conn.rollback();
+      return res.status(403).json({ message: "บัญชีถูกระงับการใช้งาน" });
+    }
+
     if (user.FailedAttempts >= 5 && user.LastFailedAttempt) {
       const timeSinceLastAttempt = Date.now() - new Date(user.LastFailedAttempt).getTime();
       if (timeSinceLastAttempt < 300000) {
+        await conn.rollback();
         return res.status(429).json({ message: "คุณล็อกอินผิดพลาดหลายครั้ง โปรดลองอีกครั้งใน 5 นาที" });
       }
     }
 
-    // ตรวจสอบรหัสผ่าน
-    const isMatch = await bcrypt.compare(password, user.Password);
+    const isMatch = await bcrypt.compare(password, user.Password || "");
     if (!isMatch) {
-      await pool.promise().query("UPDATE User SET FailedAttempts = FailedAttempts + 1, LastFailedAttempt = NOW() WHERE UserID = ?", [user.UserID]);
+      await conn.query(
+        "UPDATE User SET FailedAttempts = FailedAttempts + 1, LastFailedAttempt = NOW() WHERE UserID = ?",
+        [user.UserID]
+      );
+      await conn.commit();
       return res.status(401).json({ message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
     }
 
-    // รีเซ็ต FailedAttempts และอัปเดตการเข้าสู่ระบบ
-    await pool.promise().query("UPDATE User SET FailedAttempts = 0, LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?", [ipAddress, user.UserID]);
+    await conn.query(
+      "UPDATE User SET FailedAttempts = 0, LastLogin = NOW(), LastLoginIP = ? WHERE UserID = ?",
+      [ipAddress, user.UserID]
+    );
 
-    // สร้าง JWT Token
-    const token = jwt.sign({ id: user.UserID, role: user.Role }, JWT_SECRET, { expiresIn: "7d" });
+    const token = jwt.sign(
+      { id: user.UserID, role: user.Role },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
 
-    console.log(`User logged in: ${user.Email}, Role: ${user.Role}`);
-    res.status(200).json({
+    await conn.commit();
+    return res.status(200).json({
       message: "เข้าสู่ระบบสำเร็จ",
       token,
       user: {
@@ -707,11 +803,13 @@ app.post("/api/login", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Internal error:", error.message);
+    if (conn) try { await conn.rollback(); } catch (_) {}
+    console.error("Internal error:", error);
     res.status(500).json({ error: "Internal server error" });
+  } finally {
+    if (conn) conn.release();
   }
 });
-
 
 
 
@@ -985,9 +1083,41 @@ function calculateAge(birthday) {
 }
 
 
-app.get("/api/news-notifications", verifyToken, async (req, res) => {
+app.post("/api/update-fcm-token", verifyToken, async (req, res) => {
   try {
-    // ดึงข่าวล่าสุด 1 ข่าว
+    const userId = req.userId;
+
+    let fcm_token = null; // ค่าดีฟอลต์คือว่าง (NULL ใน DB)
+    if (Object.prototype.hasOwnProperty.call(req.body, "fcm_token")) {
+      const raw = req.body.fcm_token;
+      if (raw && typeof raw === "string" && raw.trim() !== "") {
+        fcm_token = raw.trim(); // ถ้ามีค่าจริงก็ใช้ค่านั้น
+      }
+    }
+
+    // อัปเดต token (จะเป็น NULL ถ้าไม่มีส่งมา)
+    await pool_notification.query(
+      "UPDATE user SET fcm_token = ? WHERE UserID = ?",
+      [fcm_token, userId]
+    );
+
+    return res.json({
+      message: fcm_token
+        ? "อัปเดต fcm_token เรียบร้อย"
+        : "ลบ fcm_token (ตั้งเป็นว่าง) เรียบร้อย",
+      fcm_token
+    });
+  } catch (err) {
+    console.error("❌ Error updating fcm_token:", err);
+    res.status(500).json({ error: "เกิดข้อผิดพลาดในระบบ" });
+  }
+});
+
+
+// ไม่ต้อง verifyToken – ส่งให้ทุก fcm_token
+app.get("/api/news-notifications", async (req, res) => {
+  try {
+    // 1) ดึงข่าวล่าสุด 1 รายการ
     const [newsResults] = await pool_notification.query(`
       SELECT NewsID, Title, PublishedDate
       FROM News
@@ -999,57 +1129,203 @@ app.get("/api/news-notifications", verifyToken, async (req, res) => {
       return res.json({ message: "ยังไม่มีข่าวในฐานข้อมูล" });
     }
 
-    const latestNews = newsResults[0]; // ข่าวล่าสุด
+    const latestNews = newsResults[0];
+    const newsTitle = latestNews.Title ?? "ข่าวล่าสุด";
 
-    const userResults = [
-      {
-        fcm_token: "fLmzIwKYS2SuSkidLdjGjs:APA91bFnyXm3-myy4U3Eg1yjwR4ahvtmgHdwLHP4WD-e0StfE4ws6A6oP-cn0HkqW_8YN7mwxpCi4-aScGF_kdjI2chdhQmYxkvkpWCfMSVmt1hCz6Vzf8Q"
-      }
-    ];
+    // 2) ดึงผู้ใช้ทุกคนที่มี fcm_token (ไม่สน token อื่นๆ)
+    const [userResults] = await pool_notification.query(`
+      SELECT UserID, fcm_token
+      FROM user
+      WHERE fcm_token IS NOT NULL AND fcm_token <> ''
+    `);
 
-    const messages = userResults.map(user => ({
-      notification: {
-        title: "📰 Latest News",
-        body: latestNews.Title,
-      },
-      token: user.fcm_token,
-    }));
-
-    // ส่ง notification แบบ bulk ด้วย sendAll (ถ้ารองรับ)
-    if (typeof admin.messaging().sendAll === 'function') {
-      const response = await admin.messaging().sendAll(messages);
-      console.log("✅ Notifications sent:", response.successCount, "successes");
-      res.json({
-        message: "📤 Push notification ส่งสำเร็จ",
-        successCount: response.successCount,
-        totalUsers: userResults.length,
-        news: latestNews,
-      });
-    } else {
-      const messaging = admin.messaging();
-      let successCount = 0;
-      for (const msg of messages) {
-        try {
-          await messaging.send(msg);
-          successCount++;
-        } catch (error) {
-          console.error("Error sending notification:", error);
-        }
-      }
-      console.log("✅ Notifications sent (fallback):", successCount);
-      res.json({
-        message: "📤 Push notification ส่งสำเร็จ (fallback)",
-        successCount,
-        totalUsers: userResults.length,
-        news: latestNews,
-      });
+    if (userResults.length === 0) {
+      return res.json({ message: "ยังไม่มีผู้ใช้ที่มี fcm_token" });
     }
 
+    // กันซ้ำ token เดียวกัน (กรณีผู้ใช้มากกว่า 1 record)
+    const tokensByUser = userResults.map(r => ({ userId: r.UserID, token: String(r.fcm_token).trim() }));
+    const seen = new Set();
+    const deduped = tokensByUser.filter(x => {
+      if (!x.token) return false;
+      if (seen.has(x.token)) return false;
+      seen.add(x.token);
+      return true;
+    });
+
+    // 3) บันทึก notification ต่อ UserID (ใช้หัวข้อข่าวเป็น message)
+    //    ใช้ single connection / transaction (optional)
+    const conn = await pool_notification.getConnection();
+    try {
+      await conn.beginTransaction();
+      for (const row of deduped) {
+        await conn.query(
+          `
+          INSERT INTO notification (Message, Date, NewsID, UserID)
+          VALUES (?, NOW(), ?, ?)
+        `,
+          [newsTitle, latestNews.NewsID, row.userId]
+        );
+      }
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+
+    // 4) เตรียม payload
+    const makePayload = (token) => ({
+      token,
+      notification: {
+        title: "📰 ข่าวล่าสุด",
+        body: newsTitle,
+      },
+      data: {
+        newsId: String(latestNews.NewsID ?? ""),
+        publishedDate: latestNews.PublishedDate ? String(latestNews.PublishedDate) : "",
+      },
+      android: {
+        priority: "high",
+      },
+      apns: {
+        headers: { "apns-priority": "10" },
+        payload: { aps: { sound: "default" } },
+      },
+    });
+
+    const tokens = deduped.map(d => d.token);
+
+    // 5) ส่งแบบแบ่งชุด ๆ (FCM แนะนำ <= 500 ต่อ batch)
+    const chunk = (arr, size) => {
+      const out = [];
+      for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+      return out;
+    };
+    const batches = chunk(tokens, 500);
+
+    let successCount = 0;
+    let failureCount = 0;
+    const invalidTokens = [];
+
+    const messaging = admin.messaging();
+
+    for (const batch of batches) {
+      // สร้าง payload list
+      const messages = batch.map(t => makePayload(t));
+
+      // ใช้ API ที่รองรับหลายข้อความ:
+      // - ถ้า SDK คุณมี sendEachForMulticast ให้ใช้แบบนี้ (แนะนำ)
+      if (typeof messaging.sendEachForMulticast === "function") {
+        const response = await messaging.sendEachForMulticast({
+          tokens: batch,
+          notification: { title: "📰 ข่าวล่าสุด", body: newsTitle },
+          data: {
+            newsId: String(latestNews.NewsID ?? ""),
+            publishedDate: latestNews.PublishedDate ? String(latestNews.PublishedDate) : "",
+          },
+          android: { priority: "high" },
+          apns: {
+            headers: { "apns-priority": "10" },
+            payload: { aps: { sound: "default" } },
+          },
+        });
+
+        successCount += response.successCount;
+        failureCount += response.failureCount;
+
+        // เก็บ token ที่ invalid เพื่อลบ/เคลียร์ออก
+        response.responses.forEach((r, i) => {
+          if (!r.success) {
+            const errCode = r.error && r.error.code;
+            if (
+              errCode === "messaging/registration-token-not-registered" ||
+              errCode === "messaging/invalid-registration-token"
+            ) {
+              invalidTokens.push(batch[i]);
+            }
+          }
+        });
+      }
+      // - ถ้าไม่มี (SDK เก่า) fallback ส่งทีละข้อความ
+      else {
+        for (const msg of messages) {
+          try {
+            await messaging.send(msg);
+            successCount++;
+          } catch (err) {
+            failureCount++;
+            const code = err && err.code;
+            if (
+              code === "messaging/registration-token-not-registered" ||
+              code === "messaging/invalid-registration-token"
+            ) {
+              invalidTokens.push(msg.token);
+            }
+          }
+        }
+      }
+    }
+
+    // 6) เคลียร์ fcm_token ที่ตายแล้ว (optional แต่ควรทำ)
+    if (invalidTokens.length > 0) {
+      // ตั้งให้เป็น NULL เพื่อกันใช้ซ้ำ
+      await pool_notification.query(
+        `UPDATE user SET fcm_token = NULL WHERE fcm_token IN (${invalidTokens.map(() => "?").join(",")})`,
+        invalidTokens
+      );
+    }
+
+    console.log("✅ Notifications sent:", { successCount, failureCount, total: tokens.length, invalidTokens: invalidTokens.length });
+
+    return res.json({
+      message: "📤 ส่ง Push notification ให้ทุก fcm_token สำเร็จ",
+      successCount,
+      failureCount,
+      totalTargets: tokens.length,
+      prunedInvalidTokens: invalidTokens.length,
+      news: latestNews,
+    });
   } catch (err) {
     console.error("❌ Error pushing notifications:", err);
-    res.status(500).json({ error: "เกิดข้อผิดพลาดขณะดึงข่าวหรือส่ง noti" });
+    return res.status(500).json({ error: "เกิดข้อผิดพลาดขณะดึงข่าวหรือส่ง noti" });
   }
 });
+
+
+
+
+
+// API สำหรับดึงข่าว notification ล่าสุดที่ถูกบันทึก (ของทุก user หรือ กรอง userId ก็ได้)
+app.get("/api/latest-notification", verifyToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    const [results] = await pool_notification.query(`
+      SELECT n.NotificationID, n.Message, n.Date, n.NewsID, n.UserID, nw.Title AS NewsTitle, nw.PublishedDate
+      FROM notification n
+      LEFT JOIN News nw ON n.NewsID = nw.NewsID
+      WHERE n.UserID = ?
+      ORDER BY n.Date DESC
+      LIMIT 10;
+    `, [userId]);
+
+    if (results.length === 0) {
+      return res.json({ message: "ไม่มีการแจ้งเตือนล่าสุด" });
+    }
+
+    res.json({
+      notifications: results
+    });
+  } catch (error) {
+    console.error("Error fetching latest notifications:", error);
+    res.status(500).json({ error: "เกิดข้อผิดพลาดขณะดึงข้อมูลการแจ้งเตือน" });
+  }
+});
+
+
+
 
 
 
@@ -1245,7 +1521,7 @@ app.get("/api/favorites", verifyToken, (req, res) => {
 // API สำหรับดึงหุ้นที่มีการเปลี่ยนแปลงสูงสุด 10 อันดับ พร้อมราคาปิด และ ID
 app.get("/api/top-10-stocks", async (req, res) => {
   try {
-    // ดึงวันที่ล่าสุดที่มีข้อมูล
+    // ดึงวันที่ล่าสุด
     const latestDateQuery = "SELECT MAX(Date) AS LatestDate FROM StockDetail";
     pool.query(latestDateQuery, (dateErr, dateResults) => {
       if (dateErr) {
@@ -1253,19 +1529,23 @@ app.get("/api/top-10-stocks", async (req, res) => {
         return res.status(500).json({ error: "Database error fetching latest date" });
       }
 
-      const latestDate = dateResults[0].LatestDate;
+      const latestDate = dateResults[0]?.LatestDate;
       if (!latestDate) {
         return res.status(404).json({ error: "No stock data available" });
       }
 
-      // คิวรี่หุ้นที่มีการเปลี่ยนแปลงสูงสุด 10 อันดับ พร้อมราคาปิด และ StockDetailID
+      // ดึง 10 หุ้นที่เปอร์เซ็นต์ขึ้นสูงสุดในวันล่าสุด
       const query = `
-        SELECT sd.StockDetailID, s.StockSymbol, sd.Changepercen AS ChangePercentage, sd.ClosePrice
+        SELECT 
+          sd.StockDetailID, 
+          s.StockSymbol, 
+          sd.Changepercen AS ChangePercentage, 
+          sd.ClosePrice
         FROM StockDetail sd
         JOIN Stock s ON sd.StockSymbol = s.StockSymbol
         WHERE sd.Date = ?
         ORDER BY sd.Changepercen DESC
-        LIMIT 10;
+        LIMIT 10
       `;
 
       pool.query(query, [latestDate], (err, results) => {
@@ -1277,7 +1557,7 @@ app.get("/api/top-10-stocks", async (req, res) => {
         res.json({
           date: latestDate,
           topStocks: results.map(stock => ({
-            StockDetailID: stock.StockDetailID, // ✅ เพิ่ม ID ของหุ้น
+            StockDetailID: stock.StockDetailID,
             StockSymbol: stock.StockSymbol,
             ChangePercentage: stock.ChangePercentage,
             ClosePrice: stock.ClosePrice
@@ -1290,6 +1570,7 @@ app.get("/api/top-10-stocks", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 // API สำหรับดึง 3 หุ้นที่มีการเปลี่ยนแปลงสูงสุด พร้อมข้อมูลย้อนหลัง 5 วัน
 app.get("/api/trending-stocks", async (req, res) => {
@@ -1665,157 +1946,136 @@ async function getExchangeRate() {
 
 // API ดึงรายละเอียดหุ้น
 app.get("/api/stock-detail/:symbol", async (req, res) => {
+  const conn = pool.promise();
   try {
-    const { symbol } = req.params;
+    const rawSymbol = (req.params.symbol || "").toUpperCase();
     const { timeframe = "5D" } = req.query;
 
-    // กำหนดช่วงเวลาที่รองรับ
-    const historyLimits = { 
-      "1D": 1, 
-      "5D": 5, 
-      "1M": 22,    // ประมาณ 22 วันทำการใน 1 เดือน
-      "3M": 66,    // 3 เดือน 
-      "6M": 132,   // 6 เดือน
-      "1Y": 264,   // 1 ปี (ประมาณ 252 วันทำการ)
-      "ALL": null  // null หมายถึงดึงข้อมูลทั้งหมด
-    };
-
-    if (!historyLimits.hasOwnProperty(timeframe)) {
+    const historyLimits = { "1D": 1, "5D": 5, "1M": 22, "3M": 66, "6M": 132, "1Y": 264, "ALL": null };
+    if (!Object.prototype.hasOwnProperty.call(historyLimits, timeframe)) {
       return res.status(400).json({ error: "Invalid timeframe. Choose from 1D, 5D, 1M, 3M, 6M, 1Y, ALL." });
     }
 
-    // ดึงวันที่ล่าสุดที่มีข้อมูล
-    const latestDateQuery = "SELECT MAX(Date) AS LatestDate FROM StockDetail";
-    pool.query(latestDateQuery, async (dateErr, dateResults) => {
-      if (dateErr) {
-        console.error("Database error fetching latest date:", dateErr);
-        return res.status(500).json({ error: "Database error fetching latest date" });
+    // ปรับสัญลักษณ์ให้เข้มงวด (เช่น ตัด .BK ออกถ้าใส่มา)
+    const symbol = rawSymbol.replace(".BK", "");
+
+    // 1) ดึงแถวล่าสุดของหุ้นตัวนี้ + ข้อมูลบริษัทจาก Stock
+    const latestRowSql = `
+      SELECT 
+        sd.*,
+        s.CompanyName,
+        s.Market,
+        s.Sector,
+        s.Industry,
+        s.Description
+      FROM StockDetail sd
+      JOIN Stock s ON s.StockSymbol = sd.StockSymbol
+      WHERE sd.StockSymbol = ?
+      ORDER BY sd.Date DESC
+      LIMIT 1
+    `;
+    const [latestRows] = await conn.query(latestRowSql, [symbol]);
+
+    if (!latestRows || latestRows.length === 0) {
+      return res.status(404).json({ error: "Stock not found" });
+    }
+
+    const stock = latestRows[0];
+
+    // 2) จัดประเภทตลาด + อัตราแลกเปลี่ยน (THB สำหรับ US)
+    const stockType = stock.Market === "America" ? "US Stock" : "TH Stock";
+    let exchangeRate = 1;
+    if (stockType === "US Stock") {
+      try {
+        // ฟังก์ชันนี้คุณมีอยู่แล้วในโปรเจกต์ ตามที่เคยใช้
+        exchangeRate = await getExchangeRate(); 
+      } catch {
+        exchangeRate = 1;
       }
+    }
 
-      const latestDate = dateResults[0]?.LatestDate;
-      if (!latestDate) {
-        return res.status(404).json({ error: "No stock data available" });
-      }
+    const closePrice = stock.ClosePrice != null ? Number(stock.ClosePrice) : 0;
+    const closePriceTHB = stockType === "US Stock" ? closePrice * exchangeRate : closePrice;
 
-      // ดึงข้อมูลหลักของหุ้น
-      const stockQuery = `
-        SELECT 
-          sd.StockDetailID, 
-          s.StockSymbol, 
-          s.Market, 
-          s.CompanyName, 
-          s.Sector, 
-          s.Industry, 
-          s.Description, 
-          sd.OpenPrice, 
-          sd.HighPrice,
-          sd.ClosePrice, 
-          sd.MarketCap,
-          sd.Changepercen AS ChangePercentage, 
-          sd.Volume
-        FROM Stock s
-        LEFT JOIN StockDetail sd ON s.StockSymbol = sd.StockSymbol AND sd.Date = ?
-        WHERE s.StockSymbol = ?;
-      `;
+    // 3) ฟิลด์ทำนาย (เผื่อยังไม่มีคอลัมน์)
+    const predictionClose = Object.prototype.hasOwnProperty.call(stock, "PredictionClose")
+      ? Number(stock.PredictionClose)
+      : null;
+    const predictionTrend = Object.prototype.hasOwnProperty.call(stock, "PredictionTrend")
+      ? stock.PredictionTrend
+      : null;
 
-      pool.query(stockQuery, [latestDate, symbol], async (err, results) => {
-        if (err) {
-          console.error("Database error fetching stock details:", err);
-          return res.status(500).json({ error: "Database error fetching stock details" });
-        }
+    const pricePredictionChange =
+      predictionClose != null && closePrice !== 0
+        ? (((predictionClose - closePrice) / closePrice) * 100).toFixed(2) + "%"
+        : "N/A";
 
-        if (results.length === 0) {
-          return res.status(404).json({ error: "Stock not found" });
-        }
+    // 4) Avg Volume 30 วันล่าสุดของหุ้นนี้
+    const avgVolSql = `
+      SELECT AVG(Volume) AS AvgVolume30D 
+      FROM (
+        SELECT Volume
+        FROM StockDetail
+        WHERE StockSymbol = ?
+        ORDER BY Date DESC
+        LIMIT 30
+      ) t
+    `;
+    const [avgRows] = await conn.query(avgVolSql, [symbol]);
+    const avgVolume30D = avgRows?.[0]?.AvgVolume30D ? Number(avgRows[0].AvgVolume30D) : 0;
+    const formattedAvgVolume30D = avgVolume30D > 0 ? avgVolume30D.toFixed(2) : "0";
 
-        const stock = results[0];
-        let stockType = stock.Market === "America" ? "US Stock" : "TH Stock";
+    // 5) ประวัติราคาตาม timeframe
+    let historySql = `
+      SELECT StockSymbol, Date, OpenPrice, HighPrice, LowPrice, ClosePrice
+      FROM StockDetail
+      WHERE StockSymbol = ?
+      ORDER BY Date DESC
+    `;
+    const limit = historyLimits[timeframe];
+    const params = [symbol];
+    if (limit !== null) {
+      historySql += ` LIMIT ?`;
+      params.push(limit);
+    }
+    const [historyRows] = await conn.query(historySql, params);
 
-        let exchangeRate = 1;
-        if (stockType === "US Stock") {
-          exchangeRate = await getExchangeRate();
-        }
+    // (ถ้า UI ต้องการเรียงจากเก่า -> ใหม่ ให้กลับลำดับ)
+    const historicalPrices = [...historyRows].reverse();
 
-        const closePrice = stock.ClosePrice !== null ? parseFloat(stock.ClosePrice) : 0;
-        const closePriceTHB = stockType === "US Stock" ? closePrice * exchangeRate : closePrice;
+    // 6) สร้าง Overview = ข้อมูลวันล่าสุด + AvgVolume30D
+    const overview = {
+      ...stock,
+      AvgVolume30D: formattedAvgVolume30D,
+    };
 
-        let pricePredictionChange = stock.PredictionClose
-          ? ((stock.PredictionClose - stock.ClosePrice) / stock.ClosePrice) * 100
-          : null;
-
-        const avgVolumeQuery = `
-          SELECT AVG(Volume) AS AvgVolume30D 
-          FROM StockDetail 
-          WHERE StockSymbol = ? 
-          ORDER BY Date DESC 
-          LIMIT 30;
-        `;
-        
-
-        pool.query(avgVolumeQuery, [symbol], (volErr, volResults) => {
-          if (volErr) {
-            console.error("Database error fetching average volume:", volErr);
-            return res.status(500).json({ error: "Database error fetching average volume" });
-          }
-
-          const avgVolume30D = volResults[0]?.AvgVolume30D ? parseFloat(volResults[0].AvgVolume30D) : 0;
-          const formattedAvgVolume30D = avgVolume30D > 0 ? avgVolume30D.toFixed(2) + " Million" : "N/A";
-
-          let historyQuery = `
-            SELECT StockSymbol, Date, OpenPrice, HighPrice, LowPrice, ClosePrice
-            FROM StockDetail 
-            WHERE StockSymbol = ? 
-            ORDER BY Date DESC
-          `;
-
-          const limit = historyLimits[timeframe];
-          if (limit !== null) {
-            historyQuery += ` LIMIT ${limit}`;
-          }
-          // ถ้า timeframe เป็น ALL จะไม่มี LIMIT
-
-          pool.query(historyQuery, [symbol], (histErr, historyResults) => {
-            if (histErr) {
-              console.error(`Database error fetching historical data:`, histErr);
-              return res.status(500).json({ error: "Database error fetching historical data" });
-            }
-
-            res.json({
-              StockDetailID: stock.StockDetailID,
-              StockSymbol: stock.StockSymbol,
-              Type: stockType,
-              company : stock.CompanyName,
-              ClosePrice: stock.ClosePrice,
-              ClosePriceTHB: closePriceTHB.toFixed(2),
-              Date: latestDate,
-              Change: stock.ChangePercentage,
-              PredictionClose: stock.PredictionClose,
-              PredictionTrend: stock.PredictionTrend,
-              PredictionCloseDate: latestDate,
-              PricePredictionChange: pricePredictionChange ? pricePredictionChange.toFixed(2) + "%" : "N/A",
-              SelectedTimeframe: timeframe,
-              HistoricalPrices: historyResults,
-              Overview: {
-                High: stock.HighPrice,
-                Open: stock.OpenPrice,
-                Close: stock.ClosePrice,
-                AvgVolume30D: formattedAvgVolume30D,
-                Marketcap : stock.MarketCap
-              },
-              Profile: {
-                Market: stock.Market,
-                Sector: stock.Sector,
-                Industry: stock.Industry,
-                Description: stock.Description
-              }
-            });
-          });
-        });
-      });
+    // 7) ตอบกลับ
+    return res.json({
+      StockDetailID: stock.StockDetailID,
+      StockSymbol: stock.StockSymbol,
+      Type: stockType,
+      company: stock.CompanyName,
+      ClosePrice: closePrice,
+      ClosePriceTHB: closePriceTHB.toFixed(2),
+      Date: stock.Date, // วันล่าสุดของหุ้นนี้
+      Change: stock.Changepercen ?? stock.ChangePercentage ?? null,
+      PredictionClose: predictionClose,
+      PredictionTrend: predictionTrend,
+      PredictionCloseDate: stock.Date,
+      PricePredictionChange: pricePredictionChange,
+      SelectedTimeframe: timeframe,
+      HistoricalPrices: historicalPrices,
+      Overview: overview,
+      Profile: {
+        Market: stock.Market,
+        Sector: stock.Sector,
+        Industry: stock.Industry,
+        Description: stock.Description,
+      },
     });
   } catch (error) {
-    console.error("Internal server error:", error.message);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Internal server error:", error);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -2260,37 +2520,37 @@ async function getThbToUsdRate() {
 // Helper function to check market status
 function getMarketStatus(market) {
     const now = new Date();
-    // US Market (ET, UTC-4 for EDT)
-    if (market === 'America') {
-        const nowET = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-        const day = nowET.getDay(); // 0=Sun, 6=Sat
-        const hour = nowET.getHours();
-        const minute = nowET.getMinutes();
+    // // US Market (ET, UTC-4 for EDT)
+    // if (market === 'America') {
+    //     const nowET = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    //     const day = nowET.getDay(); // 0=Sun, 6=Sat
+    //     const hour = nowET.getHours();
+    //     const minute = nowET.getMinutes();
 
-        if (day >= 1 && day <= 5) { // Mon-Fri
-            if ((hour > 9 || (hour === 9 && minute >= 30)) && hour < 16) {
-                return 'OPEN';
-            }
-        }
-        return 'CLOSED';
-    }
-    // Thai Market (ICT, UTC+7)
-    if (market === 'Thailand') {
-        const nowICT = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }));
-        const day = nowICT.getDay();
-        const hour = nowICT.getHours();
-        const minute = nowICT.getMinutes();
+    //     if (day >= 1 && day <= 5) { // Mon-Fri
+    //         if ((hour > 9 || (hour === 9 && minute >= 30)) && hour < 16) {
+    //             return 'OPEN';
+    //         }
+    //     }
+    //     return 'CLOSED';
+    // }
+    // // Thai Market (ICT, UTC+7)
+    // if (market === 'Thailand') {
+    //     const nowICT = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }));
+    //     const day = nowICT.getDay();
+    //     const hour = nowICT.getHours();
+    //     const minute = nowICT.getMinutes();
 
-        if (day >= 1 && day <= 5) { // Mon-Fri
-            const isMorningSession = (hour >= 10 && (hour < 12 || (hour === 12 && minute <= 30)));
-            const isAfternoonSession = ((hour > 14 || (hour === 14 && minute >= 30)) && (hour < 16 || (hour === 16 && minute <= 30)));
-            if (isMorningSession || isAfternoonSession) {
-                return 'OPEN';
-            }
-        }
-        return 'CLOSED';
-    }
-    return 'UNKNOWN';
+    //     if (day >= 1 && day <= 5) { // Mon-Fri
+    //         const isMorningSession = (hour >= 10 && (hour < 12 || (hour === 12 && minute <= 30)));
+    //         const isAfternoonSession = ((hour > 14 || (hour === 14 && minute >= 30)) && (hour < 16 || (hour === 16 && minute <= 30)));
+    //         if (isMorningSession || isAfternoonSession) {
+    //             return 'OPEN';
+    //         }
+    //     }
+    //     return 'CLOSED';
+    // }
+    // return 'UNKNOWN';
 }
 
 
@@ -2299,21 +2559,19 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
   let connection;
   try {
     connection = await pool.promise().getConnection();
-    const thbToUsdRate = await getThbToUsdRate();
+    const thbToUsdRate = await getThbToUsdRate(); // เช่น 0.027xx (USD/THB)
 
-    // 1. ดึงข้อมูล portfolio หลักของผู้ใช้
+    // 1) ดึงข้อมูล portfolio ของผู้ใช้
     const [portfolioRows] = await connection.query(
       "SELECT * FROM papertradeportfolio WHERE UserID = ?",
       [req.userId]
     );
-
     if (portfolioRows.length === 0) {
       return res.status(404).json({ message: "ไม่พบ Portfolio สำหรับผู้ใช้นี้" });
     }
-
     const portfolio = portfolioRows[0];
 
-    // 2. ดึงข้อมูลหุ้นทั้งหมดที่ถือครองในพอร์ต พร้อม Market
+    // 2) ดึงหุ้นทั้งหมดใน portfolio
     const [holdingsRows] = await connection.query(
       `SELECT 
          h.PaperHoldingID, 
@@ -2327,12 +2585,12 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
       [portfolio.PaperPortfolioID]
     );
 
-    // 3. ดึงราคาปัจจุบันของหุ้นทุกตัวพร้อมกันเพื่อประสิทธิภาพ
+    // 3) ดึงราคาปัจจุบันของหุ้นทุกตัว
     const pricePromises = holdingsRows.map(async (holding) => {
       try {
         const tradingViewMarket = holding.Market === 'Thailand' ? 'thailand' : 'usa';
         const priceData = await getTradingViewPrice(holding.StockSymbol, tradingViewMarket);
-        return { symbol: holding.StockSymbol, price: priceData.price };
+        return { symbol: holding.StockSymbol, price: Number(priceData.price) || 0 };
       } catch (error) {
         console.error(`Could not fetch price for ${holding.StockSymbol} using TradingView:`, error.message);
         return { symbol: holding.StockSymbol, price: 0, error: true };
@@ -2344,7 +2602,7 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
       return map;
     }, {});
 
-    // 4. จัดกลุ่มหุ้นตามสัญลักษณ์ (StockSymbol) และคำนวณค่ารวม
+    // 4) รวม holdings ตาม StockSymbol
     const groupedHoldings = holdingsRows.reduce((acc, holding) => {
       const symbol = holding.StockSymbol;
       if (!acc[symbol]) {
@@ -2352,29 +2610,40 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
           StockSymbol: symbol,
           Market: holding.Market,
           TotalQuantity: 0,
-          TotalCostBasis: 0,
+          TotalCostBasis: 0, // รวมต้นทุน (USD) = BuyPrice(USD) * Qty
         };
       }
-      acc[symbol].TotalQuantity += holding.Quantity;
-      acc[symbol].TotalCostBasis += holding.BuyPrice * holding.Quantity;
+      const qty = Number(holding.Quantity) || 0;
+      const buyPriceUSD = Number(holding.BuyPrice) || 0; // << ถือว่าเป็น USD แล้ว
+      acc[symbol].TotalQuantity += qty;
+      acc[symbol].TotalCostBasis += buyPriceUSD * qty;
       return acc;
     }, {});
 
-    // 5. คำนวณมูลค่าและกำไร/ขาดทุนสำหรับแต่ละกลุ่ม และรวมมูลค่าพอร์ตทั้งหมดในสกุลเงิน USD
+    // 5) คำนวณมูลค่าและ P/L (แปลง “ราคาปัจจุบัน” เป็น USD เสมอ แล้วค่อยคิด)
     let totalHoldingsValueUSD = 0;
     const holdingsWithPL = Object.values(groupedHoldings).map(group => {
-      const currentPrice = priceMap[group.StockSymbol] || 0; // ราคาในสกุลเงินเดิม
+      const currentPriceRaw = Number(priceMap[group.StockSymbol]) || 0; // THB ถ้า TH / USD ถ้า US
       const isThaiStock = group.Market === 'Thailand';
-      
-      // แปลงค่าเงินทั้งหมดเป็น USD เพื่อการแสดงผลที่สอดคล้องกัน
-      const costBasisUSD = isThaiStock ? group.TotalCostBasis * thbToUsdRate : group.TotalCostBasis;
-      const currentValueUSD = isThaiStock ? (currentPrice * group.TotalQuantity) * thbToUsdRate : (currentPrice * group.TotalQuantity);
-      const avgBuyPriceUSD = group.TotalQuantity > 0 ? costBasisUSD / group.TotalQuantity : 0;
-      const currentPriceUSD = isThaiStock ? currentPrice * thbToUsdRate : currentPrice;
+
+      // ✅ BuyPrice ใน DB เป็น USD อยู่แล้ว (จาก route เทรดที่เราแก้)
+      const costBasisUSD = group.TotalCostBasis;
+
+      // ✅ แปลงราคาปัจจุบันให้เป็น USD ก่อนคำนวณ
+      const currentPriceUSD = isThaiStock
+        ? currentPriceRaw * thbToUsdRate
+        : currentPriceRaw;
+
+      const currentValueUSD = currentPriceUSD * (group.TotalQuantity || 0);
+      const avgBuyPriceUSD = (group.TotalQuantity || 0) > 0
+        ? costBasisUSD / group.TotalQuantity
+        : 0;
 
       const unrealizedPL_USD = currentValueUSD - costBasisUSD;
-      const unrealizedPLPercent = costBasisUSD > 0 ? (unrealizedPL_USD / costBasisUSD) * 100 : 0;
-      
+      const unrealizedPLPercent = costBasisUSD > 0
+        ? (unrealizedPL_USD / costBasisUSD) * 100
+        : 0;
+
       totalHoldingsValueUSD += currentValueUSD;
 
       return {
@@ -2386,13 +2655,13 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
         UnrealizedPL_USD: unrealizedPL_USD.toFixed(2),
         UnrealizedPLPercent: unrealizedPLPercent.toFixed(2) + '%',
         Market: group.Market,
-        MarketStatus: getMarketStatus(group.Market)
+        MarketStatus: getMarketStatus(group.Market),
       };
     });
 
-    // 6. คำนวณมูลค่ารวมของพอร์ตเป็น USD (เงินสดในพอร์ตเป็น USD อยู่แล้ว)
-    const balanceUSD = parseFloat(portfolio.Balance); // Balance in DB is already USD
-    portfolio.TotalPortfolioValueUSD = balanceUSD + totalHoldingsValueUSD; 
+    // 6) รวมมูลค่าพอร์ต
+    const balanceUSD = Number(portfolio.Balance) || 0;
+    portfolio.TotalPortfolioValueUSD = balanceUSD + totalHoldingsValueUSD;
     portfolio.BalanceUSD = balanceUSD.toFixed(2);
     portfolio.holdings = holdingsWithPL;
 
@@ -2400,6 +2669,7 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
       message: "ดึงข้อมูล Portfolio สำเร็จ",
       data: portfolio,
     });
+
   } catch (error) {
     console.error("Error fetching portfolio:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -2408,10 +2678,12 @@ app.get("/api/portfolio", verifyToken, async (req, res) => {
   }
 });
 
+
+
+
 app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
   let connection;
   try {
-    // 1. ตรวจสอบและแปลงข้อมูลนำเข้า
     let { stockSymbol, quantity, tradeType } = req.body; // 'buy' or 'sell'
     const userId = req.userId;
 
@@ -2447,7 +2719,7 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
     try {
       const tradingViewMarket = market === 'Thailand' ? 'thailand' : 'usa';
       const priceData = await getTradingViewPrice(normalizedSymbol, tradingViewMarket);
-      currentPrice = priceData.price;
+      currentPrice = Number(priceData.price);
     } catch (e) {
       await connection.rollback();
       console.error("TradingView API error:", e.message);
@@ -2467,15 +2739,21 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
     const isThaiStock = market === 'Thailand';
     let totalCostOrValueUSD;
 
+    // ====== ของเดิม: คิดยอดเงินพอร์ตเป็น USD ======
+    let thbToUsdRate = 1; // << เพิ่มตัวแปรนี้ไว้ใช้ซ้ำ
     if (isThaiStock) {
       // For Thai stocks, the price is in THB. We need to convert it to USD for balance calculations.
-      const thbToUsdRate = await getThbToUsdRate();
+      thbToUsdRate = await getThbToUsdRate(); // เช่น 0.027xx (USD/THB)
       const totalValueTHB = parsedQuantity * currentPrice;
       totalCostOrValueUSD = totalValueTHB * thbToUsdRate;
     } else {
       // For US stocks, the price is already in USD.
       totalCostOrValueUSD = parsedQuantity * currentPrice;
     }
+    // ====== จบส่วนของเดิม ======
+
+    // ✅ เพิ่ม: แปลง “ราคาหุ้นต่อหน่วย” เป็น USD เพื่อใช้ตอนบันทึกลง DB (BuyPrice / Price)
+    const priceUSD = isThaiStock ? currentPrice * thbToUsdRate : currentPrice;
 
     // 5. ประมวลผลการซื้อขาย
     if (tradeType === 'buy') {
@@ -2486,9 +2764,16 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
 
       await connection.query("UPDATE papertradeportfolio SET Balance = ? WHERE PaperPortfolioID = ?", [balanceUSD - totalCostOrValueUSD, portfolioId]);
 
+      // เดิม:
+      // await connection.query(
+      //   "INSERT INTO paperportfolioholdings (PaperPortfolioID, StockSymbol, Quantity, BuyPrice) VALUES (?, ?, ?, ?)",
+      //   [portfolioId, normalizedSymbol, parsedQuantity, currentPrice]
+      // );
+
+      // ✅ ใช้ราคา USD ในการบันทึก BuyPrice
       await connection.query(
         "INSERT INTO paperportfolioholdings (PaperPortfolioID, StockSymbol, Quantity, BuyPrice) VALUES (?, ?, ?, ?)",
-        [portfolioId, normalizedSymbol, parsedQuantity, currentPrice]
+        [portfolioId, normalizedSymbol, parsedQuantity, priceUSD]
       );
     } else { // 'sell'
       const [holdingRows] = await connection.query(
@@ -2496,7 +2781,7 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
         [portfolioId, normalizedSymbol]
       );
 
-      const totalHeldQuantity = holdingRows.reduce((sum, row) => sum + row.Quantity, 0);
+      const totalHeldQuantity = holdingRows.reduce((sum, row) => sum + Number(row.Quantity), 0);
       if (totalHeldQuantity < parsedQuantity) {
         await connection.rollback();
         return res.status(400).json({ error: "จำนวนหุ้นที่ต้องการขายไม่เพียงพอ" });
@@ -2508,10 +2793,10 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
       for (const holding of holdingRows) {
         if (quantityToSell <= 0) break;
 
-        const sellFromThisLot = Math.min(quantityToSell, holding.Quantity);
+        const sellFromThisLot = Math.min(quantityToSell, Number(holding.Quantity));
         quantityToSell -= sellFromThisLot;
 
-        const newLotQuantity = holding.Quantity - sellFromThisLot;
+        const newLotQuantity = Number(holding.Quantity) - sellFromThisLot;
         if (newLotQuantity > 0) {
           await connection.query(
             "UPDATE paperportfolioholdings SET Quantity = ? WHERE PaperHoldingID = ?",
@@ -2524,11 +2809,18 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
     }
 
     // 5.5 บันทึกประวัติการทำรายการลงในตารางสำหรับ Paper Trading
+    // เดิม:
+    // await connection.query(
+    //   "INSERT INTO papertrade (PaperPortfolioID, StockSymbol, TradeType, Quantity, Price, TradeDate, UserID) VALUES (?, ?, ?, ?, ?, NOW(), ?)",
+    //   [portfolioId, normalizedSymbol, tradeType, parsedQuantity, currentPrice, userId]
+    // );
+
+    // ✅ ใช้ราคา USD ในการบันทึก Price
     await connection.query(
-      "INSERT INTO papertrade (StockSymbol, TradeType, Quantity, Price, TradeDate, UserID) VALUES (?, ?, ?, ?, NOW(), ?)",
-      [normalizedSymbol, tradeType, parsedQuantity, currentPrice, userId]
+      "INSERT INTO papertrade (PaperPortfolioID, StockSymbol, TradeType, Quantity, Price, TradeDate, UserID) VALUES (?, ?, ?, ?, ?, NOW(), ?)",
+      [portfolioId, normalizedSymbol, tradeType, parsedQuantity, priceUSD, userId]
     );
-    
+
     // 6. Commit Transaction
     await connection.commit();
     res.status(200).json({
@@ -2537,9 +2829,12 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
         type: tradeType,
         symbol: normalizedSymbol,
         quantity: parsedQuantity,
-        price: currentPrice,
-        priceCurrency: isThaiStock ? 'THB' : 'USD',
-        totalValueUSD: totalCostOrValueUSD.toFixed(2)
+        // แสดงข้อมูลทั้งสองสกุลเพื่อความโปร่งใส
+        market: market,
+        marketPrice: Number(currentPrice),               // THB ถ้าไทย / USD ถ้า US
+        marketPriceCurrency: isThaiStock ? 'THB' : 'USD',
+        priceUSD: Number(priceUSD.toFixed(6)),           // ราคา USD ที่บันทึกลง DB
+        totalValueUSD: Number(totalCostOrValueUSD.toFixed(2))
       }
     });
 
@@ -2552,20 +2847,21 @@ app.post("/api/portfolio/trade", verifyToken, async (req, res) => {
   }
 });
 
+
+
+
 app.get("/api/portfolio/history", verifyToken, async (req, res) => {
   let connection;
   try {
     connection = await pool.promise().getConnection();
     const userId = req.userId;
 
-    // 1. ค้นหา PaperPortfolioID ของผู้ใช้
     const [portfolioRows] = await connection.query(
       "SELECT PaperPortfolioID FROM papertradeportfolio WHERE UserID = ?",
       [userId]
     );
 
     if (portfolioRows.length === 0) {
-      // ถ้าผู้ใช้ยังไม่มีพอร์ต ก็จะยังไม่มีประวัติการทำรายการ
       return res.status(200).json({
         message: "ไม่พบพอร์ตการลงทุน จึงไม่มีประวัติการทำรายการ",
         data: []
@@ -2574,7 +2870,6 @@ app.get("/api/portfolio/history", verifyToken, async (req, res) => {
 
     const portfolioId = portfolioRows[0].PaperPortfolioID;
 
-    // 2. ดึงประวัติการทำรายการทั้งหมดสำหรับพอร์ตนั้นๆ
     const [transactions] = await connection.query(
       `SELECT StockSymbol, TradeType, Quantity, Price, TradeDate
        FROM papertrade
@@ -2647,7 +2942,6 @@ app.post("/api/create-demo", verifyToken, async (req, res) => {
 
 
 
-
 //-----------------------------------------------------------------------------------------------------------------------------------------------//
 
 // Middleware to verify admin role
@@ -2658,15 +2952,6 @@ const verifyAdmin = (req, res, next) => {
   next();
 };
 
-// API ให้ React ดึง Secure Embed URL ไปใช้
-app.get("/get-embed-url", (req, res) => {
-  res.json({
-    embedUrl:
-      "https://app.powerbi.com/view?r=eyJrIjoiOGU0ZjNhMjktYjJiZC00ODA1LWIzM2EtNzNkNDg0NzhhMzVkIiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
-    embedUrl:
-      "https://app.powerbi.com/view?r=eyJrIjoiY2VlNGQ1MTItMTE1Zi00ODkyLThhYjEtMjg4MWRkOTRkZWI2IiwidCI6IjU3ZDY5NWQ0LWFkODYtNDRkMy05Yzk1LTcxNzZkZWFjZjAzZCIsImMiOjEwfQ%3D%3D",
-    });
-});
 
 //Admin//
 app.post("/api/admin/login", async (req, res) => {
@@ -2726,9 +3011,688 @@ app.post("/api/admin/login", async (req, res) => {
 });
 
 
+//=====================================================================================================//
+// 												ADMIN - USER MANAGEMENT API
+//=====================================================================================================//
+
+//=====================================================================================================//
+//  ADMIN - USER MANAGEMENT API
+//=====================================================================================================//
+
+// ดึงรายชื่อผู้ใช้ทั้งหมด (พร้อมแบ่งหน้า + ค้นหา)
+app.get("/api/admin/users", verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const page = Math.max(parseInt(req.query.page) || 1, 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
+        const offset = (page - 1) * limit;
+        const searchTerm = req.query.search || '';
+
+        const whereClause = searchTerm ? `WHERE (Username LIKE ? OR Email LIKE ?)` : '';
+        const searchParams = searchTerm ? [`%${searchTerm}%`, `%${searchTerm}%`] : [];
+
+        const countSql = `SELECT COUNT(*) as total FROM \`User\` ${whereClause}`;
+        const dataSql = `
+            SELECT UserID, Username, Email, Role, Status
+            FROM \`User\`
+            ${whereClause}
+            ORDER BY UserID DESC
+            LIMIT ? OFFSET ?
+        `;
+
+        const [countResult] = await pool.promise().query(countSql, searchParams);
+        const [usersResult] = await pool.promise().query(dataSql, [...searchParams, limit, offset]);
+
+        const totalUsers = countResult[0].total;
+        const totalPages = Math.ceil(totalUsers / limit);
+
+        res.status(200).json({
+            message: "Successfully retrieved users",
+            data: usersResult,
+            pagination: {
+                currentPage: page,
+                totalPages,
+                totalUsers,
+                limit
+            }
+        });
+    } catch (err) {
+        console.error("Database error fetching users:", err);
+        res.status(500).json({ error: "Database error while fetching users" });
+    }
+});
+
+
+// อัปเดตสถานะผู้ใช้ (active/suspended)
+app.put("/api/admin/users/:userId/status", verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { status } = req.body;
+
+        if (!status || !['active', 'suspended'].includes(status.toLowerCase())) {
+            return res.status(400).json({ error: "Invalid status. Must be 'active' or 'suspended'." });
+        }
+
+        if (parseInt(userId, 10) === req.userId) {
+            return res.status(403).json({ error: "Admins cannot change their own status." });
+        }
+
+        const sql = "UPDATE `User` SET Status = ? WHERE UserID = ?";
+        const [result] = await pool.promise().query(sql, [status.toLowerCase(), userId]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        res.status(200).json({ message: `User status successfully updated to ${status}` });
+    } catch (err) {
+        console.error("Database error updating user status:", err);
+        res.status(500).json({ error: "Database error" });
+    }
+});
+
+
+// แก้ไขข้อมูลผู้ใช้ (Username, Email, Role)
+app.put("/api/admin/users/:userId", verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { username, email, role } = req.body;
+
+        if (!username && !email && !role) {
+            return res.status(400).json({ error: "No data provided for update." });
+        }
+
+        let updateFields = [];
+        let params = [];
+
+        if (username) {
+            updateFields.push("Username = ?");
+            params.push(username);
+        }
+        if (email) {
+            updateFields.push("Email = ?");
+            params.push(email);
+        }
+        if (role) {
+            updateFields.push("Role = ?");
+            params.push(role);
+        }
+
+        params.push(userId);
+
+        const sql = `UPDATE \`User\` SET ${updateFields.join(", ")} WHERE UserID = ?`;
+        const [result] = await pool.promise().query(sql, params);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        // คืนข้อมูล user หลังแก้ไข
+        const [rows] = await pool.promise().query(
+            `SELECT UserID, Username, Email, Role, Status FROM \`User\` WHERE UserID = ?`,
+            [userId]
+        );
+
+        res.status(200).json({ message: "User profile updated successfully", data: rows[0] });
+    } catch (err) {
+        if (err.code === 'ER_DUP_ENTRY') {
+            const message = err.message.includes('Username')
+                ? "This username is already in use."
+                : "This email is already in use.";
+            return res.status(409).json({ error: message });
+        }
+        console.error("Database error updating user:", err);
+        return res.status(500).json({ error: "Database error while updating user." });
+    }
+});
+
+
+// ลบผู้ใช้
+app.delete("/api/admin/users/:userId", verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const { userId } = req.params;
+
+        if (parseInt(userId, 10) === req.userId) {
+            return res.status(403).json({ error: "Admins cannot delete their own account." });
+        }
+
+        const sql = "DELETE FROM `User` WHERE UserID = ?";
+        const [result] = await pool.promise().query(sql, [userId]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        res.status(200).json({ message: "User deleted successfully" });
+    } catch (err) {
+        console.error("Database error deleting user:", err);
+        if (err.code === 'ER_ROW_IS_REFERENCED_2') {
+            return res.status(400).json({ error: "Cannot delete user. The user is linked to other data." });
+        }
+        return res.status(500).json({ error: "Database error while deleting user." });
+    }
+});
+
+//=====================================================================================================//
+//  ADMIN - SIMPLE USER HOLDINGS (ดูหุ้นที่ผู้ใช้ถืออยู่แบบตรง ๆ)
+//  คืน: StockSymbol, Quantity, BuyPrice, PaperPortfolioID (ตามจริงจาก holdings)
+//  ตัวเลือก: ?symbol=AMD (กรองสัญลักษณ์), ?page=1&limit=50 (ถ้าข้อมูลเยอะ)
+//=====================================================================================================//
+app.get('/api/admin/users/:userId/holdings-simple', verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const userId = parseInt(req.params.userId, 10);
+    if (!Number.isInteger(userId)) return res.status(400).json({ error: 'Invalid userId' });
+
+    // optional
+    const symbol = req.query.symbol?.trim();
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 100, 1), 500);
+    const offset = (page - 1) * limit;
+
+    // base where
+    const where = ['ptp.UserID = ?'];
+    const params = [userId];
+
+    if (symbol) {
+      where.push('pph.StockSymbol = ?');
+      params.push(symbol);
+    }
+
+    // นับจำนวน (รองรับ pagination)
+    const countSql = `
+      SELECT COUNT(*) AS total
+      FROM paperportfolioholdings pph
+      JOIN papertradeportfolio ptp ON ptp.PaperPortfolioID = pph.PaperPortfolioID
+      WHERE ${where.join(' AND ')}
+    `;
+    const [cntRows] = await db.query(countSql, params);
+    const total = cntRows?.[0]?.total || 0;
+
+    // ดึง holdings ตามจริง (ไม่คำนวณราคา/มูลค่าใด ๆ)
+    const dataSql = `
+      SELECT 
+        pph.PaperHoldingID,
+        pph.StockSymbol,
+        pph.Quantity,
+        pph.BuyPrice,
+        pph.PaperPortfolioID
+      FROM paperportfolioholdings pph
+      JOIN papertradeportfolio ptp ON ptp.PaperPortfolioID = pph.PaperPortfolioID
+      WHERE ${where.join(' AND ')}
+      ORDER BY pph.StockSymbol
+      LIMIT ? OFFSET ?
+    `;
+    
+    const [rows] = await db.query(dataSql, [...params, limit, offset]);
+
+    return res.status(200).json({
+      message: 'OK',
+      data: rows, // [{PaperHoldingID, StockSymbol, Quantity, BuyPrice, PaperPortfolioID}, ...]
+      pagination: { currentPage: page, totalPages: Math.ceil(total / limit), total, limit }
+    });
+  } catch (err) {
+    console.error('GET /api/admin/users/:userId/holdings-simple error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+//=====================================================================================================//
+// 										API ทั้งหมดสำหรับหน้า Dashboard
+//=====================================================================================================//
+
+/**
+ * API: ดึงรายชื่อหุ้นทั้งหมดตามตลาด (สำหรับ Dropdown)
+ * - รับค่า market จาก query parameter เช่น /api/stocks?market=Thailand
+ */
+app.get("/api/stocks", verifyToken, async (req, res) => {
+    try {
+        const { market } = req.query;
+
+        if (!market) {
+            return res.status(400).json({ error: "Market query parameter is required." });
+        }
+
+        const validMarkets = ['Thailand', 'America'];
+        if (!validMarkets.includes(market)) {
+            return res.status(400).json({ error: "Invalid market specified. Use 'Thailand' or 'America'." });
+        }
+
+        const sql = `
+            SELECT StockSymbol, CompanyName 
+            FROM Stock 
+            WHERE Market = ? 
+            ORDER BY StockSymbol ASC
+        `;
+        
+        const [results] = await pool.promise().query(sql, [market]);
+
+        res.status(200).json({
+            message: `Successfully retrieved ${results.length} stocks for ${market}`,
+            data: results
+        });
+
+    } catch (error) {
+        console.error("Internal server error in /api/stocks:", error.message);
+        res.status(500).json({ error: "Internal server error" });
+    } 
+});
+
+
+
+
+
+
+//=====================================================================================================//
+// 										API: GET CHART DATA FOR A SPECIFIC STOCK (FIXED)
+//=====================================================================================================//
+
+app.get("/api/chart-data/:symbol", verifyToken, async (req, res) => {
+    try {
+        const { symbol } = req.params;
+        const { timeframe = '1M' } = req.query;
+
+        // กำหนดจำนวนข้อมูลที่จะดึงตามช่วงเวลา (เพิ่ม '1D' และ 'ALL' เข้ามา)
+        const timeFrameLimits = {
+            '1D': 1,
+            '5D': 5,
+            '1M': 22,
+            '3M': 66,
+            '6M': 132,
+            '1Y': 252,
+            'ALL': null // null หมายถึงไม่จำกัดจำนวน
+        };
+
+        const upperCaseTimeframe = timeframe.toUpperCase();
+        if (!timeFrameLimits.hasOwnProperty(upperCaseTimeframe)) {
+            return res.status(400).json({ error: "Invalid timeframe. Use '1D', '5D', '1M', '3M', '6M', '1Y', or 'ALL'." });
+        }
+
+        const limit = timeFrameLimits[upperCaseTimeframe];
+
+        let sql;
+        let params;
+
+        // Logic สำหรับดึงข้อมูลย้อนหลัง (ใช้ได้กับทุก Timeframe ที่มี limit)
+        if (limit !== null) {
+            sql = `
+                SELECT * FROM (
+                    SELECT 
+                        DATE_FORMAT(Date, '%Y-%m-%d') as date, 
+                        ClosePrice 
+                    FROM stockdetail 
+                    WHERE StockSymbol = ? AND Volume != 0
+                    ORDER BY Date DESC
+                    LIMIT ?
+                ) AS sub
+                ORDER BY date ASC;
+            `;
+            params = [symbol, limit];
+        } 
+        // Logic สำหรับดึงข้อมูลทั้งหมด ('ALL')
+        else {
+            sql = `
+                SELECT 
+                    DATE_FORMAT(Date, '%Y-%m-%d') as date, 
+                    ClosePrice 
+                FROM stockdetail 
+                WHERE StockSymbol = ? AND Volume != 0
+                ORDER BY Date ASC;
+            `;
+            params = [symbol];
+        }
+        
+        const [results] = await pool.promise().query(sql, params);
+
+        if (results.length === 0) {
+            return res.status(404).json({ message: `No historical data found for symbol ${symbol}.` });
+        }
+
+        res.status(200).json({
+            message: `Successfully retrieved chart data for ${symbol}`,
+            timeframe: timeframe,
+            data: results
+        });
+
+    } catch (error) {
+        console.error("Internal server error in /api/chart-data:", error.message);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+
+// API: GET TOP 3 GAINERS AND LOSERS BY MARKET (STRICT: trading day only)
+app.get("/api/market-movers", verifyToken, async (req, res) => {
+  try {
+    const { market } = req.query; // 'Thailand' หรือ 'America'
+
+    if (!market || !["Thailand", "America"].includes(market)) {
+      return res
+        .status(400)
+        .json({ error: "Invalid or missing market parameter." });
+    }
+
+    // 1) หา 'วันล่าสุดที่มีการเทรดจริง' ของ market นั้นๆ (Volume > 0) และให้ MySQL คืนเป็น DATE เลย
+    const [latestDateRows] = await pool
+      .promise()
+      .query(
+        `
+        SELECT DATE(MAX(sd.Date)) AS latestDate
+        FROM stockdetail sd
+        JOIN stock s ON sd.StockSymbol = s.StockSymbol
+        WHERE s.Market = ? AND sd.Volume > 0
+      `,
+        [market]
+      );
+
+    const latestDate = latestDateRows?.[0]?.latestDate;
+
+    if (!latestDate) {
+      return res.status(200).json({
+        message: "No trading day found for the specified market (Volume = 0).",
+        data: { topGainers: [], topLosers: [] },
+      });
+    }
+
+    // 2) Top 3 Gainers (เฉพาะวันล่าสุด และมีการเทรดจริง)
+    const gainersSql = `
+      SELECT s.StockSymbol, sd.ClosePrice, sd.Changepercen, sd.Volume
+      FROM stockdetail sd
+      JOIN stock s ON sd.StockSymbol = s.StockSymbol
+      WHERE s.Market = ?
+        AND DATE(sd.Date) = ?
+        AND sd.Changepercen > 0
+        AND sd.Volume > 0
+      ORDER BY sd.Changepercen DESC
+      LIMIT 3
+    `;
+    const [topGainers] = await pool
+      .promise()
+      .query(gainersSql, [market, latestDate]);
+
+    // 3) Top 3 Losers (เฉพาะวันล่าสุด และมีการเทรดจริง)
+    const losersSql = `
+      SELECT s.StockSymbol, sd.ClosePrice, sd.Changepercen, sd.Volume
+      FROM stockdetail sd
+      JOIN stock s ON sd.StockSymbol = s.StockSymbol
+      WHERE s.Market = ?
+        AND DATE(sd.Date) = ?
+        AND sd.Changepercen < 0
+        AND sd.Volume > 0
+      ORDER BY sd.Changepercen ASC
+      LIMIT 3
+    `;
+    const [topLosers] = await pool
+      .promise()
+      .query(losersSql, [market, latestDate]);
+
+    return res.status(200).json({
+      message: `Successfully retrieved market movers for ${market}`,
+      date: latestDate, // YYYY-MM-DD จาก MySQL โดยตรง
+      data: { topGainers, topLosers },
+    });
+  } catch (error) {
+    console.error("Internal server error in /api/market-movers:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+//=====================================================================================================//
+//  API: AI TRADE MONITOR (ADMIN) — JOIN กับ user เพื่อเอา Username แทน UserID
+//=====================================================================================================//
+
+app.get('/api/admin/ai-trades', verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise(); // ✅ ใช้ promise wrapper จาก pool เดิม
+  try {
+    // pagination
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 200);
+    const offset = (page - 1) * limit;
+
+    // optional filters
+    const { userId, symbol, action, date_from, date_to } = req.query;
+
+    // allowlist orderBy กัน SQL injection
+    const ORDERABLE = new Set([
+      'PaperTradeID','TradeType','Quantity','Price','TradeDate','Username','StockSymbol'
+    ]);
+    const orderBy = ORDERABLE.has(req.query.orderBy) ? req.query.orderBy : 'TradeDate';
+    const order   = String(req.query.order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+    // WHERE clause
+    const where = [];
+    const params = [];
+
+    if (userId)    { where.push('pt.UserID = ?');           params.push(userId); }
+    if (symbol)    { where.push('pt.StockSymbol = ?');      params.push(symbol); }
+    if (action)    { where.push('pt.TradeType = ?');        params.push(action); }
+    if (date_from) { where.push('DATE(pt.TradeDate) >= ?'); params.push(date_from); }
+    if (date_to)   { where.push('DATE(pt.TradeDate) <= ?'); params.push(date_to); }
+
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    // นับจำนวนทั้งหมด
+    const countSql = `
+      SELECT COUNT(*) AS total
+      FROM trademine.papertrade pt
+      JOIN trademine.user u ON pt.UserID = u.UserID
+      ${whereClause}
+    `;
+    const [countRows] = await db.query(countSql, params);
+    const totalTrades = countRows?.[0]?.total ?? 0;
+
+    // ดึงข้อมูล
+    const dataSql = `
+      SELECT
+        pt.PaperTradeID,
+        pt.TradeType,
+        pt.Quantity,
+        pt.Price,
+        pt.TradeDate,
+        u.Username AS Username,
+        pt.StockSymbol
+      FROM trademine.papertrade pt
+      JOIN trademine.user u ON pt.UserID = u.UserID
+      ${whereClause}
+      ORDER BY ${orderBy} ${order}
+      LIMIT ? OFFSET ?
+    `;
+    const [rows] = await db.query(dataSql, [...params, limit, offset]);
+
+    return res.status(200).json({
+      message: 'OK',
+      data: rows, // ตอนนี้ได้ Username แล้วแทน UserID
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(totalTrades / limit),
+        totalTrades,
+        limit
+      }
+    });
+  } catch (err) {
+    console.error('Internal server error /api/admin/ai-trades:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+
+
+// === MARKET TREND (2 ENDPOINTS) ===
+
+// 1) SYMBOLS by market (dropdown)
+app.get("/api/market-trend/symbols", verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const market = (req.query.market || "").trim();
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 500, 1), 2000);
+    if (!market) return res.status(400).json({ error: "market is required" });
+
+    // ถ้ามีตาราง Stock ให้ใช้แบบนี้ (มี CompanyName & Market)
+    const [rows] = await db.query(
+      `
+      SELECT s.StockSymbol, s.CompanyName, s.Market, MAX(sd.Date) AS newestDate
+      FROM Stock s
+      LEFT JOIN trademine.stockdetail sd
+        ON sd.StockSymbol = s.StockSymbol
+      WHERE s.Market = ?
+      GROUP BY s.StockSymbol, s.CompanyName, s.Market
+      ORDER BY s.StockSymbol
+      LIMIT ?
+      `,
+      [market, limit]
+    );
+
+    res.status(200).json({ message: "OK", data: rows });
+  } catch (err) {
+    console.error("symbols error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 2) DATA (latest + historical)
+// โหมด A: ?symbol=PTT&limit=66   -> N วันล่าสุด (distinct date)
+// โหมด B: ?symbol=PTT&from=YYYY-MM-DD&to=YYYY-MM-DD -> ตามช่วงวันที่
+app.get("/api/market-trend/data", verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const symbol = (req.query.symbol || "").trim().toUpperCase();
+    if (!symbol) return res.status(400).json({ error: "symbol is required" });
+
+    const from = (req.query.from || "").trim();
+    const to   = (req.query.to || "").trim();
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 66, 1), 1000);
+
+    // latest แถวเดียว (ไม่กรอง Volume)
+    const [latestRows] = await db.query(
+      `
+      SELECT 
+        StockDetailID, StockSymbol, Date,
+        OpenPrice, HighPrice, LowPrice, ClosePrice, Volume
+      FROM trademine.stockdetail
+      WHERE StockSymbol = ?
+      ORDER BY Date DESC
+      LIMIT 1
+      `,
+      [symbol]
+    );
+    const latest = latestRows[0] || null;
+
+    // historical series
+    let series = [];
+    if (from && to) {
+      // โหมดช่วงวันที่
+      const [rows] = await db.query(
+        `
+        SELECT DATE_FORMAT(Date,'%Y-%m-%d') AS date,
+               OpenPrice, HighPrice, LowPrice, ClosePrice, Volume
+        FROM trademine.stockdetail
+        WHERE StockSymbol = ?
+          AND Date BETWEEN ? AND ?
+        ORDER BY Date ASC
+        `,
+        [symbol, from, to]
+      );
+      series = rows;
+    } else {
+      // โหมดจำนวนแท่งล่าสุด (ใช้ DISTINCT date กันวันหยุด)
+      const [rows] = await db.query(
+        `
+        SELECT 
+          DATE_FORMAT(s.Date,'%Y-%m-%d') AS date,
+          s.OpenPrice, s.HighPrice, s.LowPrice, s.ClosePrice, s.Volume
+        FROM trademine.stockdetail s
+        JOIN (
+          SELECT d FROM (
+            SELECT DISTINCT Date AS d
+            FROM trademine.stockdetail
+            WHERE StockSymbol = ?
+            ORDER BY Date DESC
+            LIMIT ?
+          ) dd
+        ) lastd ON lastd.d = s.Date
+        WHERE s.StockSymbol = ?
+        ORDER BY s.Date ASC
+        `,
+        [symbol, limit, symbol]
+      );
+      series = rows;
+    }
+
+    if (!latest && series.length === 0) {
+      return res.status(404).json({ error: "No data" });
+    }
+
+    res.status(200).json({
+      message: "OK",
+      symbol,
+      latest,
+      series
+    });
+  } catch (err) {
+    console.error("data error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.get("/api/model-performance", async (req, res) => {
+    const { symbol, start, end } = req.query;
+    const sql = `
+        SELECT Date, ClosePrice, 
+               PredictionClose_LSTM, PredictionClose_GRU, PredictionClose_Ensemble,
+               PredictionTrend_LSTM, PredictionTrend_GRU, PredictionTrend_Ensemble
+        FROM stockdetail
+        WHERE StockSymbol = ? AND Date BETWEEN ? AND ?
+        ORDER BY Date
+    `;
+    const [rows] = await db.query(sql, [symbol, start, end]);
+
+    const calcRMSE = (actual, predicted) => {
+        let mse = actual.reduce((sum, val, i) => sum + Math.pow(val - predicted[i], 2), 0) / actual.length;
+        return Math.sqrt(mse);
+    };
+
+    const calcMAPE = (actual, predicted) => {
+        let ape = actual.reduce((sum, val, i) => sum + Math.abs((val - predicted[i]) / val), 0) / actual.length;
+        return ape * 100;
+    };
+
+    const calcTrendAccuracy = (actual, predicted) => {
+        let correct = actual.reduce((count, val, i, arr) => {
+            if (i === 0) return count;
+            let actualTrend = val > arr[i-1] ? 'UP' : 'DOWN';
+            let predTrend = predicted[i] > predicted[i-1] ? 'UP' : 'DOWN';
+            return count + (actualTrend === predTrend ? 1 : 0);
+        }, 0);
+        return (correct / (actual.length - 1)) * 100;
+    };
+
+    const actual = rows.map(r => r.ClosePrice);
+
+    const performance = {
+        LSTM: {
+            RMSE: calcRMSE(actual, rows.map(r => r.PredictionClose_LSTM)),
+            MAPE: calcMAPE(actual, rows.map(r => r.PredictionClose_LSTM)),
+            TrendAccuracy: calcTrendAccuracy(actual, rows.map(r => r.PredictionClose_LSTM))
+        },
+        GRU: {
+            RMSE: calcRMSE(actual, rows.map(r => r.PredictionClose_GRU)),
+            MAPE: calcMAPE(actual, rows.map(r => r.PredictionClose_GRU)),
+            TrendAccuracy: calcTrendAccuracy(actual, rows.map(r => r.PredictionClose_GRU))
+        },
+        Ensemble: {
+            RMSE: calcRMSE(actual, rows.map(r => r.PredictionClose_Ensemble)),
+            MAPE: calcMAPE(actual, rows.map(r => r.PredictionClose_Ensemble)),
+            TrendAccuracy: calcTrendAccuracy(actual, rows.map(r => r.PredictionClose_Ensemble))
+        }
+    };
+
+    res.json({ data: rows, performance });
+});
+
+
 // Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+    console.log(`Server is running on port ${PORT}`);
 });
-  
