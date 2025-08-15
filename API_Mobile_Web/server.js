@@ -3172,273 +3172,69 @@ app.delete("/api/admin/users/:userId", verifyToken, verifyAdmin, async (req, res
     }
 });
 
-// =====================================================================================================
-//  ADMIN - USER DETAIL SNAPSHOT (user + portfolios + holdings)
-//  GET /api/admin/users/:userId/portfolio-snapshot
-//  - อ่านพอร์ตจาก papertradeportfolio
-//  - อ่าน holdings จาก paperportfolioholdings
-//  - ถ้า holdings ว่าง => fallback คำนวณจาก papertrade (buy=+, sell=-, AvgCost=ถ่วงน้ำหนักเฉพาะ buy)
-//  - MarketValue = Qty * AvgCost (ถ้ามีราคาจริงค่อย JOIN ทีหลัง)
-// =====================================================================================================
-app.get("/api/admin/users/:userId/portfolio-snapshot", verifyToken, verifyAdmin, async (req, res) => {
+//=====================================================================================================//
+//  ADMIN - SIMPLE USER HOLDINGS (ดูหุ้นที่ผู้ใช้ถืออยู่แบบตรง ๆ)
+//  คืน: StockSymbol, Quantity, BuyPrice, PaperPortfolioID (ตามจริงจาก holdings)
+//  ตัวเลือก: ?symbol=AMD (กรองสัญลักษณ์), ?page=1&limit=50 (ถ้าข้อมูลเยอะ)
+//=====================================================================================================//
+app.get('/api/admin/users/:userId/holdings-simple', verifyToken, verifyAdmin, async (req, res) => {
   const db = pool.promise();
   try {
     const userId = parseInt(req.params.userId, 10);
-    if (!Number.isInteger(userId)) return res.status(400).json({ error: "Invalid userId" });
+    if (!Number.isInteger(userId)) return res.status(400).json({ error: 'Invalid userId' });
 
-    // 1) user
-    const [uRows] = await db.query(
-      "SELECT UserID, Username, Email, Role, Status FROM `user` WHERE UserID = ?",
-      [userId]
-    );
-    if (uRows.length === 0) return res.status(404).json({ error: "User not found" });
-    const user = uRows[0];
+    // optional
+    const symbol = req.query.symbol?.trim();
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 100, 1), 500);
+    const offset = (page - 1) * limit;
 
-    // 2) portfolios
-    const [pRows] = await db.query(
-      `SELECT PaperPortfolioID, Balance, UserID, NOW() AS CreatedAt
-       FROM trademine.papertradeportfolio
-       WHERE UserID = ?
-       ORDER BY PaperPortfolioID DESC`,
-      [userId]
-    );
+    // base where
+    const where = ['ptp.UserID = ?'];
+    const params = [userId];
 
-    const portfolios = [];
-    for (const p of pRows) {
-      // 3) holdings จากตารางสรุป
-      const [hSumRows] = await db.query(
-        `SELECT 
-           PaperHoldingID AS HoldingID,
-           StockSymbol,
-           Quantity,
-           BuyPrice AS AvgCost,
-           NOW() AS UpdatedAt
-         FROM trademine.paperportfolioholdings
-         WHERE PaperPortfolioID = ?
-         ORDER BY StockSymbol`,
-        [p.PaperPortfolioID]
-      );
-
-      let holdings = hSumRows.map(h => ({
-        HoldingID: h.HoldingID,
-        StockSymbol: h.StockSymbol,
-        Quantity: Number(h.Quantity || 0),
-        AvgCost: Number(h.AvgCost || 0),
-        MarketValue: Number(h.Quantity || 0) * Number(h.AvgCost || 0),
-        UpdatedAt: h.UpdatedAt
-      }));
-
-      // 4) ถ้าไม่มีใน holdings summary => คำนวณจาก papertrade
-      if (holdings.length === 0) {
-        const [calcRows] = await db.query(
-          `SELECT 
-             StockSymbol,
-             SUM(CASE WHEN TradeType='buy'  THEN Quantity ELSE -Quantity END) AS Quantity,
-             CASE 
-               WHEN SUM(CASE WHEN TradeType='buy' THEN Quantity ELSE 0 END) = 0 THEN 0
-               ELSE ROUND(
-                 SUM(CASE WHEN TradeType='buy' THEN Quantity * Price ELSE 0 END) /
-                 NULLIF(SUM(CASE WHEN TradeType='buy' THEN Quantity ELSE 0 END), 0)
-               , 4)
-             END AS AvgCost,
-             MAX(TradeDate) AS UpdatedAt
-           FROM trademine.papertrade
-           WHERE PaperPortfolioID = ?
-           GROUP BY StockSymbol
-           HAVING Quantity IS NOT NULL AND Quantity <> 0
-           ORDER BY StockSymbol`,
-          [p.PaperPortfolioID]
-        );
-
-        holdings = calcRows.map((r, idx) => ({
-          HoldingID: `${p.PaperPortfolioID}-${idx + 1}`,
-          StockSymbol: r.StockSymbol,
-          Quantity: Number(r.Quantity || 0),
-          AvgCost: Number(r.AvgCost || 0),
-          MarketValue: Number(r.Quantity || 0) * Number(r.AvgCost || 0),
-          UpdatedAt: r.UpdatedAt
-        }));
-      }
-
-      portfolios.push({
-        PortfolioID: p.PaperPortfolioID,
-        Name: `Paper Portfolio #${p.PaperPortfolioID}`,
-        Type: "paper",
-        CashBalance: Number(p.Balance || 0),
-        CreatedAt: p.CreatedAt,
-        Holdings: holdings
-      });
+    if (symbol) {
+      where.push('pph.StockSymbol = ?');
+      params.push(symbol);
     }
 
-    return res.status(200).json({
-      message: "Successfully retrieved portfolio snapshot",
-      data: {
-        UserID: user.UserID,
-        Username: user.Username,
-        Email: user.Email,
-        Role: user.Role,
-        Status: user.Status,
-        Portfolios: portfolios
-      }
-    });
-  } catch (err) {
-    console.error("GET /api/admin/users/:userId/portfolio-snapshot error:", err);
-    return res.status(500).json({ error: "Database error while fetching portfolio snapshot" });
-  }
-});
+    // นับจำนวน (รองรับ pagination)
+    const countSql = `
+      SELECT COUNT(*) AS total
+      FROM paperportfolioholdings pph
+      JOIN papertradeportfolio ptp ON ptp.PaperPortfolioID = pph.PaperPortfolioID
+      WHERE ${where.join(' AND ')}
+    `;
+    const [cntRows] = await db.query(countSql, params);
+    const total = cntRows?.[0]?.total || 0;
 
-
-// =====================================================================================================
-//  ADMIN - USER PORTFOLIOS (ย่อ)
-//  GET /api/admin/users/:userId/portfolios
-// =====================================================================================================
-app.get("/api/admin/users/:userId/portfolios", verifyToken, verifyAdmin, async (req, res) => {
-  const db = pool.promise();
-  try {
-    const userId = parseInt(req.params.userId, 10);
-    if (!Number.isInteger(userId)) return res.status(400).json({ error: "Invalid userId" });
-
-    const [rows] = await db.query(
-      `SELECT 
-         p.PaperPortfolioID   AS PortfolioID,
-         p.Balance            AS CashBalance,
-         p.UserID,
-         NOW()                AS CreatedAt,
-         COALESCE(hc.holding_count, 0) AS holding_count,
-         COALESCE(hc.quantity_total, 0) AS quantity_total
-       FROM trademine.papertradeportfolio p
-       LEFT JOIN (
-         SELECT PaperPortfolioID,
-                COUNT(*) AS holding_count,
-                SUM(Quantity) AS quantity_total
-         FROM trademine.paperportfolioholdings
-         GROUP BY PaperPortfolioID
-       ) hc ON hc.PaperPortfolioID = p.PaperPortfolioID
-       WHERE p.UserID = ?
-       ORDER BY p.PaperPortfolioID DESC`,
-      [userId]
-    );
-
-    return res.status(200).json({ message: "OK", data: rows });
-  } catch (err) {
-    console.error("GET /api/admin/users/:userId/portfolios error:", err);
-    return res.status(500).json({ error: "Database error while fetching portfolios" });
-  }
-});
-
-
-// =====================================================================================================
-//  ADMIN - HOLDINGS BY PORTFOLIO (ค้นหา/แบ่งหน้า/เรียงแบบ whitelist)
-//  GET /api/admin/portfolios/:portfolioId/holdings?search=&page=&limit=&sortBy=&sortDir=
-// =====================================================================================================
-app.get("/api/admin/portfolios/:portfolioId/holdings", verifyToken, verifyAdmin, async (req, res) => {
-  const db = pool.promise();
-  try {
-    const portfolioId = parseInt(req.params.portfolioId, 10);
-    if (!Number.isInteger(portfolioId)) return res.status(400).json({ error: "Invalid portfolioId" });
-
-    const page = Math.max(parseInt(req.query.page) || 1, 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
-    const offset = (page - 1) * limit;
-    const search = (req.query.search || '').trim();
-
-    const sortable = new Set(["StockSymbol", "Quantity", "AvgCost", "UpdatedAt"]);
-    const sortBy  = sortable.has(req.query.sortBy) ? req.query.sortBy : "UpdatedAt";
-    const sortDir = (req.query.sortDir || "DESC").toUpperCase() === "ASC" ? "ASC" : "DESC";
-
-    const where = ["pph.PaperPortfolioID = ?"];
-    const params = [portfolioId];
-    if (search) { where.push("pph.StockSymbol LIKE ?"); params.push(`%${search}%`); }
-
-    const [[{ total }]] = await db.query(
-      `SELECT COUNT(*) AS total
-       FROM trademine.paperportfolioholdings pph
-       WHERE ${ where.join(" AND ") }`,
-      params
-    );
-
-    const [rows] = await db.query(
-      `SELECT
-         pph.PaperHoldingID AS HoldingID,
-         pph.StockSymbol,
-         pph.Quantity,
-         pph.BuyPrice AS AvgCost,
-         NOW() AS UpdatedAt,
-         (pph.Quantity * pph.BuyPrice) AS MarketValue
-       FROM trademine.paperportfolioholdings pph
-       WHERE ${ where.join(" AND ") }
-       ORDER BY ${sortBy} ${sortDir}
-       LIMIT ? OFFSET ?`,
-      [...params, limit, offset]
-    );
+    // ดึง holdings ตามจริง (ไม่คำนวณราคา/มูลค่าใด ๆ)
+    const dataSql = `
+      SELECT 
+        pph.PaperHoldingID,
+        pph.StockSymbol,
+        pph.Quantity,
+        pph.BuyPrice,
+        pph.PaperPortfolioID
+      FROM paperportfolioholdings pph
+      JOIN papertradeportfolio ptp ON ptp.PaperPortfolioID = pph.PaperPortfolioID
+      WHERE ${where.join(' AND ')}
+      ORDER BY pph.StockSymbol
+      LIMIT ? OFFSET ?
+    `;
+    
+    const [rows] = await db.query(dataSql, [...params, limit, offset]);
 
     return res.status(200).json({
-      message: "OK",
-      data: rows,
-      pagination: { currentPage: page, totalPages: Math.ceil(total / limit), totalItems: total, limit }
+      message: 'OK',
+      data: rows, // [{PaperHoldingID, StockSymbol, Quantity, BuyPrice, PaperPortfolioID}, ...]
+      pagination: { currentPage: page, totalPages: Math.ceil(total / limit), total, limit }
     });
   } catch (err) {
-    console.error("GET /api/admin/portfolios/:portfolioId/holdings error:", err);
-    return res.status(500).json({ error: "Database error while fetching holdings" });
+    console.error('GET /api/admin/users/:userId/holdings-simple error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-
-// =====================================================================================================
-//  ADMIN - USER HOLDINGS (Flat, ทุกพอร์ตของ user) — optional เผื่ออยากใช้แบบราบ
-//  GET /api/admin/users/:userId/holdings?search=&page=&limit=
-// =====================================================================================================
-app.get("/api/admin/users/:userId/holdings", verifyToken, verifyAdmin, async (req, res) => {
-  const db = pool.promise();
-  try {
-    const userId = parseInt(req.params.userId, 10);
-    if (!Number.isInteger(userId)) return res.status(400).json({ error: "Invalid userId" });
-
-    const page = Math.max(parseInt(req.query.page) || 1, 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
-    const offset = (page - 1) * limit;
-    const search = (req.query.search || '').trim();
-
-    const where = ["ptp.UserID = ?"];
-    const params = [userId];
-    if (search) { where.push("pph.StockSymbol LIKE ?"); params.push(`%${search}%`); }
-
-    const [[{ total }]] = await db.query(
-      `SELECT COUNT(*) AS total
-       FROM trademine.paperportfolioholdings pph
-       JOIN trademine.papertradeportfolio ptp ON ptp.PaperPortfolioID = pph.PaperPortfolioID
-       WHERE ${ where.join(" AND ") }`,
-      params
-    );
-
-    const [rows] = await db.query(
-      `SELECT 
-         ptp.PaperPortfolioID AS PortfolioID,
-         pph.PaperHoldingID   AS HoldingID,
-         pph.StockSymbol,
-         pph.Quantity,
-         pph.BuyPrice         AS AvgCost,
-         (pph.Quantity * pph.BuyPrice) AS MarketValue,
-         NOW() AS UpdatedAt
-       FROM trademine.paperportfolioholdings pph
-       JOIN trademine.papertradeportfolio ptp ON ptp.PaperPortfolioID = pph.PaperPortfolioID
-       WHERE ${ where.join(" AND ") }
-       ORDER BY ptp.PaperPortfolioID DESC, pph.StockSymbol ASC
-       LIMIT ? OFFSET ?`,
-      [...params, limit, offset]
-    );
-
-    res.status(200).json({
-      message: "OK",
-      data: rows,
-      pagination: { currentPage: page, totalPages: Math.ceil(total / limit), totalItems: total, limit }
-    });
-  } catch (err) {
-    console.error("GET /api/admin/users/:userId/holdings error:", err);
-    return res.status(500).json({ error: "Database error while fetching user holdings" });
-  }
-});
-
 
 //=====================================================================================================//
 // 										API ทั้งหมดสำหรับหน้า Dashboard
@@ -3722,155 +3518,179 @@ app.get('/api/admin/ai-trades', verifyToken, verifyAdmin, async (req, res) => {
 
 
 
-//=====================================================================================================//
-//                                      API: MARKET TREND ANALYSIS (FIXED & COMPLETE)
-//=====================================================================================================//
+// === MARKET TREND (2 ENDPOINTS) ===
 
-/**
- * API: ดึงข้อมูลการวิเคราะห์แนวโน้มตลาดสำหรับหุ้นที่เลือก
- * - รับ StockSymbol จาก query parameter
- * - ดึงข้อมูลย้อนหลัง 252 วัน เพื่อนำไปคำนวณ Technical Indicators
- */
-app.get("/api/market-trend-analysis", verifyToken, async (req, res) => {
-    try {
-        const { symbol } = req.query;
+// 1) SYMBOLS by market (dropdown)
+app.get("/api/market-trend/symbols", verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const market = (req.query.market || "").trim();
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 500, 1), 2000);
+    if (!market) return res.status(400).json({ error: "market is required" });
 
-        if (!symbol) {
-            return res.status(400).json({ error: "Stock symbol is required." });
-        }
+    // ถ้ามีตาราง Stock ให้ใช้แบบนี้ (มี CompanyName & Market)
+    const [rows] = await db.query(
+      `
+      SELECT s.StockSymbol, s.CompanyName, s.Market, MAX(sd.Date) AS newestDate
+      FROM Stock s
+      LEFT JOIN trademine.stockdetail sd
+        ON sd.StockSymbol = s.StockSymbol
+      WHERE s.Market = ?
+      GROUP BY s.StockSymbol, s.CompanyName, s.Market
+      ORDER BY s.StockSymbol
+      LIMIT ?
+      `,
+      [market, limit]
+    );
 
-        // ดึงข้อมูลย้อนหลัง 252 วัน (ประมาณ 1 ปีการซื้อขาย) สำหรับการคำนวณ
-        const sql = `
-            SELECT 
-                Date,
-                ClosePrice,
-                Changepercen,
-                PredictionTrend_Ensemble,
-                Sentiment
-            FROM stockdetail
+    res.status(200).json({ message: "OK", data: rows });
+  } catch (err) {
+    console.error("symbols error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 2) DATA (latest + historical)
+// โหมด A: ?symbol=PTT&limit=66   -> N วันล่าสุด (distinct date)
+// โหมด B: ?symbol=PTT&from=YYYY-MM-DD&to=YYYY-MM-DD -> ตามช่วงวันที่
+app.get("/api/market-trend/data", verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const symbol = (req.query.symbol || "").trim().toUpperCase();
+    if (!symbol) return res.status(400).json({ error: "symbol is required" });
+
+    const from = (req.query.from || "").trim();
+    const to   = (req.query.to || "").trim();
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 66, 1), 1000);
+
+    // latest แถวเดียว (ไม่กรอง Volume)
+    const [latestRows] = await db.query(
+      `
+      SELECT 
+        StockDetailID, StockSymbol, Date,
+        OpenPrice, HighPrice, LowPrice, ClosePrice, Volume
+      FROM trademine.stockdetail
+      WHERE StockSymbol = ?
+      ORDER BY Date DESC
+      LIMIT 1
+      `,
+      [symbol]
+    );
+    const latest = latestRows[0] || null;
+
+    // historical series
+    let series = [];
+    if (from && to) {
+      // โหมดช่วงวันที่
+      const [rows] = await db.query(
+        `
+        SELECT DATE_FORMAT(Date,'%Y-%m-%d') AS date,
+               OpenPrice, HighPrice, LowPrice, ClosePrice, Volume
+        FROM trademine.stockdetail
+        WHERE StockSymbol = ?
+          AND Date BETWEEN ? AND ?
+        ORDER BY Date ASC
+        `,
+        [symbol, from, to]
+      );
+      series = rows;
+    } else {
+      // โหมดจำนวนแท่งล่าสุด (ใช้ DISTINCT date กันวันหยุด)
+      const [rows] = await db.query(
+        `
+        SELECT 
+          DATE_FORMAT(s.Date,'%Y-%m-%d') AS date,
+          s.OpenPrice, s.HighPrice, s.LowPrice, s.ClosePrice, s.Volume
+        FROM trademine.stockdetail s
+        JOIN (
+          SELECT d FROM (
+            SELECT DISTINCT Date AS d
+            FROM trademine.stockdetail
             WHERE StockSymbol = ?
             ORDER BY Date DESC
-            LIMIT 252;
-        `;
-        
-        const [results] = await pool.promise().query(sql, [symbol]);
-
-        if (results.length === 0) {
-            return res.status(404).json({ error: `No data found for stock symbol ${symbol}.` });
-        }
-
-        // ข้อมูลถูกดึงมาในลำดับจากใหม่ไปเก่า ต้องกลับลำดับเพื่อให้คำนวณได้ถูกต้อง
-        const historicalData = results.reverse();
-        const latestData = historicalData[historicalData.length - 1];
-        const prices = historicalData.map(d => d.ClosePrice);
-
-        // ======================== Calculation Logic for Technical Indicators ========================
-        
-        // 1. Moving Averages (MA50)
-        const ma50 = prices.slice(-50).reduce((a, b) => a + b, 0) / 50;
-        const ma200 = prices.slice(-200).reduce((a, b) => a + b, 0) / 200;
-        let maSignal = 'Neutral';
-        let maColor = '#6c757d';
-        if (prices[prices.length - 1] > ma50) {
-            maSignal = 'Bullish Momentum';
-            maColor = '#28a745';
-        } else if (prices[prices.length - 1] < ma50) {
-            maSignal = 'Bearish Momentum';
-            maColor = '#dc3545';
-        }
-        if (ma50 > ma200) {
-            maSignal = 'Golden Cross';
-            maColor = '#28a745';
-        } else if (ma50 < ma200) {
-            maSignal = 'Death Cross';
-            maColor = '#dc3545';
-        }
-
-        // 2. RSI (Relative Strength Index)
-        let rsiValue = 50; // Simplified for this example
-        let rsiSignal = 'Neutral';
-        let rsiColor = '#6c757d';
-        if (rsiValue > 70) {
-            rsiSignal = 'Overbought';
-            rsiColor = '#dc3545';
-        } else if (rsiValue < 30) {
-            rsiSignal = 'Oversold';
-            rsiColor = '#28a745';
-        }
-        
-        // 3. MACD (Moving Average Convergence Divergence) - Simplified
-        const macdLine = prices.slice(-12).reduce((a,b) => a+b, 0)/12 - prices.slice(-26).reduce((a,b) => a+b, 0)/26;
-        let macdSignal = 'Pending Calculation';
-        let macdColor = '#6c757d';
-        if (macdLine > 0) {
-            macdSignal = 'Bullish Momentum';
-            macdColor = '#28a745';
-        } else if (macdLine < 0) {
-            macdSignal = 'Bearish Momentum';
-            macdColor = '#dc3545';
-        }
-
-        // 4. Bollinger Bands (Simplified)
-        const stdDev = Math.sqrt(prices.slice(-20).map(x => Math.pow(x - prices.slice(-20).reduce((a, b) => a + b, 0)/20, 2)).reduce((a, b) => a + b, 0)/20);
-        const middleBand = prices.slice(-20).reduce((a,b) => a+b, 0)/20;
-        const upperBand = middleBand + (stdDev * 2);
-        const lowerBand = middleBand - (stdDev * 2);
-        let bollingerSignal = 'Price within Bands';
-        let bollingerColor = '#6c757d';
-        if (latestData.ClosePrice > upperBand) {
-            bollingerSignal = 'Price at Upper Band';
-            bollingerColor = '#dc3545';
-        } else if (latestData.ClosePrice < lowerBand) {
-            bollingerSignal = 'Price at Lower Band';
-            bollingerColor = '#28a745';
-        }
-
-        // ======================== End of Calculation ========================
-
-        // โครงสร้างข้อมูลสำหรับ Frontend
-        const technicalData = {
-            ma: {
-                ma50: ma50,
-                ma200: ma200,
-                signal: maSignal,
-                signalColor: maColor
-            },
-            rsi: {
-                value: rsiValue,
-                signal: rsiSignal,
-                signalColor: rsiColor
-            },
-            macd: {
-                macdLine: macdLine,
-                signalLine: 0, // Simplified, just showing MACD line
-                signal: macdSignal,
-                signalColor: macdColor
-            },
-            bollinger: {
-                upper: upperBand,
-                middle: middleBand,
-                lower: lowerBand,
-                signal: bollingerSignal,
-                signalColor: bollingerColor
-            },
-            strategy: {
-                latestSignal: latestData.PredictionTrend_Ensemble,
-                signalPrice: latestData.ClosePrice,
-                reason: 'Based on the latest AI ensemble model prediction.',
-                effectiveness: null
-            }
-        };
-
-        res.status(200).json({
-            message: `Successfully retrieved market trend data for ${symbol}`,
-            data: technicalData
-        });
-
-    } catch (error) {
-        console.error("Internal server error in /api/market-trend-analysis:", error.message);
-        res.status(500).json({ error: "Internal server error" });
+            LIMIT ?
+          ) dd
+        ) lastd ON lastd.d = s.Date
+        WHERE s.StockSymbol = ?
+        ORDER BY s.Date ASC
+        `,
+        [symbol, limit, symbol]
+      );
+      series = rows;
     }
+
+    if (!latest && series.length === 0) {
+      return res.status(404).json({ error: "No data" });
+    }
+
+    res.status(200).json({
+      message: "OK",
+      symbol,
+      latest,
+      series
+    });
+  } catch (err) {
+    console.error("data error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
+
+app.get("/api/model-performance", async (req, res) => {
+    const { symbol, start, end } = req.query;
+    const sql = `
+        SELECT Date, ClosePrice, 
+               PredictionClose_LSTM, PredictionClose_GRU, PredictionClose_Ensemble,
+               PredictionTrend_LSTM, PredictionTrend_GRU, PredictionTrend_Ensemble
+        FROM stockdetail
+        WHERE StockSymbol = ? AND Date BETWEEN ? AND ?
+        ORDER BY Date
+    `;
+    const [rows] = await db.query(sql, [symbol, start, end]);
+
+    const calcRMSE = (actual, predicted) => {
+        let mse = actual.reduce((sum, val, i) => sum + Math.pow(val - predicted[i], 2), 0) / actual.length;
+        return Math.sqrt(mse);
+    };
+
+    const calcMAPE = (actual, predicted) => {
+        let ape = actual.reduce((sum, val, i) => sum + Math.abs((val - predicted[i]) / val), 0) / actual.length;
+        return ape * 100;
+    };
+
+    const calcTrendAccuracy = (actual, predicted) => {
+        let correct = actual.reduce((count, val, i, arr) => {
+            if (i === 0) return count;
+            let actualTrend = val > arr[i-1] ? 'UP' : 'DOWN';
+            let predTrend = predicted[i] > predicted[i-1] ? 'UP' : 'DOWN';
+            return count + (actualTrend === predTrend ? 1 : 0);
+        }, 0);
+        return (correct / (actual.length - 1)) * 100;
+    };
+
+    const actual = rows.map(r => r.ClosePrice);
+
+    const performance = {
+        LSTM: {
+            RMSE: calcRMSE(actual, rows.map(r => r.PredictionClose_LSTM)),
+            MAPE: calcMAPE(actual, rows.map(r => r.PredictionClose_LSTM)),
+            TrendAccuracy: calcTrendAccuracy(actual, rows.map(r => r.PredictionClose_LSTM))
+        },
+        GRU: {
+            RMSE: calcRMSE(actual, rows.map(r => r.PredictionClose_GRU)),
+            MAPE: calcMAPE(actual, rows.map(r => r.PredictionClose_GRU)),
+            TrendAccuracy: calcTrendAccuracy(actual, rows.map(r => r.PredictionClose_GRU))
+        },
+        Ensemble: {
+            RMSE: calcRMSE(actual, rows.map(r => r.PredictionClose_Ensemble)),
+            MAPE: calcMAPE(actual, rows.map(r => r.PredictionClose_Ensemble)),
+            TrendAccuracy: calcTrendAccuracy(actual, rows.map(r => r.PredictionClose_Ensemble))
+        }
+    };
+
+    res.json({ data: rows, performance });
+});
+
+
 // Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
