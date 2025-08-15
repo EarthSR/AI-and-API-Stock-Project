@@ -180,7 +180,7 @@ def best_practice_version(raw_price, current_price, direction_prob, model_uncert
         'model_confidence': abs(direction_prob - 0.5) * 2,  # 0 = no confidence, 1 = full confidence
         'uncertainty_range': abs(price_upper - price_lower),
         'raw_prediction_used': True,
-        'adjustments_made': False
+        'original_data': True
     }
     
     return prediction_result
@@ -1552,52 +1552,6 @@ def calculate_dynamic_weights(df_ticker, price_weight_factor=0.6, direction_weig
     return 0.5, 0.5
 
 
-def fix_stock_split_scalers(ticker_scalers):
-    """
-    🛠️ แก้ไข scaler สำหรับหุ้นที่มี stock split (Quick Fix)
-    - NVDA: 10:1 split ในมิ.ย. 2024
-    - AVGO: 10:1 split ในก.ค. 2024
-    """
-    print(f"🛠️ Applying stock split fixes...")
-    
-    # กำหนด stock split ratios และการปรับราคา
-    stock_adjustments = {
-        'NVDA': 10.0,   # 10:1 stock split มิ.ย. 2024
-        'AVGO': 10.0,   # 10:1 stock split ก.ค. 2024
-        'META': 3.7,    # AI boom growth (ไม่ใช่ split แต่ราคาเปลี่ยนมาก)
-        'TSM': 3.0,     # semiconductor demand growth
-        'MSFT': 2.3     # AI และ cloud growth
-    }
-    
-    fixed_count = 0
-    for ticker_id, scaler_info in ticker_scalers.items():
-        ticker_name = scaler_info.get('ticker', '')
-        
-        if ticker_name in stock_adjustments:
-            adjustment_ratio = stock_adjustments[ticker_name]
-            
-            # แก้ไข price scaler
-            price_scaler = scaler_info['price_scaler']
-            
-            # ปรับ center และ scale ตาม split ratio
-            if hasattr(price_scaler, 'center_') and hasattr(price_scaler, 'scale_'):
-                original_center = price_scaler.center_[0] if isinstance(price_scaler.center_, np.ndarray) else price_scaler.center_
-                original_scale = price_scaler.scale_[0] if isinstance(price_scaler.scale_, np.ndarray) else price_scaler.scale_
-                
-                # ปรับค่าตาม adjustment ratio
-                price_scaler.center_ = np.array([original_center * adjustment_ratio])
-                price_scaler.scale_ = np.array([original_scale * adjustment_ratio])
-                
-                print(f"   ✅ {ticker_name}: แก้ไข scaler (×{adjustment_ratio:.1f})")
-                print(f"      Old center: {original_center:.2f} → New: {price_scaler.center_[0]:.2f}")
-                fixed_count += 1
-    
-    if fixed_count > 0:
-        print(f"🎯 แก้ไข scaler สำเร็จ: {fixed_count} tickers")
-    else:
-        print(f"ℹ️ ไม่มี stock split ที่ต้องแก้ไข")
-    
-    return ticker_scalers
 
 def load_training_scalers(scaler_path="../LSTM_model/ticker_scalers.pkl"):
     """
@@ -1633,8 +1587,6 @@ def load_training_scalers(scaler_path="../LSTM_model/ticker_scalers.pkl"):
             if len(ticker_scalers) > 5:
                 print(f"      ... และอีก {len(ticker_scalers) - 5} tickers")
             
-            # 🛠️ แก้ไข scaler สำหรับ stock split (Quick Fix)
-            ticker_scalers = fix_stock_split_scalers(ticker_scalers)
             
             return ticker_scalers, True
         else:
@@ -3024,11 +2976,28 @@ if __name__ == "__main__":
                         'PredictionTrend_GRU': gru_direction
                     }
                     
+                    # หลังจากได้ prediction จากโมเดล เช่น:
+                    lstm_scaled = float(lstm_price)
+                    gru_scaled = float(gru_price)
+                    
+                    # unscale ก่อนใช้
+                    if ticker_id in ticker_scalers:
+                        price_scaler = ticker_scalers[ticker_id]['price_scaler']
+                        try:
+                            lstm_price = price_scaler.inverse_transform([[lstm_scaled]])[0][0]
+                            gru_price = price_scaler.inverse_transform([[gru_scaled]])[0][0]
+                        except Exception as e:
+                            print(f"[WARN] Inverse transform failed for {ticker}: {e}")
+                    else:
+                        lstm_price = lstm_scaled
+                        gru_price = gru_scaled
+                    
                     # คำนวณทิศทางเป็น text
                     lstm_dir_text = "📈UP" if lstm_direction > 0.5 else "📉DOWN"
                     gru_dir_text = "📈UP" if gru_direction > 0.5 else "📉DOWN"
                     
                     print(f"   ✅ {ticker:>6}: LSTM=${lstm_price:>7.2f} {lstm_dir_text} ({lstm_direction:.3f}) | GRU=${gru_price:>7.2f} {gru_dir_text} ({gru_direction:.3f})")
+
                     
                 except Exception as e:
                     print(f"   ❌ Error predicting {ticker}: {e}")
@@ -3505,7 +3474,11 @@ if __name__ == "__main__":
                             print(f"   📈 ทิศทางขึ้น: {len(xgb_results[xgb_results['XGB_Predicted_Direction'] == 1])}")
                             print(f"   📉 ทิศทางลง: {len(xgb_results[xgb_results['XGB_Predicted_Direction'] == 0])}")
                             print(f"   🎯 ความเชื่อมั่นเฉลี่ย: {xgb_results['XGB_Confidence'].mean():.3f}")
-                            print(f"   ⚖️ GRU Dominance เฉลี่ย: {xgb_results['GRU_Dominance'].mean():.1%}")
+                            # Check if GRU_Dominance column exists
+                            if 'GRU_Dominance' in xgb_results.columns:
+                                print(f"   ⚖️ GRU Dominance เฉลี่ย: {xgb_results['GRU_Dominance'].mean():.1%}")
+                            else:
+                                print(f"   ⚖️ GRU Dominance: ไม่มีข้อมูล (column not found)")
                             
                             # แสดงแนะนำการลงทุน
                             high_confidence_meta = xgb_results[xgb_results['XGB_Confidence'] > 0.6]

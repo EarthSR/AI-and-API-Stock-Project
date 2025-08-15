@@ -7,7 +7,11 @@
       "Bash(rm:*)",
       "Bash(ls:*)",
       "Bash(find:*)",
-      "Bash(dir \"*.csv\" /od)"
+      "Bash(dir \"*.csv\" /od)",
+      "Bash(C:UsersEarthSRanaconda3envspytorchpython.exe LSTM_model.py)",
+      "Bash(\"/c/Users/EarthSR/anaconda3/envs/pytorch/python.exe\" LSTM_model.py)",
+      "Bash(\"/c/Users/EarthSR/anaconda3/envs/pytorch/python.exe\" GRU_model.py)",
+      "Bash(\"/c/Users/EarthSR/anaconda3/envs/pytorch/python.exe\" test_predictions.py)"
     ],
     "deny": []
   }

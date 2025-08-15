@@ -29,8 +29,7 @@ options.add_argument('--blink-settings=imagesEnabled=false')  # ปิดกา�
 
 # 🔹 เริ่มต้น Firefox driver อัตโนมัติ
 print("🚀 กำลังเปิด WebDriver...")
-service = Service(GeckoDriverManager().install())
-driver = webdriver.Firefox(service=service, options=options)
+driver = webdriver.Firefox(options=options)
 print("✅ WebDriver เปิดสำเร็จ!")
 
 # ฟังก์ชันสำหรับแปลงปีจาก พ.ศ. เป็น ค.ศ.
