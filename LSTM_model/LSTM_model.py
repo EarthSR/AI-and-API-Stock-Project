@@ -3,12 +3,12 @@
 Production-ready Multi-Task (Price + Direction) for Stock AI Prediction
 - โครงสร้างเดิม 2-head (price + direction)
 - ปรับปรุงเพื่อ production:
-  • Per-ticker calibration + per-ticker threshold (MCC)
+  • Per-ticker calibration + per-ticker threshold (ปรับ metric ได้: MCC/F1/Fβ)
   • Online learning gating (ความเชื่อมั่น & ความไม่แน่นอน)
   • ลดความถี่ mini-retrain และต้องมี sample >= 5
   • ฝึกหัวราคาเป็น log-return แล้วแปลงกลับเป็นราคาปิดระหว่าง inference
-  • พิมพ์สรุปผลท้ายรันแบบ CSV-ready + บันทึกไฟล์
-  • (อัปเดต) เปิดอัปเดตหัวราคาแบบเบา ๆ เมื่อผ่าน gate, เพิ่ม MC samples,
+  • พิมพ์สรุปผลท้ายรันแบบ clean view + CSV-ready และบันทึกไฟล์
+  • เปิดอัปเดตหัวราคาแบบเบา ๆ เมื่อผ่าน gate, เพิ่ม MC samples,
     ผ่อน gate เล็กน้อย และ clip ค่าก่อน inverse transform
 """
 
@@ -42,7 +42,7 @@ except Exception:
 from sklearn.preprocessing import RobustScaler, LabelEncoder
 from sklearn.metrics import (mean_absolute_error, mean_squared_error, r2_score,
                              accuracy_score, f1_score, precision_score, recall_score,
-                             matthews_corrcoef)
+                             matthews_corrcoef, fbeta_score)  # ← เพิ่ม fbeta_score
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.isotonic import IsotonicRegression
 
@@ -62,18 +62,23 @@ BEST_PARAMS = {
     'retrain_frequency': 9,      # เดิม 3 → 9 เพื่อลด drift
     'seq_length': 10
 }
-MC_DIR_SAMPLES = 8               # (อัปเดต) เพิ่มรอบ MC dropout
+MC_DIR_SAMPLES = 8               # เพิ่มรอบ MC dropout
 
 # --- Online learning gates ---
 CONF_GATE = True
-UNC_MAX   = 0.15                 # (อัปเดต) ผ่อนความไม่แน่นอนนิดหน่อย
-MARGIN    = 0.08                 # (อัปเดต) ลด margin เพื่อให้ได้อัปเดตมากขึ้น
+UNC_MAX   = 0.15                 # ผ่อนความไม่แน่นอนนิดหน่อย
+MARGIN    = 0.08                 # ลด margin เพื่อให้ได้อัปเดตมากขึ้น
 
-# (อัปเดต) เปิดการอัปเดตหัวราคาแบบน้ำหนักเบา เมื่อผ่าน gate
+# เปิดการอัปเดตหัวราคาแบบน้ำหนักเบา เมื่อผ่าน gate
 ALLOW_PRICE_ONLINE = True
 
 # โหมด target ของหัวราคา: 'logret' (แนะนำ) หรือ 'price'
 PRICE_TARGET_MODE = 'logret'
+
+# --- Threshold search config (NEW) ---
+THRESH_METRIC = 'f1beta'   # 'mcc' | 'f1' | 'f1beta' | 'bal' (เฉลี่ย MCC+F1)
+THRESH_BETA   = 1.5        # beta>1 เน้น recall มากขึ้น
+THRESH_MIN    = 0.30       # floor ป้องกัน threshold สูงเกินสำหรับคลาส 1
 
 # =============================================================================
 # 2) Losses / Utils
@@ -468,7 +473,7 @@ except Exception as e:
     best_model = model
 
 # =============================================================================
-# 10) Calibrate direction probability per *ticker* + thresholds (MCC)
+# 10) Calibrate direction probability per *ticker* + thresholds (CONFIGURABLE)
 # =============================================================================
 n_total = len(X_price_train)
 n_val   = int(np.ceil(n_total * VAL_SPLIT))
@@ -482,15 +487,26 @@ y_val_dir = y_dir_train[val_slice].astype(int).ravel()
 p_raw_val = best_model.predict([Xf_val, Xt_val, Xm_val], verbose=0)[1].ravel()
 tkr_val_last = Xt_val[:, -1]
 
-def best_threshold_by_mcc(y_true, p_prob):
-    ths = np.linspace(0.1, 0.9, 81)
-    best_th, best_mcc = 0.5, -1.0
+def best_threshold(y_true, p_prob, metric=THRESH_METRIC, beta=THRESH_BETA):
+    ths = np.linspace(0.10, 0.90, 81)
+    best_th, best_val = 0.5, -1.0
     for th in ths:
         yhat = (p_prob >= th).astype(int)
-        mcc = matthews_corrcoef(y_true, yhat) if len(np.unique(yhat)) > 1 else -1.0
-        if mcc > best_mcc:
-            best_mcc, best_th = mcc, th
-    return float(best_th), float(best_mcc)
+        if len(np.unique(yhat)) < 2:
+            continue
+        if metric == 'mcc':
+            val = matthews_corrcoef(y_true, yhat)
+        elif metric == 'f1':
+            val = f1_score(y_true, yhat)
+        elif metric == 'f1beta':
+            val = fbeta_score(y_true, yhat, beta=beta)
+        elif metric == 'bal':
+            val = 0.5*matthews_corrcoef(y_true, yhat) + 0.5*f1_score(y_true, yhat)
+        else:
+            val = f1_score(y_true, yhat)
+        if val > best_val:
+            best_val, best_th = val, th
+    return float(best_th), float(best_val)
 
 calibrators = {}   # per-ticker
 thresholds  = {}
@@ -514,7 +530,8 @@ for t in np.unique(tkr_val_last):
         iso = None
         p_cal = p_in
 
-    th, _ = best_threshold_by_mcc(y_val_dir[idx], p_cal)
+    th, _ = best_threshold(y_val_dir[idx], p_cal)       # ← ใช้ตัวเลือก metric ใหม่
+    th = max(THRESH_MIN, th)                            # ← floor ช่วยดัน recall
     calibrators[int(t)] = iso
     thresholds[str(int(t))] = th
 
@@ -643,9 +660,7 @@ def walk_forward_validation_multi_task_batch(
                 # ----- prediction -----
                 outs = model.predict([Xf, Xt, Xm], verbose=0)
                 price_scaled_pred = outs[0]  # scaled of target (price or logret)
-
-                # (อัปเดต) clip ก่อน inverse transform กันหลุดสเกล
-                price_scaled_pred = np.clip(price_scaled_pred, -6.0, 6.0)
+                price_scaled_pred = np.clip(price_scaled_pred, -6.0, 6.0)  # clip กันหลุดสเกล
 
                 if use_mc_dropout:
                     p_mean, p_std = predict_dir_with_mc(model, [Xf, Xt, Xm], n=MC_DIR_SAMPLES)
@@ -719,7 +734,7 @@ def walk_forward_validation_multi_task_batch(
                         batch_yd.append(np.array([actual_dir], float))
                         batch_sw_dir.append(1.0)
 
-                        # price label (ตาม mode) + (อัปเดต) clip true_target ป้องกัน spike
+                        # price label (ตาม mode) + clip true_target ป้องกัน spike
                         if mode == 'logret':
                             true_target = np.log(actual_price / last_close)
                             true_target = float(np.clip(true_target, -0.25, 0.25))
@@ -727,12 +742,8 @@ def walk_forward_validation_multi_task_batch(
                             true_target = actual_price
                         batch_yp.append(ps.transform(np.array([[true_target]], float)))
 
-                        # (อัปเดต) น้ำหนักหัวราคาเบา ๆ เมื่อผ่าน gate
-                        if allow_price_online and ok_dir:
-                            batch_sw_price.append(0.25)
-                        else:
-                            batch_sw_price.append(0.0)
-                    # ไม่ผ่าน gate → ไม่เพิ่ม sample
+                        # น้ำหนักหัวราคาเบา ๆ เมื่อผ่าน gate
+                        batch_sw_price.append(0.25 if allow_price_online and ok_dir else 0.0)
 
                     do_retrain = ((i + 1) % retrain_frequency == 0) or (i == step_total - 1)
                     if do_retrain and len(batch_Xf) >= 5:
@@ -798,6 +809,7 @@ def walk_forward_validation_multi_task_batch(
     pred_df = pd.DataFrame(all_predictions)
     pred_df.to_csv('predictions_chunk_walkforward.csv', index=False)
 
+    # ===== Build overall metrics per ticker =====
     overall = {}
     for tkr, g in pred_df.groupby('Ticker'):
         a_p, p_p = g['Actual_Price'].values, g['Predicted_Price'].values
@@ -818,20 +830,87 @@ def walk_forward_validation_multi_task_batch(
             'Direction_Precision': prec, 'Direction_Recall': rec
         }
 
-    pd.DataFrame.from_dict(overall, orient='index').to_csv('overall_metrics_per_ticker.csv')
+    overall_df = pd.DataFrame.from_dict(overall, orient='index').reset_index().rename(columns={'index':'Ticker'})
+    overall_df.to_csv('overall_metrics_per_ticker.csv', index=False)
     pd.DataFrame(chunk_metrics).to_csv('chunk_metrics.csv', index=False)
 
-    # console summary (CSV-ready)
+    # ===== Clean console view (อ่านง่าย) =====
+    def _fmt(df, cols_float, digits=3):
+        df = df.copy()
+        for c in cols_float:
+            if c in df.columns:
+                df[c] = df[c].astype(float).round(digits)
+        return df
+
+    # สรุปเฉลี่ยรวม
+    avg_row = {
+        'Ticker': 'AVG',
+        'Total_Predictions': int(overall_df['Total_Predictions'].mean()),
+        'MAE': overall_df['MAE'].mean(),
+        'RMSE': overall_df['RMSE'].mean(),
+        'R2_Score': overall_df['R2_Score'].mean(),
+        'Direction_Accuracy': overall_df['Direction_Accuracy'].mean(),
+        'Direction_F1_Score': overall_df['Direction_F1_Score'].mean(),
+        'Direction_Precision': overall_df['Direction_Precision'].mean(),
+        'Direction_Recall': overall_df['Direction_Recall'].mean()
+    }
+    clean_cols = ['Ticker','Total_Predictions','MAE','RMSE','R2_Score',
+                  'Direction_Accuracy','Direction_F1_Score','Direction_Precision','Direction_Recall']
+
+    clean_df = _fmt(overall_df[clean_cols], 
+                    ['MAE','RMSE','R2_Score','Direction_Accuracy','Direction_F1_Score',
+                     'Direction_Precision','Direction_Recall'], 3)
+    avg_df = _fmt(pd.DataFrame([avg_row]), 
+                  ['MAE','RMSE','R2_Score','Direction_Accuracy','Direction_F1_Score',
+                   'Direction_Precision','Direction_Recall'], 3)
+
+    # จัดเรียงตาม F1 จากมากไปน้อย
+    top_df = clean_df.sort_values('Direction_F1_Score', ascending=False).reset_index(drop=True)
+
+    print("\n📊 PER-TICKER METRICS (clean view)")
+    print(top_df.rename(columns={
+        'Total_Predictions':'Preds','Direction_Accuracy':'Acc',
+        'Direction_F1_Score':'F1','Direction_Precision':'Prec','Direction_Recall':'Rec',
+        'R2_Score':'R2'
+    }).to_string(index=False, col_space=10))
+
+    print("\n🧮 AVERAGE (across tickers)")
+    print(avg_df.rename(columns={
+        'Total_Predictions':'Preds','Direction_Accuracy':'Acc',
+        'Direction_F1_Score':'F1','Direction_Precision':'Prec','Direction_Recall':'Rec',
+        'R2_Score':'R2'
+    }).to_string(index=False, col_space=10))
+
+    # Top-5 by F1 (สั้น ๆ)
+    top5 = top_df.head(5).copy()
+    print("\n🥇 TOP-5 F1 (tickers)")
+    print(top5[['Ticker','F1','Prec','Rec','Acc','MAE','RMSE','R2']].rename(columns={
+        'Direction_Accuracy':'Acc','Direction_F1_Score':'F1',
+        'Direction_Precision':'Prec','Direction_Recall':'Rec',
+        'R2_Score':'R2','RMSE':'RMSE'
+    }).to_string(index=False, col_space=8))
+
+    # บันทึกไฟล์แบบ clean
+    with open('metrics_clean_console.txt','w',encoding='utf-8') as f:
+        f.write("PER-TICKER METRICS (sorted by F1)\n")
+        f.write(top_df.to_string(index=False))
+        f.write("\n\nAVERAGE (across tickers)\n")
+        f.write(avg_df.to_string(index=False))
+        f.write("\n\nTOP-5 F1 (tickers)\n")
+        f.write(top5[['Ticker','Direction_F1_Score','Direction_Precision','Direction_Recall',
+                      'Direction_Accuracy','MAE','RMSE','R2_Score']].to_string(index=False))
+
+    # CSV-ready (เก็บเหมือนเดิม)
     lines = ["===== PER-TICKER SUMMARY (CSV-ready) =====",
              ",Total_Predictions,MAE,RMSE,R2_Score,Direction_Accuracy,Direction_F1_Score,Direction_Precision,Direction_Recall"]
-    for tkr, m in overall.items():
-        lines.append(f"{tkr},{m['Total_Predictions']},{m['MAE']},{m['RMSE']},{m['R2_Score']},"
+    for _, m in overall_df.iterrows():
+        lines.append(f"{m['Ticker']},{int(m['Total_Predictions'])},{m['MAE']},{m['RMSE']},{m['R2_Score']},"
                      f"{m['Direction_Accuracy']},{m['Direction_F1_Score']},{m['Direction_Precision']},{m['Direction_Recall']}")
     textsum = "\n".join(lines)
-    print("\n" + textsum)
     with open('per_ticker_console_summary.txt','w', encoding='utf-8') as f:
         f.write(textsum + "\n")
     print("\n📝 saved per-ticker console report → per_ticker_console_summary.txt")
+    print("📝 saved clean metrics report → metrics_clean_console.txt")
 
     dt = time.perf_counter() - t0
     if verbose:
@@ -993,4 +1072,5 @@ print(" - dir_calibrators_per_ticker.pkl, dir_thresholds_per_ticker.json")
 print(" - predictions_chunk_walkforward.csv, chunk_metrics.csv, overall_metrics_per_ticker.csv")
 print(" - metrics_per_ticker_multi_task.csv, all_predictions_per_day_multi_task.csv")
 print(" - per_ticker_console_summary.txt")
+print(" - metrics_clean_console.txt")
 print(" - production_model_config.json, serving_artifacts.pkl")
