@@ -83,7 +83,7 @@ else:
             if has_valid_table:
                 for ticker in tickers:
                     try:
-                        cursor.execute("SELECT MAX(Date) FROM StockDetail WHERE StockSymbol = %s", (ticker,))
+                        cursor.execute("SELECT MAX(Date) FROM StockDetail WHERE StockSymbol = %s AND ClosePrice IS NOT NULL", (ticker,))
                         result = cursor.fetchone()[0]
                         if result is None:
                             latest_dates[ticker] = "2024-01-01"

@@ -328,7 +328,7 @@ if all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]) and mysql:
             for ticker in tickers:
                 stock_name = ticker.replace('.BK', '')
                 try:
-                    cursor.execute("SELECT MAX(Date) FROM StockDetail WHERE StockSymbol = %s", (stock_name,))
+                    cursor.execute("SELECT MAX(Date) FROM StockDetail WHERE StockSymbol = %s AND ClosePrice IS NOT NULL" , (stock_name,))
                     result = cursor.fetchone()[0]
                     if result is None:
                         latest_dates[ticker] = "2018-01-01"
