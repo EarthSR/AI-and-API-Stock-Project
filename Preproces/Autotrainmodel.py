@@ -62,14 +62,15 @@ MINI_RETRAIN_EPOCHS       = int(os.getenv("MINI_RETRAIN_EPOCHS", 1))
 MINI_RETRAIN_LR           = float(os.getenv("MINI_RETRAIN_LR", 1e-5))
 SAVE_MINI_MODELS          = os.getenv("SAVE_MINI_MODELS", "1") == "1"
 
-# Enforcement & capping
+# Enforcement & capping (Neutral-first)
 ENFORCE_DIR_BY_PRICE = True
 APPLY_XGB_CAP = True
-XGB_CAP_SCALE = float(os.getenv("XGB_CAP_SCALE", 1.20))
+XGB_CAP_SCALE = float(os.getenv("XGB_CAP_SCALE", 1.00))  # เดิม 1.20 → 1.00
 EPS_MAX = float(os.getenv("EPS_MAX", 0.02))
-EPS_MIN = float(os.getenv("EPS_MIN", 0.002))
-EPS_FRAC = float(os.getenv("EPS_FRAC", 0.40))
-CALIB_STRENGTH = float(os.getenv("CALIB_STRENGTH", 1.15))
+EPS_MIN = float(os.getenv("EPS_MIN", 0.010))             # เดิม 0.002 → 0.010
+EPS_FRAC = float(os.getenv("EPS_FRAC", 0.60))            # เดิม 0.40 → 0.60
+CALIB_STRENGTH = float(os.getenv("CALIB_STRENGTH", 1.05))# เดิม 1.15 → 1.05
+ONLY_FLIP_IF_MARGIN_LT = float(os.getenv("ONLY_FLIP_IF_MARGIN_LT", 0.15))  # ใหม่
 
 # ---------------------------------------------------------------------
 # Policy version
@@ -181,6 +182,33 @@ def load_class_weights():
     except Exception as e:
         print(f"⚠️ class_weights.pkl not found ({e}) → use balanced weights")
         return {0:1.0, 1:1.0}
+
+# ---------------------------------------------------------------------
+# Direction helpers (ใหม่)
+# ---------------------------------------------------------------------
+def compute_dirs(cur_price: float, pred_price: float, prob_up: float):
+    """
+    คืนค่า:
+      dir_by_price: 1=ขึ้น, 0=ลง, -1=กลาง/ไม่ชัด (อยู่ใน band ±ε)
+      dir_by_prob : 1=ขึ้น (prob>=0.5) / 0=ลง
+      eps         : เกณฑ์ยืนยันทิศทางแบบ dynamic เหมือน enforce
+      margin      : |prob-0.5|
+    """
+    if not (np.isfinite(cur_price) and cur_price > 0 and np.isfinite(pred_price)):
+        return -1, 1 if prob_up >= 0.5 else 0, EPS_MIN, abs(prob_up - 0.5)
+    eps = max(EPS_MIN, EPS_FRAC * abs(pred_price - cur_price) / max(cur_price, 1e-9))
+    eps = float(np.clip(eps, EPS_MIN, EPS_MAX))
+    up_th   = cur_price * (1.0 + eps)
+    down_th = cur_price * (1.0 - eps)
+    if pred_price >= up_th:
+        dir_by_price = 1
+    elif pred_price <= down_th:
+        dir_by_price = 0
+    else:
+        dir_by_price = -1  # โซนไม่ชัด
+    dir_by_prob = 1 if prob_up >= 0.5 else 0
+    margin = abs(prob_up - 0.5)
+    return dir_by_price, dir_by_prob, eps, margin
 
 # ---------------------------------------------------------------------
 # Data prep & indicators
@@ -457,12 +485,12 @@ def choose_price_from_candidates(ticker, cur_price, inv_val, row_ctx):
     return clipped, mode, cap, used_clip, raw_price
 
 # ---------------------------------------------------------------------
-# Calibrator helpers (PATCH1)
+# Calibrator helpers
 # ---------------------------------------------------------------------
 class SimpleCalibrator:
     def transform(self, p):
         arr = np.asarray(p, dtype=float).ravel()
-        out = 0.5 + 0.9*(arr - 0.5)
+        out = 0.5 + CALIB_STRENGTH*(arr - 0.5)  # ใช้ CALIB_STRENGTH ปัจจุบัน
         return np.clip(out, 0.0, 1.0)
 
 class IsotonicDictCalibrator:
@@ -490,6 +518,7 @@ class IsotonicDictCalibrator:
     def transform(self, p):
         arr = np.asarray(p, dtype=float).ravel()
         out = np.interp(arr, self.x, self.y, left=self.y[0], right=self.y[-1])
+        out = 0.5 + CALIB_STRENGTH*(out - 0.5)
         return np.clip(out, 0.0, 1.0)
 
 class CallableWrapperCalibrator:
@@ -497,7 +526,8 @@ class CallableWrapperCalibrator:
     def transform(self, p):
         arr = np.asarray(p, dtype=float).ravel()
         out = [self.fn(float(x)) for x in arr]
-        return np.clip(np.asarray(out, dtype=float), 0.0, 1.0)
+        out = 0.5 + CALIB_STRENGTH*(np.asarray(out, dtype=float) - 0.5)
+        return np.clip(out, 0.0, 1.0)
 
 def make_calibrator(obj):
     try:
@@ -540,8 +570,8 @@ class XGBMeta:
         except Exception as e:
             if not self._printed_calib_err: print(f"⚠️ Calibrator transform failed: {e} → identity"); self._printed_calib_err=True
             val = float(np.clip(p,0,1))
-        val = 0.5 + CALIB_STRENGTH*(val - 0.5)
-        return float(np.clip(val,0,1))
+        # NOTE: CALIB_STRENGTH ถูกใช้ภายใน calibrator แล้ว ที่นี่ไม่ต้องซ้ำ
+        return val
     def predict(self, rows):
         out = []
         for r in rows:
@@ -594,36 +624,52 @@ def print_per_ticker_table(rows_sorted):
         note = 'CLIPPED('+','.join(notes)+')' if notes else ''
         print(f"{t:<12} {cur:>8.2f} {lstm:>10.2f} {gru:>10.2f} {xgb_raw:>10.2f} {xgb_cap:>10.2f}  {dir_icon:>6}  {prob:>5.3f}  {conf:>5.3f} {delta_pct:>7.2f}  {cap_txt:>5}  {score:>6.3f}  {note}")
 
+def print_direction_diagnostics(rows):
+    print("\n🔎 Direction diagnostics (เฉพาะตัวที่มีความขัดแย้ง):")
+    any_issue = False
+    for r in rows:
+        issues = []
+        if r.get('lstm_dir_price', -1) != -1 and r.get('lstm_dir_price') != r.get('lstm_dir_prob'):
+            issues.append(f"LSTM P({r['lstm_dir_price']}) vs Prob({r['lstm_dir_prob']}) eps={r['lstm_eps']:.4f} margin={r['lstm_margin']:.3f}")
+        if r.get('gru_dir_price', -1) != -1 and r.get('gru_dir_price') != r.get('gru_dir_prob'):
+            issues.append(f"GRU  P({r['gru_dir_price']}) vs Prob({r['gru_dir_prob']}) eps={r['gru_eps']:.4f} margin={r['gru_margin']:.3f}")
+        x_raw = r.get('xgb_dir_by_price_raw', None)
+        x_cap = r.get('xgb_dir_by_price_cap', None)
+        if (x_raw is not None) and (x_cap is not None):
+            if x_raw != x_cap:
+                issues.append(f"XGB price raw({x_raw}) → cap({x_cap}) [clip={'Y' if r.get('xgb_clip') else 'N'}]")
+        if r.get('xgb_dir', None) is not None and r.get('xgb_prob', None) is not None and x_cap is not None and x_cap != -1:
+            x_prob_dir = 1 if r['xgb_prob'] >= 0.5 else 0
+            if x_cap != x_prob_dir:
+                issues.append(f"XGB cap P({x_cap}) vs Prob({x_prob_dir}) prob={r['xgb_prob']:.3f}")
+        if r.get('xgb_enforced_flip', 0) == 1:
+            issues.append("ENFORCE flipped final dir")
+        if issues:
+            any_issue = True
+            print(f" • {r['ticker']}: " + " | ".join(issues))
+    if not any_issue:
+        print(" (ไม่มีความขัดแย้งที่ต้องสนใจ)")
+
 # ---------------------------------------------------------------------
 # Save predictions to DB (simple upsert for LSTM/GRU/Ensemble)
 # ---------------------------------------------------------------------
 def save_predictions_simple(predictions_df: pd.DataFrame, engine: sqlalchemy.Engine = None) -> bool:
-    """
-    บันทึกผลพยากรณ์ลงตาราง StockDetail
-      - ถ้ามี (StockSymbol, Date) อยู่แล้ว -> UPDATE 6 คอลัมน์ prediction ทั้งหมด
-      - ถ้าไม่มี -> INSERT แถวใหม่พร้อม 6 คอลัมน์ prediction ทั้งหมด
-    """
     if predictions_df is None or predictions_df.empty:
         print("❌ ไม่มีข้อมูลพยากรณ์ที่จะบันทึก")
         return False
-
     try:
         use_engine = engine if engine is not None else build_engine()
-
         success_count = 0
         created_count = 0
         updated_count = 0
-
         with use_engine.begin() as conn:
             for _, row in predictions_df.iterrows():
                 sym = str(row['StockSymbol'])
                 dt  = pd.to_datetime(row['Date']).strftime('%Y-%m-%d')
-
                 exists = conn.execute(sqlalchemy.text("""
                     SELECT COUNT(*) FROM StockDetail
                     WHERE StockSymbol = :symbol AND Date = :date
                 """), {'symbol': sym, 'date': dt}).scalar()
-
                 params = {
                     'symbol': sym,
                     'date': dt,
@@ -634,7 +680,6 @@ def save_predictions_simple(predictions_df: pd.DataFrame, engine: sqlalchemy.Eng
                     'ensemble_price': float(row.get('Ensemble_Price', 0.0) or 0.0),
                     'ensemble_trend': int(row.get('Ensemble_Direction', 0) or 0),
                 }
-
                 if exists and int(exists) > 0:
                     conn.execute(sqlalchemy.text("""
                         UPDATE StockDetail
@@ -663,12 +708,9 @@ def save_predictions_simple(predictions_df: pd.DataFrame, engine: sqlalchemy.Eng
                     """), params)
                     created_count += 1
                     print(f"✅ INSERT {sym} @ {dt}")
-
                 success_count += 1
-
         print(f"\n💾 DB upsert done: {success_count} rows (new {created_count}, updated {updated_count})")
         return success_count > 0
-
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดในการบันทึก DB: {e}")
         import traceback; traceback.print_exc()
@@ -679,13 +721,8 @@ def save_predictions_simple(predictions_df: pd.DataFrame, engine: sqlalchemy.Eng
 # ---------------------------------------------------------------------
 def compile_for_miniretrain(model: tf.keras.Model):
     class_weights = load_class_weights()
-    model.compile(
-        optimizer=Adam(learning_rate=MINI_RETRAIN_LR),
-        loss={
-            "dense": tf.keras.losses.Huber(),  # placeholder if names unknown; will override below
-        },
-    )
-    # ระบุชื่อเลเยอร์เอาต์พุตจริง ๆ
+    model.compile(optimizer=Adam(learning_rate=MINI_RETRAIN_LR),
+                  loss={"dense": tf.keras.losses.Huber()})
     try:
         losses = {
             "price_output": tf.keras.losses.Huber(delta=0.75),
@@ -705,29 +742,22 @@ def mini_retrain_for_ticker(symbol: str,
                             seq_len: int,
                             lstm_model: tf.keras.Model,
                             gru_model:  tf.keras.Model) -> int:
-    """
-    คืนจำนวนตัวอย่างที่ใช้เทรน (0 ถ้าไม่ทำ)
-    """
     if df_sym.empty: return 0
     end_date = df_sym['Date'].max()
     start_date = end_date - pd.Timedelta(days=MINI_RETRAIN_WINDOW_DAYS)
     g = df_sym[df_sym['Date'].between(start_date, end_date)].sort_values("Date").copy()
     if len(g) < seq_len + 1: return 0
 
-    # เตรียม X (feature scaled), Y_price (log-return scaled), Y_dir
     Xf_list = []; Xt_list=[]; Xm_list=[]; Yp_list=[]; Yd_list=[]
-    vals = g[FEATURE_COLUMNS].values.astype(np.float32)
     vals = feature_scaler.transform(align_features_to_scaler(g[FEATURE_COLUMNS], feature_scaler).values.astype(np.float32))
     close = g['Close'].values.astype(np.float32)
 
     for i in range(len(g)-seq_len):
         last_close = float(close[i+seq_len-1])
         next_close = float(close[i+seq_len])
-        # targets
         logret = math.log(max(next_close,1e-9)/max(last_close,1e-9))
         y_price_scaled = float(price_scaler.transform(np.array([[logret]], dtype=np.float32))[0,0])
         y_dir = 1.0 if next_close > last_close else 0.0
-
         Xf_list.append(vals[i:i+seq_len])
         Xt_list.append(np.full((seq_len,), ticker_id, dtype=np.int32))
         Xm_list.append(np.full((seq_len,), market_id, dtype=np.int32))
@@ -743,7 +773,6 @@ def mini_retrain_for_ticker(symbol: str,
     if n < MINI_RETRAIN_MIN_SAMPLES:
         return 0
 
-    # compile (ถ้ายังไม่ compile)
     try:
         if not hasattr(lstm_model, "optimizer") or lstm_model.optimizer is None:
             compile_for_miniretrain(lstm_model)
@@ -752,7 +781,6 @@ def mini_retrain_for_ticker(symbol: str,
     except Exception:
         pass
 
-    # เทรนเบา ๆ — 1 epoch, batch เล็ก
     lstm_model.fit([Xf, Xt, Xm], {"price_output":Yp, "direction_output":Yd},
                    epochs=MINI_RETRAIN_EPOCHS, batch_size=min(MINI_RETRAIN_BATCH_SIZE, n),
                    shuffle=False, verbose=0)
@@ -844,7 +872,6 @@ if __name__ == "__main__":
                 print(f"🔄 mini-retrain {sym}: {n_used} samples")
         if total_trained > 0:
             save_state(STATE_PATH, state)
-            # บันทึกโมเดล (optional)
             if SAVE_MINI_MODELS:
                 stamp = today.strftime("%Y%m%d")
                 lstm_out = os.path.join(os.path.dirname(LSTM_PATH), f"best_v6_plus_minimal_tuning_v2_final_model_mini_{market_filter}_{stamp}.keras")
@@ -901,6 +928,10 @@ if __name__ == "__main__":
         gru_price,  gru_mode,  cap_pct2, gru_clip,  gru_raw_price  = choose_price_from_candidates(sym, cur_price, inv_gru_raw,  row_ctx)
         cap_pct = max(cap_pct1, cap_pct2)
 
+        # ทิศทาง LSTM/GRU
+        l_dir_price, l_dir_prob, l_eps, l_margin = compute_dirs(cur_price, lstm_price, lstm_prob)
+        g_dir_price, g_dir_prob, g_eps, g_margin = compute_dirs(cur_price, gru_price,  gru_prob)
+
         per_ticker_rows.append({
             "ticker": sym,
             "cur": cur_price,
@@ -914,6 +945,8 @@ if __name__ == "__main__":
             "lstm_mode": lstm_mode, "gru_mode":  gru_mode,
             "lstm_raw_price": lstm_raw_price, "gru_raw_price":  gru_raw_price,
             "inv_lstm_raw": inv_lstm_raw, "inv_gru_raw":  inv_gru_raw,
+            "lstm_dir_price": l_dir_price, "lstm_dir_prob": l_dir_prob, "lstm_eps": l_eps, "lstm_margin": l_margin,
+            "gru_dir_price":  g_dir_price, "gru_dir_prob":  g_dir_prob, "gru_eps":  g_eps,  "gru_margin":  g_margin,
         })
 
     # XGB meta (raw)
@@ -924,7 +957,7 @@ if __name__ == "__main__":
     } for r in per_ticker_rows]
     meta_out = meta.predict(meta_in)
 
-    # Post-process: cap+enforce
+    # Post-process: cap + enforce (Neutral-first guard)
     out_rows = []
     for i, r in enumerate(per_ticker_rows):
         m = meta_out[i]; cur = r['cur']
@@ -933,16 +966,34 @@ if __name__ == "__main__":
         if APPLY_XGB_CAP: xgb_price_cap, xgb_clipped = apply_cap(cur, xgb_price_raw, cap_pct_xgb)
         else:             xgb_price_cap, xgb_clipped = xgb_price_raw, False
 
+        # ทิศทาง XGB จากราคา (ก่อน/หลัง cap)
+        x_dir_price_raw, _, x_eps_raw, _ = compute_dirs(cur, xgb_price_raw, p_up_raw)
+        x_dir_price_cap, _, x_eps_cap, _ = compute_dirs(cur, xgb_price_cap, p_up_raw)
+
+        # ENFORCE (guard: flip ได้เมื่อ prob อ่อน)
         p_up_final = p_up_raw
+        dir_final = dir_raw
+        enforced_flip = 0
+
         if ENFORCE_DIR_BY_PRICE:
             eps = max(EPS_MIN, EPS_FRAC * max(abs(r['lstm_price']-cur), abs(r['gru_price']-cur))/max(cur,1e-9))
             eps = float(np.clip(eps, EPS_MIN, EPS_MAX))
             pred_dir_price = 1 if xgb_price_cap >= cur*(1.0+eps) else 0 if xgb_price_cap <= cur*(1.0-eps) else dir_raw
-            if pred_dir_price != dir_raw:
-                p_up_final = 0.5 + 0.5*(p_up_raw - 0.5) if pred_dir_price == 1 else 0.5 - 0.5*(p_up_raw - 0.5)
-            dir_final = pred_dir_price
-        else:
-            dir_final = dir_raw
+
+            prob_margin = abs(p_up_raw - 0.5)
+            only_flip_if = (prob_margin < ONLY_FLIP_IF_MARGIN_LT)
+
+            if pred_dir_price in (0,1):
+                if pred_dir_price != dir_raw:
+                    if only_flip_if:
+                        p_up_final = 0.5 + 0.5*(p_up_raw - 0.5) if pred_dir_price == 1 else 0.5 - 0.5*(p_up_raw - 0.5)
+                        dir_final = pred_dir_price
+                        enforced_flip = 1
+                    else:
+                        dir_final = dir_raw  # block flip
+                else:
+                    dir_final = pred_dir_price  # เหมือนเดิม
+
         conf_final = abs(p_up_final - 0.5) * 2.0
         delta_final = (xgb_price_cap/cur - 1.0) if cur>0 else 0.0
         score_final = abs(delta_final) * conf_final
@@ -953,12 +1004,16 @@ if __name__ == "__main__":
             "cap_pct_xgb": cap_pct_xgb,
             "xgb_prob_raw": p_up_raw, "xgb_prob": p_up_final, "xgb_conf": conf_final,
             "xgb_dir_raw": dir_raw, "xgb_dir": dir_final,
+            "xgb_dir_by_price_raw": x_dir_price_raw,
+            "xgb_dir_by_price_cap": x_dir_price_cap,
+            "xgb_eps_raw": x_eps_raw, "xgb_eps_cap": x_eps_cap,
+            "xgb_enforced_flip": enforced_flip,
             "pred_change": m.get('pred_change', (xgb_price_raw/cur - 1.0) if cur>0 else 0.0),
             "policy_version": POLICY_VERSION, "score": score_final,
         }
         out_rows.append(merged)
 
-    # ===== CSV (ยังเก็บเป็น T+1 ได้ถ้าต้องการส่งออก) =====
+    # ===== CSV =====
     csv_simple = []
     csv_detail = []
     up = down = 0
@@ -973,7 +1028,6 @@ if __name__ == "__main__":
         else: down += 1
         conf_sum += conf_f
 
-        # ไฟล์ CSV: จะใส่วัน T+1 ก็ได้ตามที่คุณใช้
         csv_simple.append({
             "Policy_Version": POLICY_VERSION, "StockSymbol": sym, "Current_Price": cur,
             "Predicted_Price": price_cap, "Predicted_Direction": dir_f,
@@ -983,15 +1037,33 @@ if __name__ == "__main__":
         })
         csv_detail.append({
             "Policy_Version": POLICY_VERSION, "StockSymbol": sym, "Cur": cur,
+
             "LSTM_RawInverse": r["inv_lstm_raw"], "GRU_RawInverse": r["inv_gru_raw"],
             "LSTM_CandidateRaw": r["lstm_raw_price"], "GRU_CandidateRaw": r["gru_raw_price"],
             "LSTM_Mode": r["lstm_mode"], "GRU_Mode": r["gru_mode"],
             "LSTM_Price": r["lstm_price"], "GRU_Price": r["gru_price"],
             "LSTM_Clipped": int(r.get("lstm_clip", False)), "GRU_Clipped": int(r.get("gru_clip", False)),
+
+            "LSTM_Dir_ByPrice": r.get("lstm_dir_price", None),
+            "LSTM_Dir_ByProb":  r.get("lstm_dir_prob",  None),
+            "LSTM_Eps":         r.get("lstm_eps",        None),
+            "LSTM_Prob_Margin": r.get("lstm_margin",    None),
+            "GRU_Dir_ByPrice":  r.get("gru_dir_price",  None),
+            "GRU_Dir_ByProb":   r.get("gru_dir_prob",   None),
+            "GRU_Eps":          r.get("gru_eps",        None),
+            "GRU_Prob_Margin":  r.get("gru_margin",     None),
+
             "XGB_Price_Raw": price_raw, "XGB_Price_Capped": price_cap, "XGB_Clipped": int(r.get("xgb_clip", False)),
             "XGB_Prob_Raw": r["xgb_prob_raw"], "XGB_Prob_Final": prob_f,
             "XGB_Dir_Raw": r["xgb_dir_raw"], "XGB_Dir_Final": dir_f, "XGB_Conf_Final": conf_f,
-            "DeltaPct_Raw": (price_raw/cur - 1.0) if cur>0 else 0.0, "DeltaPct_Final": delta_pct_final,
+            "XGB_Dir_ByPrice_Raw": r.get("xgb_dir_by_price_raw", None),
+            "XGB_Dir_ByPrice_Cap": r.get("xgb_dir_by_price_cap", None),
+            "XGB_Eps_Raw": r.get("xgb_eps_raw", None),
+            "XGB_Eps_Cap": r.get("xgb_eps_cap", None),
+            "XGB_Enforced_Flip": r.get("xgb_enforced_flip", 0),
+
+            "DeltaPct_Raw": (price_raw/cur - 1.0) if cur>0 else 0.0,
+            "DeltaPct_Final": delta_pct_final,
             "Cap_pct_LSTM_GRU": r["cap_pct"], "Cap_pct_XGB": r["cap_pct_xgb"],
             "Score": abs(delta_pct_final) * conf_f,
             "Date": (datetime.now().date() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1010,17 +1082,16 @@ if __name__ == "__main__":
     print(f"📊 Summary: UP={up} DOWN={down} | Avg confidence={avg_conf:.3f}")
     rows_sorted = sorted(out_rows, key=lambda x: x['xgb_conf'], reverse=True)
     print_per_ticker_table(rows_sorted)
+    print_direction_diagnostics(rows_sorted)
 
     # ===== บันทึกลง DB: ให้เป็น T+1 =====
     try:
         latest_map = latest.set_index('StockSymbol')['Date'].dt.date.to_dict()
-
         db_rows = []
         for r in out_rows:
             sym = r['ticker']
             d_base = latest_map.get(sym, datetime.now().date())   # วันล่าสุดจริงใน DB
             d = d_base + timedelta(days=1)                        # → T+1
-
             db_rows.append({
                 'Date': d,
                 'StockSymbol': sym,
@@ -1031,14 +1102,10 @@ if __name__ == "__main__":
                 'Ensemble_Price': float(r['xgb_price_cap']),
                 'Ensemble_Direction': int(r['xgb_dir']),
             })
-
         predictions_db_df = pd.DataFrame(db_rows)
         ok = save_predictions_simple(predictions_db_df, engine)
         print("💽 DB upsert status:", "OK" if ok else "FAILED")
-
     except Exception as e:
         print(f"⚠️ ข้ามการบันทึก DB เพราะพบข้อผิดพลาดในการเตรียมข้อมูล: {e}")
 
     print("✅ Done.")
-
-
