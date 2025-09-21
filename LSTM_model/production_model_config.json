@@ -1,32 +1,181 @@
 {
   "model_config": {
-    "seq_length": 10,
     "chunk_size": 100,
-    "retrain_frequency": 9,
     "embedding_dim": 24,
     "LSTM_units_1": 48,
     "LSTM_units_2": 24,
     "dropout_rate": 0.15,
     "dense_units": 66,
-    "learning_rate": 0.00017
-  },
-  "training_config": {
-    "batch_size": 33,
-    "validation_split": 0.12,
-    "expected_epochs": 105,
-    "early_stopping_patience": 20
+    "learning_rate": 0.00016,
+    "retrain_frequency": 10,
+    "seq_length": 10
   },
   "inference_config": {
-    "mc_dir_samples": 4,
-    "price_target_mode": "logret",
-    "memory_light_wfv": true,
-    "eps_ret": 0.002,
-    "smooth_prob": true,
-    "smooth_alpha": 0.6,
-    "adaptive_thr_online": true,
-    "thr_buffer": 120,
-    "thr_min_obs": 60,
-    "thr_update_every": 15,
-    "thr_online_metric": "mcc"
+    "eps_ret": 0.0011,
+    "use_ema_prob": true,
+    "alpha_ema_lowvol": 0.68,
+    "alpha_ema_hivol": 0.62,
+    "alpha_ema_overrides": {
+      "ADVANC": 0.62,
+      "DITTO": 0.62,
+      "HUMAN": 0.62,
+      "INET": 0.62,
+      "JAS": 0.62,
+      "DIF": 0.6,
+      "TRUE": 0.6,
+      "INSET": 0.62,
+      "JMART": 0.6
+    },
+    "sigma_vol_split": 0.013,
+    "threshold_min": 0.5,
+    "min_recall": 0.5,
+    "thr_objective_us": "acc",
+    "thr_objective_th": "acc",
+    "fbeta_th": 1.2,
+    "majority_k": 9,
+    "hysteresis_band": 0.006,
+    "z_strong_cut": 0.95,
+    "prior_shift_correction": true,
+    "prior_ema_alpha": 0.07,
+    "target_ema_alpha": 0.15,
+    "trend_prior": true,
+    "trend_kappa": 2.0,
+    "trend_w_lowvol_th": 0.08,
+    "trend_w_hivol_th": 0.12,
+    "trend_w_lowvol_us": 0.04,
+    "trend_w_hivol_us": 0.07,
+    "trend_w_ovr": {
+      "GOOGL": 0.04,
+      "NVDA": 0.05,
+      "AAPL": 0.05,
+      "MSFT": 0.05
+    },
+    "thr_adapt_from_psc": true,
+    "thr_adapt_gain": 0.06,
+    "thr_adapt_clip": 0.025,
+    "psc_logit_cap": 0.2,
+    "thr_delta_ovr": {
+      "NVDA": -0.006,
+      "GOOGL": -0.006,
+      "AVGO": -0.006,
+      "AAPL": -0.006,
+      "MSFT": -0.006,
+      "TSM": -0.006,
+      "AMD": -0.006,
+      "META": -0.01,
+      "AMZN": -0.01,
+      "TSLA": 0.006,
+      "INSET": -0.004,
+      "JAS": 0.0,
+      "ADVANC": -0.01,
+      "DITTO": 0.0,
+      "DIF": 0.0,
+      "TRUE": 0.0,
+      "HUMAN": 0.0,
+      "INET": 0.0,
+      "JMART": 0.0
+    },
+    "thr_market_delta": {
+      "TH": 0.005,
+      "US": 0.0,
+      "OTHER": 0.0
+    },
+    "min_recall_overrides": {
+      "ADVANC": 0.5,
+      "DITTO": 0.5,
+      "HUMAN": 0.5,
+      "INET": 0.5,
+      "JAS": 0.5,
+      "DIF": 0.5,
+      "TRUE": 0.5,
+      "INSET": 0.5,
+      "JMART": 0.5
+    },
+    "precision_tune": {
+      "AAPL": {
+        "thr_bump": -0.008
+      },
+      "ADVANC": {
+        "thr_bump": -0.01
+      },
+      "AMD": {
+        "thr_bump": -0.008
+      },
+      "AMZN": {
+        "thr_bump": -0.012
+      },
+      "AVGO": {
+        "thr_bump": -0.008
+      },
+      "DIF": {
+        "thr_bump": -0.004
+      },
+      "DITTO": {
+        "thr_bump": -0.004
+      },
+      "GOOGL": {
+        "thr_bump": -0.008
+      },
+      "HUMAN": {
+        "thr_bump": 0.0
+      },
+      "INET": {
+        "thr_bump": 0.0
+      },
+      "INSET": {
+        "thr_bump": -0.006
+      },
+      "JAS": {
+        "thr_bump": -0.004
+      },
+      "JMART": {
+        "thr_bump": 0.0
+      },
+      "META": {
+        "thr_bump": -0.01
+      },
+      "MSFT": {
+        "thr_bump": -0.008
+      },
+      "NVDA": {
+        "thr_bump": -0.008
+      },
+      "TRUE": {
+        "thr_bump": 0.0
+      },
+      "TSLA": {
+        "thr_bump": -0.004
+      },
+      "TSM": {
+        "thr_bump": -0.008
+      }
+    },
+    "hivol_thr_shift_us": -0.022,
+    "hivol_thr_shift_th": -0.017,
+    "market_policy": {
+      "apply_psc": {
+        "US": true,
+        "TH": true,
+        "OTHER": true
+      },
+      "allow_online": {
+        "US": true,
+        "TH": false,
+        "OTHER": false
+      },
+      "wdir_cap_th": 0.55,
+      "wdir_cap_us": 0.5,
+      "t_dir_base_th": 0.98,
+      "t_dir_base_us": 1.15
+    }
+  },
+  "paths": {
+    "log_dir": "C:\\Users\\Earth\\Documents\\AI-and-API-Stock-Project\\LSTM_model\\logs",
+    "daily_all": "C:\\Users\\Earth\\Documents\\AI-and-API-Stock-Project\\LSTM_model\\logs\\daily_all_predictions.csv",
+    "stream_pred": "C:\\Users\\Earth\\Documents\\AI-and-API-Stock-Project\\LSTM_model\\logs\\predictions_chunk_walkforward.csv",
+    "stream_chunk": "C:\\Users\\Earth\\Documents\\AI-and-API-Stock-Project\\LSTM_model\\logs\\chunk_metrics.csv",
+    "stream_overall": "C:\\Users\\Earth\\Documents\\AI-and-API-Stock-Project\\LSTM_model\\logs\\overall_metrics_per_ticker.csv",
+    "best_model_static": "C:\\Users\\Earth\\Documents\\AI-and-API-Stock-Project\\LSTM_model\\logs\\models\\best_model_static.keras",
+    "best_model_online": "C:\\Users\\Earth\\Documents\\AI-and-API-Stock-Project\\LSTM_model\\logs\\models\\best_model_online_last.keras"
   }
 }
