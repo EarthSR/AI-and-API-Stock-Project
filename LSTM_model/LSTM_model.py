@@ -95,7 +95,7 @@ MIN_RECALL    = 0.50
 MIN_PRECISION = 0.00
 THR_CLIP_LOW, THR_CLIP_HIGH = 0.44, 0.86          # คลาย clamp ล่าง global
 ANCHOR_RADIUS = 0.18
-THR_CLIP_LOW_TH = 0.450                           # คลาย floor ฝั่ง TH เพิ่ม (จาก 0.465)
+THR_CLIP_LOW_TH = 0.448                         # คลาย floor ฝั่ง TH เพิ่ม (จาก 0.465)
 
 # ---------- Smoothing ----------
 USE_EMA_PROB     = True
@@ -167,59 +167,42 @@ ALPHA_EMA_OVR = {
 }
 
 # ---------- (Base) Precision tune (รายตัว) ----------
-# ==== precision_tune (รวมค่า “สุดท้าย” ไว้ที่เดียว) ====
+# ==== precision_tune (FINAL, consolidated – no .update calls) ====
+# ==== precision_tune (AGGRESSIVE FINAL – single block, no .update) ====
 BASE_PRECISION_TUNE = {
-    # ---------- US : ดัน Recall มากขึ้น ----------
-    'AAPL':  {'thr_bump': -0.060, 'ema_alpha': 0.48, 'majk': 2, 'hys': 0.0040},
+    # ---------- US : เร่ง Recall แบบคุม FP ----------
+    'AAPL':  {'thr_bump': -0.100, 'ema_alpha': 0.46, 'majk': 1, 'hys': 0.0032,
+              'z_gate': 0.95, 'unc_plus': -0.012},
+    'AVGO':  {'thr_bump': -0.100, 'ema_alpha': 0.50, 'majk': 1, 'hys': 0.0034},
     'AMZN':  {'thr_bump': -0.085, 'ema_alpha': 0.50, 'majk': 2, 'hys': 0.0040},
-    'GOOGL': {'thr_bump': -0.040, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
-    'AVGO':  {'thr_bump': -0.035, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
-    'META':  {'thr_bump': -0.028, 'ema_alpha': 0.50, 'majk': 3, 'hys': 0.0042},
+    'GOOGL': {'thr_bump': -0.046, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
+    'META':  {'thr_bump': -0.044, 'ema_alpha': 0.50, 'majk': 2, 'hys': 0.0038},
     'TSLA':  {'thr_bump': -0.040, 'ema_alpha': 0.50, 'majk': 2, 'hys': 0.0040},
     'TSM':   {'thr_bump': -0.028, 'ema_alpha': 0.50, 'majk': 3, 'hys': 0.0042},
     'MSFT':  {'thr_bump': -0.006},
     'AMD':   {'thr_bump': -0.004},
     'NVDA':  {'thr_bump': -0.004},
 
-    # ---------- TH : ปลดล็อก/กัน FP ตามสภาพล่าสุด ----------
-    # ปลดล็อกหนักเพื่อดัน Recall (ใช้ floor TH ใหม่ช่วย)
-    'ADVANC':{'thr_bump': -0.300, 'ema_alpha': 0.30, 'majk': 1, 'hys': 0.0020,
-              'z_gate': 0.75, 'unc_plus': -0.10},
-    'TRUE':  {'thr_bump': -0.160, 'ema_alpha': 0.48, 'majk': 2, 'hys': 0.0036,
-              'z_gate': 0.85, 'unc_plus': -0.04},
+    # ---------- TH : ปลดล็อก Recall รอบสุดท้าย (ยังคุม FP) ----------
+    # เป้า: ADVANC R ~0.18–0.22 / PosRate ~12–16%
+    'ADVANC':{'thr_bump': -0.640, 'ema_alpha': 0.16, 'majk': 1, 'hys': 0.0010,
+              'z_gate': 0.66, 'unc_plus': -0.30},
 
-    # ยิงเยอะไป → เบรกเบาๆ (ลด FP/PosRate)
-    'INSET': {'thr_bump': +0.010, 'ema_alpha': 0.58, 'majk': 9, 'hys': 0.0065},
-    'JAS':   {'thr_bump': +0.008, 'ema_alpha': 0.56, 'majk': 7, 'hys': 0.0058},
+    # เป้า: TRUE รักษา P สูง ดัน R ไป ~0.22–0.26 / PosRate ~11–13%
+    'TRUE':  {'thr_bump': -0.300, 'ema_alpha': 0.42, 'majk': 1, 'hys': 0.0028,
+              'z_gate': 0.78, 'unc_plus': -0.10},
 
-    # ดันเพิ่มเล็กน้อยสำหรับตัวที่ยังอั้น
-    'INET':  {'thr_bump': -0.020, 'ema_alpha': 0.54, 'majk': 5},
-    'HUMAN': {'thr_bump': -0.016, 'ema_alpha': 0.54, 'majk': 5},
-    'JMART': {'thr_bump': -0.040, 'ema_alpha': 0.54, 'majk': 4, 'hys': 0.0046},
-    'DITTO': {'thr_bump': -0.030, 'ema_alpha': 0.55, 'majk': 4, 'hys': 0.0046},
-    'DIF':   {'thr_bump': -0.030, 'ema_alpha': 0.56, 'majk': 5, 'hys': 0.0048},
+    # ยิงเยอะ → เบรก FP ต่อเนื่อง
+    'INSET': {'thr_bump': +0.012, 'ema_alpha': 0.58, 'majk': 9, 'hys': 0.0065},
+
+    # ดันที่ยังอั้น (คุมเสถียรภาพระดับกลาง)
+    'JAS':   {'thr_bump': -0.022, 'ema_alpha': 0.54, 'majk': 5, 'hys': 0.0048},
+    'JMART': {'thr_bump': -0.100, 'ema_alpha': 0.50, 'majk': 2, 'hys': 0.0038},
+    'INET':  {'thr_bump': -0.028, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
+    'HUMAN': {'thr_bump': -0.022, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
+    'DITTO': {'thr_bump': -0.060, 'ema_alpha': 0.53, 'majk': 4, 'hys': 0.0043},
+    'DIF':   {'thr_bump': -0.060, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0042},
 }
-
-# --- TH: ปรับรอบล่าสุด (ปลดล็อกหนัก ADVANC/TRUE และดัน R ตัวที่ยังอั้น) ---
-BASE_PRECISION_TUNE.update({
-    'ADVANC': {'thr_bump': -0.380, 'ema_alpha': 0.24, 'majk': 1, 'hys': 0.0016,
-               'z_gate': 0.72, 'unc_plus': -0.14},                 # เป้าหมาย PosRate ≥ ~0.10
-    'TRUE':   {'thr_bump': -0.200, 'ema_alpha': 0.46, 'majk': 2, 'hys': 0.0034,
-               'z_gate': 0.82, 'unc_plus': -0.06},
-
-    # R ยังต่ำกว่ากลาง → ดันเพิ่ม
-    'JMART':  {'thr_bump': -0.060, 'ema_alpha': 0.52, 'majk': 3, 'hys': 0.0042},
-    'DITTO':  {'thr_bump': -0.042, 'ema_alpha': 0.54, 'majk': 4, 'hys': 0.0044},
-    'DIF':    {'thr_bump': -0.038, 'ema_alpha': 0.56, 'majk': 4, 'hys': 0.0046},
-    'INET':   {'thr_bump': -0.028, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
-    'HUMAN':  {'thr_bump': -0.022, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
-
-    # เดิมเบรกไว้แล้ว R ตก → คลายกลับเล็กน้อย
-    'JAS':    {'thr_bump': -0.012, 'ema_alpha': 0.52, 'majk': 5, 'hys': 0.0048},
-
-    # INSET: คุม FP ต่อเบา ๆ
-    'INSET':  {'thr_bump': +0.012, 'ema_alpha': 0.58, 'majk': 9, 'hys': 0.0065},
-})
 
 # ---------- Eval ----------
 EVAL_RETHRESH_BALANCED = False
