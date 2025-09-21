@@ -1,1370 +1,233 @@
-import importlib
-import logging
-import sys
-import time
-import numpy as np
-import pandas as pd
-import sqlalchemy
 import os
-import tensorflow as tf
-import ta
-from tensorflow.keras.models import load_model
-from sklearn.preprocessing import MinMaxScaler, LabelEncoder, RobustScaler, StandardScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score, precision_score, recall_score, f1_score
-import joblib
-import warnings
-from datetime import datetime, timedelta
-import mysql.connector
-from dotenv import load_dotenv
-from tensorflow.keras.optimizers import Adam
-from sqlalchemy import text
-from sklearn.utils.class_weight import compute_class_weight
-# XGBoost imports
-import pandas as pd
-import numpy as np
-import xgboost as xgb
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.preprocessing import StandardScaler, RobustScaler
-from sklearn.metrics import accuracy_score, mean_squared_error, r2_score
-from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.ensemble import RandomForestRegressor
-import joblib
-import logging
-import warnings
-import os
-import xgboost as xgb
-from sklearn.impute import SimpleImputer
-from ta.momentum import RSIIndicator
-from ta.trend import SMAIndicator, MACD
-from ta.volatility import BollingerBands, AverageTrueRange
-import pickle
 import io
-import traceback
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+import sys
+import json
+import math
+import joblib
+import warnings
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta, date
+from dotenv import load_dotenv
+
+import sqlalchemy
+from sqlalchemy import text
+
+import tensorflow as tf
+from tensorflow.keras.optimizers import Adam
+from sklearn.preprocessing import LabelEncoder
+
+import ta
+
+# ---------------------------------------------------------------------
+# Console UTF-8
+# ---------------------------------------------------------------------
+try:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')  # type: ignore
+except Exception:
+    pass
+
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-# Load class weights from LSTM model (primary model)
-try:
-    with open('../LSTM_model/class_weights.pkl', 'rb') as f:
-        class_weights_dict = pickle.load(f)
-    print(f"✅ Loaded class weights: {class_weights_dict}")
-except FileNotFoundError:
-    print("⚠️ class_weights.pkl not found, using balanced weights")
-    class_weights_dict = {0: 1.0, 1: 1.0}  # Default balanced weights
-except Exception as e:
-    print(f"⚠️ Error loading class weights: {e}, using balanced weights")
-    class_weights_dict = {0: 1.0, 1: 1.0}  # Default balanced weights
+# ---------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH = os.path.join(BASE_DIR, "config.env")
+load_dotenv(ENV_PATH)
 
+# Model paths
+LSTM_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "LSTM_model", "best_v6_plus_minimal_tuning_v2_final_model.keras"))
+GRU_PATH  = os.path.abspath(os.path.join(BASE_DIR, "..", "GRU_Model",  "best_v6_plus_minimal_tuning_v2_final_model.keras"))
+SCALER_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "LSTM_model", "ticker_scalers.pkl"))
+
+# XGB meta (optional)
+ENSEMBLE_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "Ensemble_Model"))
+XGB_PKL = os.path.join(ENSEMBLE_DIR, "fixed_unified_trading_model.pkl")
+XGB_JSON = os.path.join(ENSEMBLE_DIR, "xgb_meta.json")
+ISO_CAL = os.path.join(ENSEMBLE_DIR, "meta_isotonic.joblib")
+
+# Production toggles
+ENABLE_MINI_RETRAIN = os.getenv("ENABLE_MINI_RETRAIN", "1") == "1"  # เปิดไว้เป็นค่าเริ่มต้น
+DEBUG_PER_TICKER = os.getenv("DEBUG_PER_TICKER", "0") == "1"
+
+# Mini-retrain policy
+MINI_RETRAIN_EVERY_DAYS   = int(os.getenv("MINI_RETRAIN_EVERY_DAYS", 9))   # ทุก ๆ 9 วัน
+MINI_RETRAIN_WINDOW_DAYS  = int(os.getenv("MINI_RETRAIN_WINDOW_DAYS", 120))# ใช้ข้อมูลย้อนหลัง N วัน
+MINI_RETRAIN_MIN_SAMPLES  = int(os.getenv("MINI_RETRAIN_MIN_SAMPLES", 5))  # อย่างน้อย 5 ตัวอย่าง
+MINI_RETRAIN_BATCH_SIZE   = int(os.getenv("MINI_RETRAIN_BATCH_SIZE", 32))
+MINI_RETRAIN_EPOCHS       = int(os.getenv("MINI_RETRAIN_EPOCHS", 1))
+MINI_RETRAIN_LR           = float(os.getenv("MINI_RETRAIN_LR", 1e-5))
+SAVE_MINI_MODELS          = os.getenv("SAVE_MINI_MODELS", "1") == "1"
+
+# Enforcement & capping (Neutral-first)
+ENFORCE_DIR_BY_PRICE = True
+APPLY_XGB_CAP = True
+XGB_CAP_SCALE = float(os.getenv("XGB_CAP_SCALE", 1.00))  # เดิม 1.20 → 1.00
+EPS_MAX = float(os.getenv("EPS_MAX", 0.02))
+EPS_MIN = float(os.getenv("EPS_MIN", 0.010))             # เดิม 0.002 → 0.010
+EPS_FRAC = float(os.getenv("EPS_FRAC", 0.60))            # เดิม 0.40 → 0.60
+CALIB_STRENGTH = float(os.getenv("CALIB_STRENGTH", 1.05))# เดิม 1.15 → 1.05
+ONLY_FLIP_IF_MARGIN_LT = float(os.getenv("ONLY_FLIP_IF_MARGIN_LT", 0.15))  # ใหม่
+
+# ---------------------------------------------------------------------
+# Policy version
+# ---------------------------------------------------------------------
+def build_policy_version() -> str:
+    return (
+        f"v{datetime.now().strftime('%Y%m%d')}|"
+        f"ENF={int(ENFORCE_DIR_BY_PRICE)}|CAP={int(APPLY_XGB_CAP)}@{XGB_CAP_SCALE:.2f}|"
+        f"EPS={EPS_MIN:.3f}/{EPS_FRAC:.2f}/{EPS_MAX:.3f}|CAL={CALIB_STRENGTH:.2f}|"
+        f"MR={MINI_RETRAIN_EVERY_DAYS}d/{MINI_RETRAIN_WINDOW_DAYS}w/{MINI_RETRAIN_MIN_SAMPLES}+"
+    )
+POLICY_VERSION = build_policy_version()
+
+# ---------------------------------------------------------------------
+# DB
+# ---------------------------------------------------------------------
+def build_engine():
+    user = os.getenv("DB_USER")
+    pw   = os.getenv("DB_PASSWORD")
+    host = os.getenv("DB_HOST")
+    db   = os.getenv("DB_NAME")
+    if not all([user, pw, host, db]):
+        print("❌ DB env missing")
+        sys.exit(1)
+    url = f"mysql+mysqlconnector://{user}:{pw}@{host}/{db}"
+    return sqlalchemy.create_engine(url)
+
+# ---------------------------------------------------------------------
+# Mini-retrain state (แยกไฟล์ตามตลาด)
+# ---------------------------------------------------------------------
+STATE_DIR = os.path.join(BASE_DIR, "mini_retrain_state")
+os.makedirs(STATE_DIR, exist_ok=True)
+
+def _state_path_for(market: str) -> str:
+    code = {"Thailand": "th", "America": "us"}.get(str(market), str(market)).lower()
+    return os.path.join(STATE_DIR, f"mini_retrain_state_{code}.json")
+
+def load_state(path: str):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {"tickers": {}}
+
+def save_state(path: str, state: dict):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+def _parse_date(dstr):
+    if not dstr: return None
+    try:
+        return datetime.strptime(dstr, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def due_for_retrain(sym: str, state: dict, today: date, every_days: int) -> bool:
+    info = state.get("tickers", {}).get(sym, {})
+    last = _parse_date(info.get("last_retrain"))
+    if last is None:
+        return True  # ไม่เคยทำเลย
+    return (today - last).days >= every_days
+
+def mark_retrained(sym: str, state: dict, today: date):
+    t = state.setdefault("tickers", {}).setdefault(sym, {"counter": 0, "last_retrain": None})
+    t["counter"] = 0
+    t["last_retrain"] = today.strftime("%Y-%m-%d")
+
+# ---------------------------------------------------------------------
+# Utils: custom loss (for load & mini-retrain)
+# ---------------------------------------------------------------------
 def focal_weighted_binary_crossentropy(class_weights, gamma=2.0, alpha_pos=0.7):
     def loss(y_true, y_pred):
-        # Cast all inputs to float32 to avoid type mismatch
         y_true = tf.cast(y_true, tf.float32)
         y_pred = tf.cast(y_pred, tf.float32)
-        
-        epsilon = tf.constant(1e-7, dtype=tf.float32)
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1 - epsilon)
-        
-        # Cast class weights to float32
-        weights = tf.where(
-            tf.equal(y_true, 1.0), 
-            tf.cast(class_weights[1], tf.float32), 
-            tf.cast(class_weights[0], tf.float32)
-        )
-        
-        # Cast alpha to float32
-        alpha = tf.where(
-            tf.equal(y_true, 1.0), 
-            tf.cast(alpha_pos, tf.float32), 
-            tf.cast(1 - alpha_pos, tf.float32)
-        )
-        
+        eps = tf.constant(1e-7, tf.float32)
+        y_pred = tf.clip_by_value(y_pred, eps, 1 - eps)
+        w = tf.where(tf.equal(y_true, 1.0),
+                     tf.cast(class_weights.get(1,1.0), tf.float32),
+                     tf.cast(class_weights.get(0,1.0), tf.float32))
+        alpha = tf.where(tf.equal(y_true, 1.0),
+                         tf.cast(alpha_pos, tf.float32),
+                         tf.cast(1 - alpha_pos, tf.float32))
         pt = tf.where(tf.equal(y_true, 1.0), y_pred, 1 - y_pred)
-        
-        # Cast gamma to float32
-        focal_factor = tf.pow(1 - pt, tf.cast(gamma, tf.float32))
-        
-        # Ensure BCE is float32
+        focal = tf.pow(1 - pt, tf.cast(gamma, tf.float32))
         bce = tf.cast(tf.keras.losses.binary_crossentropy(y_true, y_pred), tf.float32)
-        
-        # Now all tensors are float32
-        weighted_bce = bce * weights * alpha * focal_factor
-        return tf.reduce_mean(weighted_bce)
+        return tf.reduce_mean(bce * w * alpha * focal)
     return loss
 
-# Also update your quantile_loss function:
 @tf.keras.utils.register_keras_serializable()
 def quantile_loss(y_true, y_pred, quantile=0.5):
-    # Cast to float32
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    quantile = tf.cast(quantile, tf.float32)
-    
-    error = y_true - y_pred
-    return tf.keras.backend.mean(tf.keras.backend.maximum(quantile * error, (quantile - 1) * error))
+    q = tf.cast(quantile, tf.float32)
+    e = y_true - y_pred
+    return tf.reduce_mean(tf.maximum(q * e, (q - 1) * e))
 
-def get_model_name_from_path(model_path):
-    """
-    🔧 ดึงชื่อโมเดลจาก path
-    """
+def load_class_weights():
+    p = os.path.abspath(os.path.join(BASE_DIR, "..", "LSTM_model", "class_weights.pkl"))
     try:
-        import os
-        path_parts = model_path.split('/')
-        
-        # หาส่วนที่มี LSTM หรือ GRU
-        for part in path_parts:
-            if 'LSTM' in part.upper():
-                return 'LSTM_Model'
-            elif 'GRU' in part.upper():
-                return 'GRU_Model'
-        
-        # ใช้ชื่อไฟล์
-        filename = os.path.basename(model_path).replace('.keras', '').replace('.h5', '')
-        return f"{filename}_Model"
+        import pickle
+        with open(p, "rb") as f:
+            cw = pickle.load(f)
+        print(f"✅ Loaded class_weights: {cw}")
+        return cw
     except Exception as e:
-        print(f"⚠️ Error extracting model name from path: {e}")
-        return "Unknown_Model"
+        print(f"⚠️ class_weights.pkl not found ({e}) → use balanced weights")
+        return {0:1.0, 1:1.0}
 
-def setup_model_names():
-    """Setup model names from paths"""
-    lstm_name = get_model_name_from_path(MODEL_LSTM_PATH)
-    gru_name = get_model_name_from_path(MODEL_GRU_PATH)
-    return lstm_name, gru_name
-
-def assign_model_name(model, model_name):
+# ---------------------------------------------------------------------
+# Direction helpers (ใหม่)
+# ---------------------------------------------------------------------
+def compute_dirs(cur_price: float, pred_price: float, prob_up: float):
     """
-    🏷️ กำหนดชื่อให้โมเดลอย่างปลอดภัย
+    คืนค่า:
+      dir_by_price: 1=ขึ้น, 0=ลง, -1=กลาง/ไม่ชัด (อยู่ใน band ±ε)
+      dir_by_prob : 1=ขึ้น (prob>=0.5) / 0=ลง
+      eps         : เกณฑ์ยืนยันทิศทางแบบ dynamic เหมือน enforce
+      margin      : |prob-0.5|
     """
-    try:
-        # ลองหลายวิธีในการตั้งชื่อ
-        if hasattr(model, '_name'):
-            model._name = model_name
-        if hasattr(model, 'name'):
-            model.name = model_name
-        
-        # เพิ่ม custom attribute
-        model._model_type = model_name
-        model._custom_name = model_name
-        
-        print(f"✅ กำหนดชื่อโมเดล: {model_name}")
-        return True
-    except Exception as e:
-        print(f"⚠️ ไม่สามารถกำหนดชื่อโมเดลได้: {e}")
-        return False
-
-def best_practice_version(raw_price, current_price, direction_prob, model_uncertainty=None):
-    """วิธีที่ดีที่สุด - ให้โมเดลเรียนรู้จากข้อผิดพลาดจริง"""
-    
-    # ใช้ probability แทน binary direction
-    predicted_price = raw_price
-    predicted_direction_prob = direction_prob
-    
-    # คำนวณ confidence interval ถ้ามี model uncertainty
-    if model_uncertainty is not None:
-        # คำนวณ confidence interval จาก model uncertainty
-        price_lower = raw_price - (2 * model_uncertainty)  # 95% CI
-        price_upper = raw_price + (2 * model_uncertainty)
+    if not (np.isfinite(cur_price) and cur_price > 0 and np.isfinite(pred_price)):
+        return -1, 1 if prob_up >= 0.5 else 0, EPS_MIN, abs(prob_up - 0.5)
+    eps = max(EPS_MIN, EPS_FRAC * abs(pred_price - cur_price) / max(cur_price, 1e-9))
+    eps = float(np.clip(eps, EPS_MIN, EPS_MAX))
+    up_th   = cur_price * (1.0 + eps)
+    down_th = cur_price * (1.0 - eps)
+    if pred_price >= up_th:
+        dir_by_price = 1
+    elif pred_price <= down_th:
+        dir_by_price = 0
     else:
-        # ใช้ความผันผวนของราคาเป็น proxy
-        price_volatility = abs(raw_price - current_price) * 0.1
-        price_lower = raw_price - price_volatility
-        price_upper = raw_price + price_volatility
-    
-    # สร้าง prediction object ที่มี uncertainty
-    prediction_result = {
-        'predicted_price': predicted_price,
-        'price_lower_bound': price_lower,
-        'price_upper_bound': price_upper,
-        'direction_probability': predicted_direction_prob,
-        'price_change_percent': (predicted_price - current_price) / current_price * 100,
-        'model_confidence': abs(direction_prob - 0.5) * 2,  # 0 = no confidence, 1 = full confidence
-        'uncertainty_range': abs(price_upper - price_lower),
-        'raw_prediction_used': True,
-        'adjustments_made': False
-    }
-    
-    return prediction_result
+        dir_by_price = -1  # โซนไม่ชัด
+    dir_by_prob = 1 if prob_up >= 0.5 else 0
+    margin = abs(prob_up - 0.5)
+    return dir_by_price, dir_by_prob, eps, margin
 
-# ======================== FIXED COLUMN MAPPING ========================
+# ---------------------------------------------------------------------
+# Data prep & indicators
+# ---------------------------------------------------------------------
+FEATURE_COLUMNS = [
+    'Open','High','Low','Close','Volume',
+    'Change (%)','Sentiment','positive_news','negative_news','neutral_news',
+    'Total Revenue','QoQ Growth (%)','Earnings Per Share (EPS)','ROE (%)',
+    'ATR','Keltner_High','Keltner_Low','Keltner_Middle','Chaikin_Vol',
+    'Donchian_High','Donchian_Low','PSAR',
+    'Net Profit Margin (%)','Debt to Equity','P/E Ratio','P/BV Ratio','Dividend Yield (%)',
+    'RSI','EMA_10','EMA_20','MACD','MACD_Signal','Bollinger_High','Bollinger_Low','SMA_50','SMA_200'
+]
 
-def standardize_column_names_to_training_format(df):
-    """
-    🔧 แปลง column names จาก database format เป็น training format
-    เพื่อให้ scalers ทำงานได้ถูกต้อง - Enhanced version with data cleaning
-    """
-    print("🔄 Converting column names to match training format...")
-    
-    # ✅ Column mapping ที่ตรงกับ training code ทุกตัว
-    training_column_mapping = {
-        # Database format → Training format (ตรงตาม training code)
-        'Change_Percent': 'Change (%)',
-        'TotalRevenue': 'Total Revenue', 
-        'QoQGrowth': 'QoQ Growth (%)',
-        'EPS': 'Earnings Per Share (EPS)',
-        'ROE': 'ROE (%)',
-        'NetProfitMargin': 'Net Profit Margin (%)',
-        'DebtToEquity': 'Debt to Equity',
-        'PERatio': 'P/E Ratio',
-        'P_BV_Ratio': 'P/BV Ratio',
-        'Dividend_Yield': 'Dividend Yield (%)',
-        # Technical indicators ที่อาจต่างกัน
-        'EMA_10': 'EMA_10',  # เหมือนกัน
-        'EMA_20': 'EMA_20',  # เหมือนกัน
-        'SMA_50': 'SMA_50',  # เหมือนกัน
-        'SMA_200': 'SMA_200', # เหมือนกัน
-    }
-    
-    df_fixed = df.copy()
-    
-    # Apply column mapping with data type validation
-    for db_name, training_name in training_column_mapping.items():
-        if db_name in df_fixed.columns:
-            # Clean and validate data before mapping
-            try:
-                # Handle mixed data types
-                if df_fixed[db_name].dtype == 'object':
-                    # Try to convert string data to numeric
-                    print(f"   🔧 Converting {db_name} from object to numeric")
-                    df_fixed[db_name] = pd.to_numeric(df_fixed[db_name], errors='coerce')
-                
-                # Replace infinite values
-                df_fixed[db_name] = df_fixed[db_name].replace([np.inf, -np.inf], np.nan)
-                
-                # Fill NaN with appropriate values
-                if df_fixed[db_name].isna().any():
-                    if db_name in ['TotalRevenue', 'QoQGrowth', 'EPS', 'ROE', 'NetProfitMargin', 
-                                   'DebtToEquity', 'PERatio', 'P_BV_Ratio', 'Dividend_Yield']:
-                        # For financial metrics, use forward fill then 0
-                        df_fixed[db_name] = df_fixed[db_name].ffill().fillna(0)
-                    else:
-                        # For technical indicators, use 0
-                        df_fixed[db_name] = df_fixed[db_name].fillna(0)
-                
-                # Create the training format column
-                df_fixed[training_name] = df_fixed[db_name].astype('float64')
-                print(f"   🔄 Mapped: {db_name} → {training_name} (type: {df_fixed[training_name].dtype})")
-                
-            except Exception as e:
-                print(f"   ⚠️ Error processing {db_name}: {e}, using default values")
-                df_fixed[training_name] = 0.0
-    
-    return df_fixed
-
-def use_training_feature_columns():
-    """
-    ✅ ใช้ feature_columns เหมือนกับ training code ทุกตัว
-    """
-    # ✅ เหมือนกับใน training code ทุกตัว
-    training_feature_columns = [
-        'Open', 'High', 'Low', 'Close', 'Volume', 'Change (%)', 'Sentiment','positive_news','negative_news','neutral_news',
-        'Total Revenue', 'QoQ Growth (%)','Earnings Per Share (EPS)','ROE (%)',
-        'ATR','Keltner_High','Keltner_Low','Keltner_Middle','Chaikin_Vol','Donchian_High','Donchian_Low','PSAR',
-        'Net Profit Margin (%)', 'Debt to Equity', 'P/E Ratio',
-        'P/BV Ratio', 'Dividend Yield (%)','RSI', 'EMA_10', 'EMA_20', 'MACD', 'MACD_Signal',
-        'Bollinger_High', 'Bollinger_Low','SMA_50', 'SMA_200'
-    ]
-    
-    print(f"✅ Using training-compatible feature columns: {len(training_feature_columns)} features")
-    return training_feature_columns
-
-def calculate_technical_indicators_training_style(df):
-    """
-    🔧 คำนวณ technical indicators ตามแบบ training code
-    (per-ticker grouping) - แก้ไขปัญหา length mismatch
-    """
-    print("🔧 Calculating technical indicators (training style)...")
-    
-    df_with_indicators = df.copy()
-    
-    # ✅ ตามแบบ training code - per ticker grouping
-    df_with_indicators['Change (%)'] = df_with_indicators.groupby('StockSymbol')['Close'].pct_change() * 100
-    
-    # Clip outliers (ตามแบบ training)
-    upper_bound = df_with_indicators['Change (%)'].quantile(0.99)
-    lower_bound = df_with_indicators['Change (%)'].quantile(0.01)
-    df_with_indicators['Change (%)'] = df_with_indicators['Change (%)'].clip(lower_bound, upper_bound)
-    
-    # ✅ RSI per ticker (ตามแบบ training) - ใช้ transform แทน apply
-    def calculate_rsi_per_ticker(group):
-        if len(group) >= 14:
-            rsi = ta.momentum.RSIIndicator(group, window=14).rsi()
-            # Fill ตามแบบ training
-            rsi = rsi.fillna(rsi.rolling(window=5, min_periods=1).mean())
-            return rsi
-        else:
-            return pd.Series([0] * len(group), index=group.index)
-    
-    # ใช้ transform เพื่อให้ได้ output ที่มีขนาดเท่ากับ input
-    df_with_indicators['RSI'] = df_with_indicators.groupby('StockSymbol')['Close'].transform(
-        calculate_rsi_per_ticker
-    )
-    
-    # ✅ EMA per ticker (ตามแบบ training)
-    df_with_indicators['EMA_12'] = df_with_indicators.groupby('StockSymbol')['Close'].transform(
-        lambda x: x.ewm(span=12, adjust=False).mean()
-    )
-    df_with_indicators['EMA_26'] = df_with_indicators.groupby('StockSymbol')['Close'].transform(
-        lambda x: x.ewm(span=26, adjust=False).mean()
-    )
-    df_with_indicators['EMA_10'] = df_with_indicators.groupby('StockSymbol')['Close'].transform(
-        lambda x: x.ewm(span=10, adjust=False).mean()
-    )
-    df_with_indicators['EMA_20'] = df_with_indicators.groupby('StockSymbol')['Close'].transform(
-        lambda x: x.ewm(span=20, adjust=False).mean()
-    )
-    
-    # ✅ SMA per ticker (ตามแบบ training)
-    df_with_indicators['SMA_50'] = df_with_indicators.groupby('StockSymbol')['Close'].transform(
-        lambda x: x.rolling(window=50).mean()
-    )
-    df_with_indicators['SMA_200'] = df_with_indicators.groupby('StockSymbol')['Close'].transform(
-        lambda x: x.rolling(window=200).mean()
-    )
-    
-    # ✅ MACD (ตามแบบ training)
-    df_with_indicators['MACD'] = df_with_indicators['EMA_12'] - df_with_indicators['EMA_26']
-    df_with_indicators['MACD_Signal'] = df_with_indicators.groupby('StockSymbol')['MACD'].transform(
-        lambda x: x.rolling(window=9).mean()
-    )
-    
-    # ✅ Bollinger Bands per ticker - ใช้วิธีที่ปลอดภัย
-    def safe_calculate_bollinger(group):
-        try:
-            if len(group) >= 20:
-                bollinger = ta.volatility.BollingerBands(group, window=20, window_dev=2)
-                return pd.DataFrame({
-                    'Bollinger_High': bollinger.bollinger_hband(),
-                    'Bollinger_Low': bollinger.bollinger_lband()
-                }, index=group.index)
-            else:
-                return pd.DataFrame({
-                    'Bollinger_High': [0] * len(group),
-                    'Bollinger_Low': [0] * len(group)
-                }, index=group.index)
-        except Exception as e:
-            print(f"      ⚠️ Bollinger calculation error: {e}, using default values")
-            return pd.DataFrame({
-                'Bollinger_High': [0] * len(group),
-                'Bollinger_Low': [0] * len(group)
-            }, index=group.index)
-    
-    # ใช้ apply แต่จัดการ index ให้ถูกต้อง
-    bollinger_results = []
-    for ticker in df_with_indicators['StockSymbol'].unique():
-        ticker_data = df_with_indicators[df_with_indicators['StockSymbol'] == ticker]['Close']
-        bollinger_df = safe_calculate_bollinger(ticker_data)
-        bollinger_results.append(bollinger_df)
-    
-    # Concatenate และ sort ตาม original index
-    if bollinger_results:
-        bollinger_combined = pd.concat(bollinger_results).sort_index()
-        df_with_indicators['Bollinger_High'] = bollinger_combined['Bollinger_High']
-        df_with_indicators['Bollinger_Low'] = bollinger_combined['Bollinger_Low']
-    else:
-        df_with_indicators['Bollinger_High'] = 0
-        df_with_indicators['Bollinger_Low'] = 0
-    
-    # ✅ ATR per ticker - ใช้วิธีที่ปลอดภัย
-    def safe_calculate_atr(group_data):
-        try:
-            if len(group_data) >= 14 and all(col in group_data.columns for col in ['High', 'Low', 'Close']):
-                atr = ta.volatility.AverageTrueRange(
-                    high=group_data['High'], low=group_data['Low'], close=group_data['Close'], window=14
-                )
-                return atr.average_true_range()
-            else:
-                return pd.Series([0] * len(group_data), index=group_data.index)
-        except Exception as e:
-            print(f"      ⚠️ ATR calculation error: {e}, using default values")
-            return pd.Series([0] * len(group_data), index=group_data.index)
-    
-    atr_results = []
-    for ticker in df_with_indicators['StockSymbol'].unique():
-        ticker_data = df_with_indicators[df_with_indicators['StockSymbol'] == ticker]
-        atr_series = safe_calculate_atr(ticker_data)
-        atr_results.append(atr_series)
-    
-    if atr_results:
-        atr_combined = pd.concat(atr_results).sort_index()
-        df_with_indicators['ATR'] = atr_combined
-    else:
-        df_with_indicators['ATR'] = 0
-    
-    # ✅ Keltner Channel per ticker - ใช้วิธีที่ปลอดภัย
-    def safe_calculate_keltner(group_data):
-        try:
-            if len(group_data) >= 20 and all(col in group_data.columns for col in ['High', 'Low', 'Close']):
-                keltner = ta.volatility.KeltnerChannel(
-                    high=group_data['High'], low=group_data['Low'], close=group_data['Close'], 
-                    window=20, window_atr=10
-                )
-                return pd.DataFrame({
-                    'Keltner_High': keltner.keltner_channel_hband(),
-                    'Keltner_Low': keltner.keltner_channel_lband(),
-                    'Keltner_Middle': keltner.keltner_channel_mband()
-                }, index=group_data.index)
-            else:
-                return pd.DataFrame({
-                    'Keltner_High': [0] * len(group_data),
-                    'Keltner_Low': [0] * len(group_data),
-                    'Keltner_Middle': [0] * len(group_data)
-                }, index=group_data.index)
-        except Exception as e:
-            print(f"      ⚠️ Keltner calculation error: {e}, using default values")
-            return pd.DataFrame({
-                'Keltner_High': [0] * len(group_data),
-                'Keltner_Low': [0] * len(group_data),
-                'Keltner_Middle': [0] * len(group_data)
-            }, index=group_data.index)
-    
-    keltner_results = []
-    for ticker in df_with_indicators['StockSymbol'].unique():
-        ticker_data = df_with_indicators[df_with_indicators['StockSymbol'] == ticker]
-        keltner_df = safe_calculate_keltner(ticker_data)
-        keltner_results.append(keltner_df)
-    
-    if keltner_results:
-        keltner_combined = pd.concat(keltner_results).sort_index()
-        df_with_indicators['Keltner_High'] = keltner_combined['Keltner_High']
-        df_with_indicators['Keltner_Low'] = keltner_combined['Keltner_Low']
-        df_with_indicators['Keltner_Middle'] = keltner_combined['Keltner_Middle']
-    else:
-        df_with_indicators['Keltner_High'] = 0
-        df_with_indicators['Keltner_Low'] = 0
-        df_with_indicators['Keltner_Middle'] = 0
-    
-    # ✅ Chaikin Volatility per ticker - ใช้วิธีที่ปลอดภัย
-    def safe_calculate_chaikin(group_data):
-        try:
-            window_cv = 10
-            if len(group_data) >= window_cv and all(col in group_data.columns for col in ['High', 'Low']):
-                high_low_diff = group_data['High'] - group_data['Low']
-                high_low_ema = high_low_diff.ewm(span=window_cv, adjust=False).mean()
-                chaikin_vol = high_low_ema.pct_change(periods=window_cv) * 100
-                return chaikin_vol
-            else:
-                return pd.Series([0] * len(group_data), index=group_data.index)
-        except Exception as e:
-            print(f"      ⚠️ Chaikin calculation error: {e}, using default values")
-            return pd.Series([0] * len(group_data), index=group_data.index)
-    
-    chaikin_results = []
-    for ticker in df_with_indicators['StockSymbol'].unique():
-        ticker_data = df_with_indicators[df_with_indicators['StockSymbol'] == ticker]
-        chaikin_series = safe_calculate_chaikin(ticker_data)
-        chaikin_results.append(chaikin_series)
-    
-    if chaikin_results:
-        chaikin_combined = pd.concat(chaikin_results).sort_index()
-        df_with_indicators['Chaikin_Vol'] = chaikin_combined
-    else:
-        df_with_indicators['Chaikin_Vol'] = 0
-    
-    # ✅ Donchian Channel per ticker - ใช้วิธีที่ปลอดภัย
-    def safe_calculate_donchian(group_data):
-        try:
-            window_dc = 20
-            if len(group_data) >= window_dc and all(col in group_data.columns for col in ['High', 'Low']):
-                return pd.DataFrame({
-                    'Donchian_High': group_data['High'].rolling(window=window_dc).max(),
-                    'Donchian_Low': group_data['Low'].rolling(window=window_dc).min()
-                }, index=group_data.index)
-            else:
-                return pd.DataFrame({
-                    'Donchian_High': [0] * len(group_data),
-                    'Donchian_Low': [0] * len(group_data)
-                }, index=group_data.index)
-        except Exception as e:
-            print(f"      ⚠️ Donchian calculation error: {e}, using default values")
-            return pd.DataFrame({
-                'Donchian_High': [0] * len(group_data),
-                'Donchian_Low': [0] * len(group_data)
-            }, index=group_data.index)
-    
-    donchian_results = []
-    for ticker in df_with_indicators['StockSymbol'].unique():
-        ticker_data = df_with_indicators[df_with_indicators['StockSymbol'] == ticker]
-        donchian_df = safe_calculate_donchian(ticker_data)
-        donchian_results.append(donchian_df)
-    
-    if donchian_results:
-        donchian_combined = pd.concat(donchian_results).sort_index()
-        df_with_indicators['Donchian_High'] = donchian_combined['Donchian_High']
-        df_with_indicators['Donchian_Low'] = donchian_combined['Donchian_Low']
-    else:
-        df_with_indicators['Donchian_High'] = 0
-        df_with_indicators['Donchian_Low'] = 0
-    
-    # ✅ PSAR per ticker - แก้ไขปัญหา length mismatch
-    def safe_calculate_psar(group_data):
-        try:
-            if len(group_data) >= 20 and all(col in group_data.columns for col in ['High', 'Low', 'Close']):
-                psar = ta.trend.PSARIndicator(
-                    high=group_data['High'], low=group_data['Low'], close=group_data['Close'], 
-                    step=0.02, max_step=0.2
-                )
-                psar_result = psar.psar()
-                # ตรวจสอบขนาดและ return เฉพาะ index ที่ตรงกัน
-                if len(psar_result) == len(group_data):
-                    return psar_result
-                else:
-                    # ถ้าขนาดไม่ตรงกัน ให้ reindex
-                    return psar_result.reindex(group_data.index, fill_value=0)
-            else:
-                return pd.Series([0] * len(group_data), index=group_data.index)
-        except Exception as e:
-            print(f"      ⚠️ PSAR calculation error: {e}, using default values")
-            return pd.Series([0] * len(group_data), index=group_data.index)
-    
-    # แก้ไขปัญหา PSAR - ใช้วิธีที่ปลอดภัย
-    psar_results = []
-    for ticker in df_with_indicators['StockSymbol'].unique():
-        ticker_data = df_with_indicators[df_with_indicators['StockSymbol'] == ticker]
-        psar_series = safe_calculate_psar(ticker_data)
-        psar_results.append(psar_series)
-    
-    if psar_results:
-        psar_combined = pd.concat(psar_results).sort_index()
-        # ตรวจสอบขนาดก่อน assign
-        if len(psar_combined) == len(df_with_indicators):
-            df_with_indicators['PSAR'] = psar_combined
-        else:
-            print(f"⚠️ PSAR size mismatch: {len(psar_combined)} vs {len(df_with_indicators)}, using default values")
-            df_with_indicators['PSAR'] = 0
-    else:
-        df_with_indicators['PSAR'] = 0
-    
-    # ✅ Handle infinite values (ตามแบบ training)
-    stock_columns = [
-        'RSI', 'EMA_12', 'EMA_26', 'MACD', 'MACD_Signal', 'Bollinger_High',
-        'Bollinger_Low', 'ATR', 'Keltner_High', 'Keltner_Low', 'Keltner_Middle',
-        'Chaikin_Vol', 'Donchian_High', 'Donchian_Low', 'PSAR', 'SMA_50', 'SMA_200'
-    ]
-    
-    available_stock_cols = [col for col in stock_columns if col in df_with_indicators.columns]
-    
-    # Forward fill per ticker (ตามแบบ training)
-    for ticker in df_with_indicators['StockSymbol'].unique():
-        ticker_mask = df_with_indicators['StockSymbol'] == ticker
-        df_with_indicators.loc[ticker_mask, available_stock_cols] = \
-            df_with_indicators.loc[ticker_mask, available_stock_cols].ffill()
-
-    
-    # Final fillna (ตามแบบ training)
-    df_with_indicators = df_with_indicators.fillna(0)
-    
-    print(f"✅ Technical indicators calculated (training style): {len(available_stock_cols)} indicators")
-    return df_with_indicators
-
-# ======================== FIXED DATA PROCESSING PIPELINE ========================
-
-def process_data_training_compatible_enhanced(raw_df):
-    """
-    🔧 ประมวลผลข้อมูลให้เข้ากันได้กับ training scalers 100% - Enhanced version
-    """
-    print("\n🔧 Processing data for training compatibility (Enhanced)...")
-    
-    # Step 1: Enhanced column name standardization
-    df_processed = standardize_column_names_to_training_format(raw_df)
-    
-    # Step 2: Calculate technical indicators (training style)
-    df_processed = calculate_technical_indicators_training_style(df_processed)
-    
-    # Step 3: Add required columns ที่ training ต้องการ
-    if 'Ticker' not in df_processed.columns and 'StockSymbol' in df_processed.columns:
-        df_processed['Ticker'] = df_processed['StockSymbol']
-    
-    # Step 4: Enhanced data cleaning
-    training_features = use_training_feature_columns()
-    df_processed = clean_data_for_scalers_enhanced(df_processed, training_features)
-    
-    # Step 5: Final feature validation
-    missing_features = [col for col in training_features if col not in df_processed.columns]
-    if missing_features:
-        print(f"⚠️ Missing features: {missing_features}")
-        # เพิ่ม missing features ด้วยค่า 0
-        for col in missing_features:
-            df_processed[col] = 0.0
-            print(f"   Added {col} = 0.0")
-    
-    available_features = [col for col in training_features if col in df_processed.columns]
-    print(f"✅ Available training features: {len(available_features)}/{len(training_features)}")
-    
-    # Step 6: Final data type and value validation
-    print("🔍 Final validation...")
-    for col in training_features:
-        if col in df_processed.columns:
-            # Ensure numeric type
-            if not pd.api.types.is_numeric_dtype(df_processed[col]):
-                df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce').fillna(0)
-            
-            # Ensure float64 type for consistency
-            df_processed[col] = df_processed[col].astype('float64')
-            
-            # Final sanity checks
-            if df_processed[col].isna().any() or np.isinf(df_processed[col]).any():
-                df_processed[col] = df_processed[col].replace([np.inf, -np.inf, np.nan], 0)
-    
-    print(f"✅ Enhanced processing completed: {len(df_processed)} rows")
-    return df_processed, training_features
-
-# ======================== FIXED PREDICTION FUNCTION ========================
-
-def predict_with_training_compatible_scalers(model_lstm, model_gru, df, feature_columns, 
-                                           ticker_scalers, ticker_encoder, market_encoder, seq_length=10):
-    """
-    🔧 ทำนายด้วย scalers ที่เข้ากันได้กับ training 100%
-    แก้ไขปัญหาราคาที่ทำนายผิดปกติ และ data type issues
-    """
-    print(f"\n🔧 Fixed Prediction with Training-Compatible Scalers...")
-    print(f"   ✅ Using exact same feature columns as training")
-    print(f"   ✅ Using exact same column names as training")
-    print(f"   ✅ Using exact same preprocessing as training")
-    print(f"   🔧 Added data type validation and cleaning")
-    
-    future_predictions = []
-    tickers = df['StockSymbol'].unique()
-    
-    def clean_and_validate_data(data, columns, ticker_name):
-        """Clean and validate data before scaling"""
-        cleaned_data = data[columns].copy()
-        
-        # Check data types and convert to numeric
-        for col in columns:
-            if col in cleaned_data.columns:
-                try:
-                    # Check if column contains non-numeric data
-                    if cleaned_data[col].dtype == 'object':
-                        print(f"      🔧 Converting {col} from object to numeric")
-                        cleaned_data[col] = pd.to_numeric(cleaned_data[col], errors='coerce')
-                    
-                    # Handle string-like values that might be in numeric columns
-                    if cleaned_data[col].dtype == 'object' or str(cleaned_data[col].dtype).startswith('string'):
-                        print(f"      ⚠️ Found string values in {col}, converting...")
-                        cleaned_data[col] = pd.to_numeric(cleaned_data[col], errors='coerce')
-                    
-                    # Replace inf and -inf with NaN
-                    cleaned_data[col] = cleaned_data[col].replace([np.inf, -np.inf], np.nan)
-                    
-                    # Fill NaN with column mean or 0
-                    if cleaned_data[col].isna().any():
-                        col_mean = cleaned_data[col].mean()
-                        if pd.isna(col_mean):
-                            cleaned_data[col] = cleaned_data[col].fillna(0)
-                        else:
-                            cleaned_data[col] = cleaned_data[col].fillna(col_mean)
-                    
-                    # Final validation: ensure all values are numeric
-                    if not pd.api.types.is_numeric_dtype(cleaned_data[col]):
-                        print(f"      ❌ {col} still not numeric after conversion, using default values")
-                        cleaned_data[col] = 0.0
-                    
-                except Exception as e:
-                    print(f"      ❌ Error processing column {col}: {e}, using default values")
-                    cleaned_data[col] = 0.0
-            else:
-                print(f"      ⚠️ Column {col} not found, adding with default value 0")
-                cleaned_data[col] = 0.0
-        
-        # Final data type validation
-        for col in cleaned_data.columns:
-            if not pd.api.types.is_numeric_dtype(cleaned_data[col]):
-                print(f"      🔧 Final conversion of {col} to float64")
-                cleaned_data[col] = pd.to_numeric(cleaned_data[col], errors='coerce').fillna(0).astype('float64')
-        
-        return cleaned_data
-    
-    for ticker in tickers:
-        print(f"\n📊 Predicting {ticker} (training-compatible with validation)...")
-        
-        df_ticker = df[df['StockSymbol'] == ticker].sort_values('Date').reset_index(drop=True)
-        
-        if len(df_ticker) < seq_length:
-            print(f"   ⚠️ Insufficient data: {len(df_ticker)} < {seq_length}")
-            continue
-        
-        try:
-            # Get latest data
-            latest_data = df_ticker.iloc[-seq_length:].copy()
-            ticker_id = latest_data['Ticker_ID'].iloc[-1]
-            
-            # Check scaler availability
-            if ticker_id not in ticker_scalers:
-                print(f"   ❌ No scaler for {ticker} (ID: {ticker_id})")
-                continue
-            
-            # ✅ Use training-compatible scaler
-            scaler_info = ticker_scalers[ticker_id]
-            feature_scaler = scaler_info['feature_scaler']
-            price_scaler = scaler_info['price_scaler']
-            
-            print(f"   🔧 Using training scaler for {ticker}:")
-            print(f"      📊 Feature scaler: {type(feature_scaler).__name__}")
-            print(f"      💰 Price scaler: {type(price_scaler).__name__}")
-            
-            # ✅ Clean and validate feature data
-            print(f"      🔧 Cleaning and validating feature data...")
-            features_data = clean_and_validate_data(latest_data, feature_columns, ticker)
-            
-            print(f"      📊 Cleaned feature shape: {features_data.shape}")
-            print(f"      📊 Feature data types: {features_data.dtypes.nunique()} unique types")
-            print(f"      📊 Feature range: {features_data.min().min():.3f} to {features_data.max().max():.3f}")
-            
-            # Validate that all features are numeric
-            non_numeric_cols = []
-            for col in features_data.columns:
-                if not pd.api.types.is_numeric_dtype(features_data[col]):
-                    non_numeric_cols.append(col)
-            
-            if non_numeric_cols:
-                print(f"      ❌ Non-numeric columns found: {non_numeric_cols}")
-                # Force convert to numeric
-                for col in non_numeric_cols:
-                    features_data[col] = pd.to_numeric(features_data[col], errors='coerce').fillna(0)
-                print(f"      ✅ Forced conversion completed")
-            
-            # ✅ Scale features using training scaler with additional validation
-            try:
-                print(f"      🔧 Applying feature scaling...")
-                
-                # Ensure data is in the right format for scaler
-                features_array = features_data.values.astype(np.float64)
-                
-                # Validate array shape and content
-                if np.any(np.isnan(features_array)):
-                    print(f"      ⚠️ Found NaN values, replacing with 0")
-                    features_array = np.nan_to_num(features_array, nan=0.0)
-                
-                if np.any(np.isinf(features_array)):
-                    print(f"      ⚠️ Found infinite values, replacing with finite values")
-                    features_array = np.nan_to_num(features_array, posinf=1e6, neginf=-1e6)
-                
-                features_scaled = feature_scaler.transform(features_array)
-                print(f"      ✅ Feature scaling successful")
-                
-            except Exception as e:
-                print(f"      ❌ Feature scaling failed: {e}")
-                print(f"      Debug - Expected features: {getattr(feature_scaler, 'n_features_in_', 'unknown')}")
-                print(f"      Debug - Got features: {features_data.shape[1]}")
-                print(f"      Debug - Feature data types: {features_data.dtypes.to_dict()}")
-                continue
-            
-            # Prepare inputs with validation
-            try:
-                ticker_ids = latest_data["Ticker_ID"].values.astype(np.int64)
-                market_ids = latest_data["Market_ID"].values.astype(np.int64)
-                
-                X_feat = features_scaled.reshape(1, seq_length, -1).astype(np.float32)
-                X_ticker = ticker_ids.reshape(1, seq_length).astype(np.int64)
-                X_market = market_ids.reshape(1, seq_length).astype(np.int64)
-                
-                print(f"      📊 Input shapes: Features{X_feat.shape}, Ticker{X_ticker.shape}, Market{X_market.shape}")
-                
-            except Exception as e:
-                print(f"      ❌ Input preparation failed: {e}")
-                continue
-            
-            # === LSTM PREDICTION ===
-            print(f"   🔴 LSTM Prediction...")
-            try:
-                pred_output_lstm = model_lstm.predict([X_feat, X_ticker, X_market], verbose=0)
-                pred_price_lstm_scaled = np.squeeze(pred_output_lstm[0])
-                pred_direction_lstm = np.squeeze(pred_output_lstm[1])
-                
-                # ✅ Inverse transform with training scaler
-                pred_price_lstm = price_scaler.inverse_transform(
-                    pred_price_lstm_scaled.reshape(-1, 1)
-                ).flatten()[0]
-                
-                print(f"      💰 LSTM Price: {pred_price_lstm:.2f}")
-                print(f"      📈 LSTM Direction: {pred_direction_lstm:.4f}")
-                
-            except Exception as e:
-                print(f"      ❌ LSTM prediction failed: {e}")
-                continue
-            
-            # === GRU PREDICTION ===
-            print(f"   🔵 GRU Prediction...")
-            try:
-                pred_output_gru = model_gru.predict([X_feat, X_ticker, X_market], verbose=0)
-                pred_price_gru_scaled = np.squeeze(pred_output_gru[0])
-                pred_direction_gru = np.squeeze(pred_output_gru[1])
-                
-                # ✅ Inverse transform with training scaler
-                pred_price_gru = price_scaler.inverse_transform(
-                    pred_price_gru_scaled.reshape(-1, 1)
-                ).flatten()[0]
-                
-                print(f"      💰 GRU Price: {pred_price_gru:.2f}")
-                print(f"      📈 GRU Direction: {pred_direction_gru:.4f}")
-                
-            except Exception as e:
-                print(f"      ❌ GRU prediction failed: {e}")
-                continue
-            
-            # === SANITY CHECK ===
-            current_price = df_ticker.iloc[-1]['Close']
-            
-            # Validate current_price
-            try:
-                current_price = float(current_price)
-                if current_price <= 0 or np.isnan(current_price) or np.isinf(current_price):
-                    print(f"   ⚠️ Invalid current price: {current_price}, using last valid price")
-                    valid_prices = df_ticker['Close'][df_ticker['Close'] > 0].dropna()
-                    if len(valid_prices) > 0:
-                        current_price = float(valid_prices.iloc[-1])
-                    else:
-                        print(f"   ❌ No valid prices found for {ticker}")
-                        continue
-            except:
-                print(f"   ❌ Cannot convert current price to float for {ticker}")
-                continue
-            
-            # Check for unrealistic predictions
-            lstm_change_pct = abs((pred_price_lstm - current_price) / current_price * 100)
-            gru_change_pct = abs((pred_price_gru - current_price) / current_price * 100)
-            
-            if lstm_change_pct > 100:  # More than 100% change
-                print(f"   ⚠️ LSTM prediction seems unrealistic: {lstm_change_pct:.1f}% change")
-                pred_price_lstm = current_price * (1 + np.sign(pred_price_lstm - current_price) * 0.1)  # Cap at 10%
-                
-            if gru_change_pct > 100:   # More than 100% change
-                print(f"   ⚠️ GRU prediction seems unrealistic: {gru_change_pct:.1f}% change")
-                pred_price_gru = current_price * (1 + np.sign(pred_price_gru - current_price) * 0.1)   # Cap at 10%
-            
-            # === CONSISTENCY CHECK ===
-            price_diff = abs(pred_price_lstm - pred_price_gru)
-            price_diff_pct = (price_diff / current_price) * 100
-            
-            direction_lstm = 1 if pred_direction_lstm > 0.5 else 0
-            direction_gru = 1 if pred_direction_gru > 0.5 else 0
-            direction_agreement = direction_lstm == direction_gru
-            
-            print(f"   🤝 Sanity Check:")
-            print(f"      💰 Current Price: {current_price:.2f}")
-            print(f"      💰 Price difference: {price_diff:.2f} ({price_diff_pct:.2f}%)")
-            print(f"      📊 Direction agreement: {direction_agreement}")
-            print(f"      📈 LSTM change: {((pred_price_lstm - current_price) / current_price * 100):+.2f}%")
-            print(f"      📈 GRU change: {((pred_price_gru - current_price) / current_price * 100):+.2f}%")
-            
-            # === ENSEMBLE PREDICTION ===
-            ensemble_price = (pred_price_lstm + pred_price_gru) / 2
-            ensemble_direction_prob = (pred_direction_lstm + pred_direction_gru) / 2
-            ensemble_direction = 1 if ensemble_direction_prob > 0.5 else 0
-            
-            # Calculate confidence
-            confidence = min(
-                1.0 - (price_diff_pct / 100),  # Price agreement
-                abs(ensemble_direction_prob - 0.5) * 2  # Direction confidence
-            )
-            
-            print(f"   🎯 Ensemble Result:")
-            print(f"      💰 Price: {ensemble_price:.2f}")
-            print(f"      📊 Direction: {ensemble_direction} (prob: {ensemble_direction_prob:.4f})")
-            print(f"      🎯 Confidence: {confidence:.3f}")
-            print(f"      📈 Expected change: {((ensemble_price - current_price) / current_price * 100):+.2f}%")
-            
-            # Store results
-            last_date = df_ticker['Date'].max()
-            next_date = last_date + pd.Timedelta(days=1)
-            
-            prediction_result = {
-                'StockSymbol': ticker,
-                'Date': next_date,
-                'Current_Price': current_price,
-                'LSTM_Price': pred_price_lstm,
-                'GRU_Price': pred_price_gru,
-                'Ensemble_Price': ensemble_price,
-                'LSTM_Direction': direction_lstm,
-                'GRU_Direction': direction_gru,
-                'Ensemble_Direction': ensemble_direction,
-                'LSTM_Direction_Prob': pred_direction_lstm,
-                'GRU_Direction_Prob': pred_direction_gru,
-                'Ensemble_Direction_Prob': ensemble_direction_prob,
-                'Price_Difference_Pct': price_diff_pct,
-                'Direction_Agreement': direction_agreement,
-                'Confidence': confidence,
-                'Scaler_Used': f"Training_Ticker_{ticker_id}",
-                'Training_Compatible': True,
-                'Data_Validation_Passed': True,
-                'LSTM_Change_Pct': ((pred_price_lstm - current_price) / current_price * 100),
-                'GRU_Change_Pct': ((pred_price_gru - current_price) / current_price * 100),
-                'Ensemble_Change_Pct': ((ensemble_price - current_price) / current_price * 100)
-            }
-            
-            future_predictions.append(prediction_result)
-            print(f"   ✅ {ticker} prediction completed successfully")
-            
-        except Exception as e:
-            print(f"   ❌ Error predicting {ticker}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
-    
-    print(f"\n🎉 Training-compatible predictions completed: {len(future_predictions)}/{len(tickers)} stocks")
-    return pd.DataFrame(future_predictions)
-
-
-# ======================== WALK-FORWARD VALIDATION FUNCTION ========================
-
-def walk_forward_validation_multi_task_batch(
-    model,
-    df,
-    feature_columns,
-    ticker_scalers,   # Dict ของ Scaler per Ticker
-    ticker_encoder,
-    market_encoder,
-    seq_length=10,
-    retrain_frequency=5,
-    chunk_size = 200
-):
-
-    all_predictions = []
-    chunk_metrics = []
-    tickers = df['StockSymbol'].unique()
-
-    for ticker in tickers:
-        print(f"\nProcessing Ticker: {ticker}")
-        df_ticker = df[df['StockSymbol'] == ticker].sort_values('Date').reset_index(drop=True)
-        
-        total_days = len(df_ticker)
-        print(f"   📊 Total data available: {total_days} days")
-        
-        if total_days < chunk_size + seq_length:
-            print(f"   ⚠️ Not enough data (need at least {chunk_size + seq_length} days), skipping...")
-            continue
-        
-        # คำนวณจำนวน chunks ที่สามารถสร้างได้
-        num_chunks = total_days // chunk_size
-        remaining_days = total_days % chunk_size
-        
-        # เพิ่ม partial chunk ถ้าข้อมูลเพียงพอ
-        if remaining_days > seq_length:
-            num_chunks += 1
-            
-        print(f"   📦 Number of chunks: {num_chunks} (chunk_size={chunk_size})")
-        
-        ticker_predictions = []
-        
-        # ประมวลผลแต่ละ chunk
-        for chunk_idx in range(num_chunks):
-            start_idx = chunk_idx * chunk_size
-            end_idx = min(start_idx + chunk_size, total_days)
-            
-            # ตรวจสอบขนาด chunk
-            if (end_idx - start_idx) < seq_length + 1:
-                print(f"      ⚠️ Chunk {chunk_idx + 1} too small ({end_idx - start_idx} days), skipping...")
-                continue
-                
-            current_chunk = df_ticker.iloc[start_idx:end_idx].reset_index(drop=True)
-            
-            print(f"\n      📦 Processing Chunk {chunk_idx + 1}/{num_chunks}")
-            print(f"         📅 Date range: {current_chunk['Date'].min()} to {current_chunk['Date'].max()}")
-            print(f"         📈 Days: {len(current_chunk)} ({start_idx}-{end_idx})")
-            
-            # === Walk-Forward Validation ภายใน Chunk ===
-            chunk_predictions = []
-            batch_features = []
-            batch_tickers = []
-            batch_market = []
-            batch_price = []
-            batch_dir = []
-            predictions_count = 0
-
-            for i in range(len(current_chunk) - seq_length):
-                historical_data = current_chunk.iloc[i : i + seq_length]
-                target_data = current_chunk.iloc[i + seq_length]
-
-                t_id = historical_data['Ticker_ID'].iloc[-1]
-                if t_id not in ticker_scalers:
-                    print(f"         ⚠️ Ticker_ID {t_id} not found in scalers, skipping...")
-                    continue
-
-                scaler_f = ticker_scalers[t_id]['feature_scaler']
-                scaler_p = ticker_scalers[t_id]['price_scaler']
-
-                # เตรียม input features
-                features = historical_data[feature_columns].values
-                ticker_ids = historical_data['Ticker_ID'].values
-                market_ids = historical_data['Market_ID'].values
-
-                try:
-                    features_scaled = scaler_f.transform(features)
-                except Exception as e:
-                    print(f"         ⚠️ Feature scaling error: {e}")
-                    continue
-
-                X_features = features_scaled.reshape(1, seq_length, len(feature_columns))
-                X_ticker = ticker_ids.reshape(1, seq_length)
-                X_market = market_ids.reshape(1, seq_length)
-
-                # ทำนาย
-                try:
-                    pred_output = model.predict([X_features, X_ticker, X_market], verbose=0)
-                    pred_price_scaled = pred_output[0]
-                    pred_dir_prob = pred_output[1]
-
-                    predicted_price = scaler_p.inverse_transform(pred_price_scaled)[0][0]
-                    predicted_dir = 1 if pred_dir_prob[0][0] >= 0.5 else 0
-
-                    # เก็บผลลัพธ์
-                    actual_price = target_data['Close']
-                    future_date = target_data['Date']
-                    last_close = historical_data.iloc[-1]['Close']
-                    actual_dir = 1 if (target_data['Close'] > last_close) else 0
-
-                    chunk_predictions.append({
-                        'Ticker': ticker,
-                        'Date': future_date,
-                        'Chunk_Index': chunk_idx + 1,
-                        'Position_in_Chunk': i + 1,
-                        'Predicted_Price': predicted_price,
-                        'Actual_Price': actual_price,
-                        'Predicted_Dir': predicted_dir,
-                        'Actual_Dir': actual_dir,
-                        'Last_Close': last_close,
-                        'Price_Change_Actual': actual_price - last_close,
-                        'Price_Change_Predicted': predicted_price - last_close
-                    })
-
-                    predictions_count += 1
-
-                    # เตรียมข้อมูลสำหรับ mini-retrain
-                    batch_features.append(X_features)
-                    batch_tickers.append(X_ticker)
-                    batch_market.append(X_market)
-
-                    y_price_true_scaled = scaler_p.transform(np.array([[actual_price]], dtype=float))
-                    batch_price.append(y_price_true_scaled)
-
-                    y_dir_true = np.array([actual_dir], dtype=float)
-                    batch_dir.append(y_dir_true)
-
-                    # 🔄 Mini-retrain ทุกๆ retrain_frequency วัน
-                    if (i+1) % retrain_frequency == 0 or (i == (len(current_chunk) - seq_length - 1)):
-                        if len(batch_features) > 0:
-                            try:
-                                print(f"            🔄 Mini-retrain at position {i+1}...")
-                                
-                                # รวม batch data และแปลงเป็น float32 ทั้งหมด
-                                bf = np.concatenate(batch_features, axis=0).astype(np.float32)
-                                bt = np.concatenate(batch_tickers, axis=0).astype(np.int32)
-                                bm = np.concatenate(batch_market, axis=0).astype(np.int32)
-                                bp = np.concatenate(batch_price, axis=0).astype(np.float32)
-                                bd = np.array([np.array(d, dtype=np.float32) for d in batch_dir], dtype=np.float32)
-                                if len(bd.shape) > 1:
-                                    bd = bd.flatten()
-                                bd = bd.astype(np.float32)
-
-                                # Mini-retrain
-                                model.fit(
-                                    [bf, bt, bm], 
-                                    {'price_output': bp, 'direction_output': bd}, 
-                                    epochs=1, 
-                                    batch_size=min(len(bf), 8), 
-                                    verbose=0
-                                )
-                                
-                                print(f"            ✅ Mini-retrain completed with {len(bf)} samples")
-                                
-                            except Exception as e:
-                                print(f"            ❌ Mini-retrain error: {e}")
-
-                            # ล้าง batch
-                            batch_features = []
-                            batch_tickers = []
-                            batch_market = []
-                            batch_price = []
-                            batch_dir = []
-                            
-                except Exception as e:
-                    print(f"         ⚠️ Prediction error at position {i}: {e}")
-                    continue
-
-            # คำนวณ metrics สำหรับ chunk นี้
-            if chunk_predictions:
-                chunk_df = pd.DataFrame(chunk_predictions)
-                
-                actual_prices = chunk_df['Actual_Price'].values
-                pred_prices = chunk_df['Predicted_Price'].values
-                actual_dirs = chunk_df['Actual_Dir'].values
-                pred_dirs = chunk_df['Predicted_Dir'].values
-                
-                # คำนวณ metrics
-                mae_val = mean_absolute_error(actual_prices, pred_prices)
-                mse_val = mean_squared_error(actual_prices, pred_prices)
-                rmse_val = np.sqrt(mse_val)
-                r2_val = r2_score(actual_prices, pred_prices)
-                dir_acc = accuracy_score(actual_dirs, pred_dirs)
-                dir_f1 = f1_score(actual_dirs, pred_dirs, zero_division=0)
-                
-                # คำนวณ MAPE และ SMAPE (safe calculation)
-                try:
-                    mape_val = np.mean(np.abs((actual_prices - pred_prices) / actual_prices)) * 100
-                except:
-                    mape_val = 0
-                    
-                try:
-                    smape_val = 100/len(actual_prices) * np.sum(2 * np.abs(pred_prices - actual_prices) / (np.abs(actual_prices) + np.abs(pred_prices)))
-                except:
-                    smape_val = 0
-
-                chunk_metric = {
-                    'Ticker': ticker,
-                    'Chunk_Index': chunk_idx + 1,
-                    'Chunk_Start_Date': current_chunk['Date'].min(),
-                    'Chunk_End_Date': current_chunk['Date'].max(),
-                    'Chunk_Days': len(current_chunk),
-                    'Predictions_Count': predictions_count,
-                    'MAE': mae_val,
-                    'MSE': mse_val,
-                    'RMSE': rmse_val,
-                    'MAPE': mape_val,
-                    'SMAPE': smape_val,
-                    'R2_Score': r2_val,
-                    'Direction_Accuracy': dir_acc,
-                    'Direction_F1': dir_f1
-                }
-                
-                chunk_metrics.append(chunk_metric)
-                ticker_predictions.extend(chunk_predictions)
-                
-                print(f"         📊 Chunk results: {predictions_count} predictions")
-                print(f"         📈 Direction accuracy: {dir_acc:.3f}")
-                print(f"         📈 Price MAE: {mae_val:.3f}")
-            
-            print(f"         ✅ Chunk {chunk_idx + 1} completed with mini-retrain")
-        
-        all_predictions.extend(ticker_predictions)
-        print(f"   ✅ Completed {ticker}: {len(ticker_predictions)} total predictions from {num_chunks} chunks")
-
-    # รวบรวมและบันทึกผลลัพธ์
-    print(f"\n📊 Processing complete!")
-    print(f"   Total predictions: {len(all_predictions)}")
-    print(f"   Total chunks processed: {len(chunk_metrics)}")
-    
-    if len(all_predictions) == 0:
-        print("❌ No predictions generated!")
-        return pd.DataFrame(), {}
-
-    predictions_df = pd.DataFrame(all_predictions)
-    
-    # บันทึก predictions
-    predictions_df.to_csv('predictions_chunk_walkforward.csv', index=False)
-    print("💾 Saved predictions to 'predictions_chunk_walkforward.csv'")
-    
-    # บันทึก chunk metrics
-    if chunk_metrics:
-        chunk_metrics_df = pd.DataFrame(chunk_metrics)
-        chunk_metrics_df.to_csv('chunk_metrics.csv', index=False)
-        print("💾 Saved chunk metrics to 'chunk_metrics.csv'")
-
-    # คำนวณ Overall Metrics ต่อ Ticker
-    print("\n📊 Calculating overall metrics...")
-    overall_metrics = {}
-    
-    for ticker, group in predictions_df.groupby('Ticker'):
-        actual_prices = group['Actual_Price'].values
-        pred_prices = group['Predicted_Price'].values
-        actual_dirs = group['Actual_Dir'].values
-        pred_dirs = group['Predicted_Dir'].values
-
-        # คำนวณ metrics
-        mae_val = mean_absolute_error(actual_prices, pred_prices)
-        mse_val = mean_squared_error(actual_prices, pred_prices)
-        rmse_val = np.sqrt(mse_val)
-        r2_val = r2_score(actual_prices, pred_prices)
-
-        dir_acc = accuracy_score(actual_dirs, pred_dirs)
-        dir_f1 = f1_score(actual_dirs, pred_dirs, zero_division=0)
-        dir_precision = precision_score(actual_dirs, pred_dirs, zero_division=0)
-        dir_recall = recall_score(actual_dirs, pred_dirs, zero_division=0)
-
-        # Safe MAPE และ SMAPE calculation
-        try:
-            mape_val = np.mean(np.abs((actual_prices - pred_prices) / actual_prices)) * 100
-        except:
-            mape_val = 0
-            
-        try:
-            smape_val = 100/len(actual_prices) * np.sum(2 * np.abs(pred_prices - actual_prices) / (np.abs(actual_prices) + np.abs(pred_prices)))
-        except:
-            smape_val = 0
-
-        overall_metrics[ticker] = {
-            'Total_Predictions': len(group),
-            'Number_of_Chunks': len(group['Chunk_Index'].unique()),
-            'MAE': mae_val,
-            'MSE': mse_val,
-            'RMSE': rmse_val,
-            'MAPE': mape_val,
-            'SMAPE': smape_val,
-            'R2_Score': r2_val,
-            'Direction_Accuracy': dir_acc,
-            'Direction_F1_Score': dir_f1,
-            'Direction_Precision': dir_precision,
-            'Direction_Recall': dir_recall
-        }
-
-    # บันทึก overall metrics
-    overall_metrics_df = pd.DataFrame.from_dict(overall_metrics, orient='index')
-    overall_metrics_df.to_csv('overall_metrics_per_ticker.csv')
-    print("💾 Saved overall metrics to 'overall_metrics_per_ticker.csv'")
-
-    # สรุปผลลัพธ์
-    print(f"\n🎯 Summary:")
-    print(f"   📈 Tickers processed: {len(predictions_df['Ticker'].unique())}")
-    print(f"   📈 Average predictions per ticker: {len(predictions_df)/len(predictions_df['Ticker'].unique()):.1f}")
-    print(f"   📈 Average chunks per ticker: {len(chunk_metrics)/len(predictions_df['Ticker'].unique()):.1f}")
-    
-    if chunk_metrics:
-        avg_chunk_acc = np.mean([c['Direction_Accuracy'] for c in chunk_metrics])
-        avg_chunk_mae = np.mean([c['MAE'] for c in chunk_metrics])
-        print(f"   📈 Average chunk direction accuracy: {avg_chunk_acc:.3f}")
-        print(f"   📈 Average chunk MAE: {avg_chunk_mae:.3f}")
-
-    print(f"\n📁 Files generated:")
-    print(f"   📄 predictions_chunk_walkforward.csv - All predictions with chunk info")
-    print(f"   📄 chunk_metrics.csv - Performance metrics per chunk")  
-    print(f"   📄 overall_metrics_per_ticker.csv - Overall performance per ticker")
-
-    return predictions_df, list(overall_metrics.values())
-
-def create_unified_ticker_scalers(df, feature_columns, scaler_file_path="../LSTM_model/ticker_scalers.pkl"):
-    """
-    สร้าง ticker scalers ตามแนวทางของโค้ดเทรน + การจัดการข้อมูลที่ดีขึ้น
-    """
-    print("🔧 Creating unified per-ticker scalers...")
-    
-    # ======== STEP 1: Data Cleaning (จากระบบปัจจุบัน) ========
-    df_clean = clean_data_for_unified_scaling(df, feature_columns)
-    
-    # ======== STEP 2: Create Per-Ticker Scalers (จากโค้ดเทรน) ========
-    ticker_scalers = {}
-    unique_tickers = df_clean['StockSymbol'].unique()
-    
-    # สร้าง mapping ระหว่าง Ticker_ID กับ StockSymbol
-    ticker_id_to_name = {}
-    name_to_ticker_id = {}
-    
-    print("📋 Creating ticker mappings...")
-    for ticker_name in unique_tickers:
-        ticker_rows = df_clean[df_clean['StockSymbol'] == ticker_name]
-        if len(ticker_rows) > 0:
-            ticker_id = ticker_rows['Ticker_ID'].iloc[0]
-            ticker_id_to_name[ticker_id] = ticker_name
-            name_to_ticker_id[ticker_name] = ticker_id
-            print(f"   Mapping: Ticker_ID {ticker_id} = {ticker_name}")
-    
-    # ตรวจสอบการโหลด pre-trained scalers
-    pre_trained_scalers = {}
-    try:
-        if os.path.exists(scaler_file_path):
-            pre_trained_scalers = joblib.load(scaler_file_path)
-            print(f"✅ Loaded pre-trained scalers for {len(pre_trained_scalers)} tickers")
-    except Exception as e:
-        print(f"⚠️ Could not load pre-trained scalers: {e}")
-    
-    # สร้าง scalers สำหรับแต่ละ ticker
-    for ticker_name in unique_tickers:
-        ticker_data = df_clean[df_clean['StockSymbol'] == ticker_name].copy()
-        
-        if len(ticker_data) < 30:
-            print(f"   ⚠️ {ticker_name}: Not enough data ({len(ticker_data)} days), skipping...")
-            continue
-        
-        ticker_id = name_to_ticker_id[ticker_name]
-        
-        # ตรวจสอบ pre-trained scaler
-        if ticker_id in pre_trained_scalers:
-            scaler_info = pre_trained_scalers[ticker_id]
-            
-            # ตรวจสอบ structure ของ scaler
-            required_keys = ['feature_scaler', 'price_scaler']
-            if all(key in scaler_info for key in required_keys):
-                try:
-                    # ทดสอบ scaler
-                    test_features = ticker_data[feature_columns].iloc[:5]
-                    test_price = ticker_data[['Close']].iloc[:5]
-                    
-                    _ = scaler_info['feature_scaler'].transform(test_features.fillna(0))
-                    _ = scaler_info['price_scaler'].transform(test_price)
-                    
-                    # เพิ่ม metadata ที่จำเป็น
-                    scaler_info.update({
-                        'ticker_symbol': ticker_name,
-                        'ticker': ticker_name,  # สำหรับ compatibility
-                        'data_points': len(ticker_data)
-                    })
-                    
-                    ticker_scalers[ticker_id] = scaler_info
-                    print(f"   ✅ {ticker_name} (ID: {ticker_id}): Using pre-trained scaler")
-                    continue
-                    
-                except Exception as e:
-                    print(f"   ⚠️ {ticker_name}: Pre-trained scaler failed ({e}), creating new one")
-        
-        # สร้าง scaler ใหม่
-        try:
-            print(f"   🔧 {ticker_name}: Creating new scaler...")
-            
-            # เตรียม feature data
-            features = ticker_data[feature_columns].copy()
-            
-            # จัดการ inf และ NaN ตามแนวทางโค้ดเทรน
-            features = handle_infinite_values(features)
-            features = features.fillna(features.mean()).fillna(0)
-            
-            # ✅ ต้องใช้ scaler จากการเทรนเท่านั้น - ห้ามสร้างใหม่!
-            if ticker_id in pre_trained_scalers:
-                # ใช้ scaler ที่เทรนไว้แล้ว
-                scaler_info = pre_trained_scalers[ticker_id]
-                scaler_info.update({
-                    'ticker_symbol': ticker_name,
-                    'ticker': ticker_name,  # compatibility
-                    'data_points': len(ticker_data)
-                })
-                ticker_scalers[ticker_id] = scaler_info
-                print(f"   ✅ {ticker_name} (ID: {ticker_id}): Using trained scaler")
-            else:
-                print(f"   ❌ {ticker_name} (ID: {ticker_id}): No trained scaler found - SKIPPING!")
-                print(f"       Available scaler IDs: {list(pre_trained_scalers.keys())}")
-                continue
-            
-            
-        except Exception as e:
-            print(f"   ❌ {ticker_name}: Error creating scaler - {e}")
-            continue
-    
-    # บันทึก scalers
-    try:
-        os.makedirs(os.path.dirname(scaler_file_path), exist_ok=True)
-        joblib.dump(ticker_scalers, scaler_file_path)
-        print(f"💾 Saved unified scalers to {scaler_file_path}")
-        
-        # แสดงสรุป
-        print(f"\n📊 Unified Ticker Scalers Summary:")
-        for t_id, scaler_info in ticker_scalers.items():
-            ticker_name = scaler_info.get('ticker', 'Unknown')
-            data_points = scaler_info.get('data_points', 'Unknown')
-            print(f"   Ticker_ID {t_id}: {ticker_name} ({data_points} data points)")
-            
-    except Exception as e:
-        print(f"❌ Error saving scalers: {e}")
-    
-    print(f"✅ Created unified scalers for {len(ticker_scalers)} tickers")
-    return ticker_scalers
-
-def clean_data_for_unified_scaling(df, feature_columns):
-    """ทำความสะอาดข้อมูลก่อนสร้าง unified scalers"""
-    print("🧹 Cleaning data for unified scaling...")
-    
-    df_clean = df.copy()
-    
-    # Map column names จาก database format เป็น training format
-    column_mapping = {
-        'Change_Percent': 'Change (%)',
-        'P_BV_Ratio': 'P/BV Ratio',
+def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    mapping = {
+        'Changepercen': 'Change_Percent',
+        'Change_Percent': 'Change_Percent',
         'TotalRevenue': 'Total Revenue',
         'QoQGrowth': 'QoQ Growth (%)',
         'EPS': 'Earnings Per Share (EPS)',
@@ -1372,2251 +235,877 @@ def clean_data_for_unified_scaling(df, feature_columns):
         'NetProfitMargin': 'Net Profit Margin (%)',
         'DebtToEquity': 'Debt to Equity',
         'PERatio': 'P/E Ratio',
+        'P_BV_Ratio': 'P/BV Ratio',
         'Dividend_Yield': 'Dividend Yield (%)',
     }
-    
-    # Rename columns ถ้าจำเป็น
-    for old_name, new_name in column_mapping.items():
-        if old_name in df_clean.columns and new_name not in df_clean.columns:
-            df_clean[new_name] = df_clean[old_name]
-            print(f"   🔄 Mapped {old_name} → {new_name}")
-    
-    # ทำความสะอาดข้อมูลตาม feature columns
-    for col in feature_columns:
-        if col in df_clean.columns:
-            try:
-                # แปลงเป็น numeric
-                if not pd.api.types.is_numeric_dtype(df_clean[col]):
-                    df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
-                
-                # จัดการ infinite values (ตามแนวทางโค้ดเทรน)
-                df_clean[col] = handle_infinite_values_column(df_clean[col])
-                
-                print(f"   ✅ Cleaned {col}: range {df_clean[col].min():.3f} - {df_clean[col].max():.3f}")
-                
-            except Exception as e:
-                print(f"   ❌ Error cleaning {col}: {e}")
-                df_clean[col] = 0.0
-    
-    return df_clean
-
-def handle_infinite_values(data):
-    """จัดการ infinite values ตามแนวทางโค้ดเทรน"""
-    data_clean = data.copy()
-    
-    for col in data_clean.columns:
-        col_data = data_clean[col]
-        
-        # แทนที่ +inf ด้วยค่าสูงสุดที่ไม่ใช่ inf
-        pos_inf_mask = col_data == np.inf
-        if pos_inf_mask.any():
-            max_val = col_data[col_data != np.inf].max()
-            if pd.notna(max_val):
-                data_clean.loc[pos_inf_mask, col] = max_val
-            else:
-                data_clean.loc[pos_inf_mask, col] = 0
-        
-        # แทนที่ -inf ด้วยค่าต่ำสุดที่ไม่ใช่ -inf
-        neg_inf_mask = col_data == -np.inf
-        if neg_inf_mask.any():
-            min_val = col_data[col_data != -np.inf].min()
-            if pd.notna(min_val):
-                data_clean.loc[neg_inf_mask, col] = min_val
-            else:
-                data_clean.loc[neg_inf_mask, col] = 0
-    
-    return data_clean
-
-def handle_infinite_values_column(series):
-    """จัดการ infinite values สำหรับ column เดียว"""
-    series_clean = series.copy()
-    
-    # แทนที่ +inf
-    pos_inf_mask = series_clean == np.inf
-    if pos_inf_mask.any():
-        max_val = series_clean[series_clean != np.inf].max()
-        if pd.notna(max_val):
-            series_clean[pos_inf_mask] = max_val
+    for old, new in mapping.items():
+        if old in df.columns and new not in df.columns:
+            df[new] = df[old]
+    if 'Sentiment' in df.columns:
+        df['Sentiment'] = df['Sentiment'].map({'Positive':1,'Negative':-1,'Neutral':0}).fillna(0)
+    if 'Change (%)' not in df.columns:
+        if 'Change_Percent' in df.columns:
+            df['Change (%)'] = pd.to_numeric(df['Change_Percent'], errors='coerce')
         else:
-            series_clean[pos_inf_mask] = 0
-    
-    # แทนที่ -inf
-    neg_inf_mask = series_clean == -np.inf
-    if neg_inf_mask.any():
-        min_val = series_clean[series_clean != -np.inf].min()
-        if pd.notna(min_val):
-            series_clean[neg_inf_mask] = min_val
-        else:
-            series_clean[neg_inf_mask] = 0
-    
-    return series_clean
+            df['Change (%)'] = df.groupby('StockSymbol')['Close'].pct_change().mul(100)
+    for c in FEATURE_COLUMNS:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+    return df
 
-def calculate_dynamic_weights(df_ticker, price_weight_factor=0.6, direction_weight_factor=0.4):
-    """
-    คำนวณ dynamic weight ระหว่าง LSTM และ GRU ตาม performance ล่าสุด
-    """
-    
-    # ใช้ข้อมูล 15 วันล่าสุดสำหรับคำนวณ weight
-    recent_data = df_ticker.tail(15)
-    
-    if len(recent_data) < 5:
-        # ถ้าข้อมูลไม่เพียงพอ ใช้ weight เท่าๆ กัน
-        return 0.5, 0.5
-    
-    # ตรวจสอบว่ามี columns สำหรับคำนวณ accuracy หรือไม่
-    required_cols = ['PredictionClose_LSTM', 'PredictionClose_GRU', 
-                     'PredictionTrend_LSTM', 'PredictionTrend_GRU']
-    
-    if not all(col in df_ticker.columns for col in required_cols):
-        print("⚠️ ไม่มีข้อมูล predictions เพียงพอสำหรับ dynamic weighting")
-        return 0.5, 0.5
-    
-    # คำนวณ price performance
-    try:
-        # สร้าง predictions สำหรับ error calculation
-        lstm_predictions = recent_data['PredictionClose_LSTM'].dropna()
-        gru_predictions = recent_data['PredictionClose_GRU'].dropna()
-        actual_prices = recent_data['Close'].dropna()
-        
-        if len(lstm_predictions) >= 3 and len(gru_predictions) >= 3 and len(actual_prices) >= 3:
-            # ใช้ length ที่น้อยที่สุดเพื่อหลีกเลี่ยง index mismatch
-            min_len = min(len(lstm_predictions), len(gru_predictions), len(actual_prices))
-            
-            if min_len >= 2:
-                # คำนวณ MAE สำหรับ price predictions - แก้ไข index alignment
-                lstm_pred_vals = lstm_predictions.iloc[:min_len-1].values
-                gru_pred_vals = gru_predictions.iloc[:min_len-1].values
-                actual_vals_next = actual_prices.iloc[1:min_len].values
-                
-                lstm_price_error = np.mean(np.abs(lstm_pred_vals - actual_vals_next))
-                gru_price_error = np.mean(np.abs(gru_pred_vals - actual_vals_next))
-                
-                # คำนวณ direction accuracy - แก้ไข index alignment
-                actual_vals_current = actual_prices.iloc[:min_len-1].values
-                
-                lstm_dir_pred = (lstm_pred_vals > actual_vals_current).astype(int)
-                gru_dir_pred = (gru_pred_vals > actual_vals_current).astype(int)
-                actual_dir = (actual_vals_next > actual_vals_current).astype(int)
-                
-                lstm_dir_acc = np.mean(lstm_dir_pred == actual_dir)
-                gru_dir_acc = np.mean(gru_dir_pred == actual_dir)
-                
-                # คำนวณ weights
-                total_price_error = lstm_price_error + gru_price_error
-                if total_price_error > 0:
-                    lstm_price_score = gru_price_error / total_price_error  # กลับค่า
-                    gru_price_score = lstm_price_error / total_price_error
-                else:
-                    lstm_price_score = 0.5
-                    gru_price_score = 0.5
-                
-                total_dir_acc = lstm_dir_acc + gru_dir_acc
-                if total_dir_acc > 0:
-                    lstm_dir_score = lstm_dir_acc / total_dir_acc
-                    gru_dir_score = gru_dir_acc / total_dir_acc
-                else:
-                    lstm_dir_score = 0.5
-                    gru_dir_score = 0.5
-                
-                # รวม weights
-                lstm_weight = (price_weight_factor * lstm_price_score + 
-                              direction_weight_factor * lstm_dir_score)
-                gru_weight = (price_weight_factor * gru_price_score + 
-                             direction_weight_factor * gru_dir_score)
-                
-                # Normalize
-                total_weight = lstm_weight + gru_weight
-                if total_weight > 0:
-                    lstm_weight = lstm_weight / total_weight
-                    gru_weight = gru_weight / total_weight
-                else:
-                    lstm_weight = 0.5
-                    gru_weight = 0.5
-                
-                # Apply constraints
-                MIN_WEIGHT = 0.1
-                MAX_WEIGHT = 0.9
-                lstm_weight = max(MIN_WEIGHT, min(MAX_WEIGHT, lstm_weight))
-                gru_weight = max(MIN_WEIGHT, min(MAX_WEIGHT, gru_weight))
-                
-                # Re-normalize
-                total_weight = lstm_weight + gru_weight
-                lstm_weight = lstm_weight / total_weight
-                gru_weight = gru_weight / total_weight
-                
-                return lstm_weight, gru_weight
-            
-    except Exception as e:
-        print(f"⚠️ เกิดข้อผิดพลาดในการคำนวณ dynamic weights: {e}")
-    
-    return 0.5, 0.5
-
-
-def fix_stock_split_scalers(ticker_scalers):
-    """
-    🛠️ แก้ไข scaler สำหรับหุ้นที่มี stock split (Quick Fix)
-    - NVDA: 10:1 split ในมิ.ย. 2024
-    - AVGO: 10:1 split ในก.ค. 2024
-    """
-    print(f"🛠️ Applying stock split fixes...")
-    
-    # กำหนด stock split ratios และการปรับราคา
-    stock_adjustments = {
-        'NVDA': 10.0,   # 10:1 stock split มิ.ย. 2024
-        'AVGO': 10.0,   # 10:1 stock split ก.ค. 2024
-        'META': 3.7,    # AI boom growth (ไม่ใช่ split แต่ราคาเปลี่ยนมาก)
-        'TSM': 3.0,     # semiconductor demand growth
-        'MSFT': 2.3     # AI และ cloud growth
-    }
-    
-    fixed_count = 0
-    for ticker_id, scaler_info in ticker_scalers.items():
-        ticker_name = scaler_info.get('ticker', '')
-        
-        if ticker_name in stock_adjustments:
-            adjustment_ratio = stock_adjustments[ticker_name]
-            
-            # แก้ไข price scaler
-            price_scaler = scaler_info['price_scaler']
-            
-            # ปรับ center และ scale ตาม split ratio
-            if hasattr(price_scaler, 'center_') and hasattr(price_scaler, 'scale_'):
-                original_center = price_scaler.center_[0] if isinstance(price_scaler.center_, np.ndarray) else price_scaler.center_
-                original_scale = price_scaler.scale_[0] if isinstance(price_scaler.scale_, np.ndarray) else price_scaler.scale_
-                
-                # ปรับค่าตาม adjustment ratio
-                price_scaler.center_ = np.array([original_center * adjustment_ratio])
-                price_scaler.scale_ = np.array([original_scale * adjustment_ratio])
-                
-                print(f"   ✅ {ticker_name}: แก้ไข scaler (×{adjustment_ratio:.1f})")
-                print(f"      Old center: {original_center:.2f} → New: {price_scaler.center_[0]:.2f}")
-                fixed_count += 1
-    
-    if fixed_count > 0:
-        print(f"🎯 แก้ไข scaler สำเร็จ: {fixed_count} tickers")
-    else:
-        print(f"ℹ️ ไม่มี stock split ที่ต้องแก้ไข")
-    
-    return ticker_scalers
-
-def load_training_scalers(scaler_path="../LSTM_model/ticker_scalers.pkl"):
-    """
-    โหลด ticker_scalers จากตอนเทรน
-    ✅ ใช้ scalers เดียวกันกับตอนเทรน
-    ✅ รองรับทั้ง LSTM และ GRU
-    """
-    print(f"🔧 กำลังโหลด training scalers จาก {scaler_path}...")
-    
-    if not os.path.exists(scaler_path):
-        print(f"❌ ไม่พบไฟล์ {scaler_path}")
-        return None, False
-    
-    try:
-        ticker_scalers = joblib.load(scaler_path)
-        print(f"✅ โหลด training scalers สำเร็จ!")
-        print(f"   📊 จำนวน tickers: {len(ticker_scalers)}")
-        
-        # ตรวจสอบ structure
-        sample_ticker_id = list(ticker_scalers.keys())[0]
-        sample_scaler = ticker_scalers[sample_ticker_id]
-        
-        required_keys = ['feature_scaler', 'price_scaler']
-        if all(key in sample_scaler for key in required_keys):
-            print(f"   ✅ Structure ถูกต้อง: {list(sample_scaler.keys())}")
-            
-            # แสดงข้อมูล scalers
-            print(f"   📋 Ticker scalers:")
-            for i, (ticker_id, scaler_info) in enumerate(list(ticker_scalers.items())[:5]):
-                ticker_name = scaler_info.get('ticker', f'ID_{ticker_id}')
-                print(f"      {ticker_name} (ID: {ticker_id})")
-            
-            if len(ticker_scalers) > 5:
-                print(f"      ... และอีก {len(ticker_scalers) - 5} tickers")
-            
-            # 🛠️ แก้ไข scaler สำหรับ stock split (Quick Fix)
-            ticker_scalers = fix_stock_split_scalers(ticker_scalers)
-            
-            return ticker_scalers, True
-        else:
-            print(f"   ❌ Structure ไม่ถูกต้อง: ขาด {[k for k in required_keys if k not in sample_scaler]}")
-            return None, False
-            
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการโหลด: {e}")
-        return None, False
-
-def validate_ticker_scalers(ticker_scalers, df, feature_columns):
-    """
-    ตรวจสอบว่า ticker_scalers ใช้งานได้กับข้อมูลปัจจุบัน
-    """
-    print(f"🔍 กำลังตรวจสอบความเข้ากันได้ของ scalers...")
-    
-    valid_scalers = {}
-    validation_results = []
-    
-    available_tickers = df['StockSymbol'].unique()
-    
-    for ticker in available_tickers:
-        ticker_data = df[df['StockSymbol'] == ticker]
-        if len(ticker_data) == 0:
-            continue
-            
-        # หา ticker_id
-        ticker_id = ticker_data['Ticker_ID'].iloc[0]
-        
-        if ticker_id not in ticker_scalers:
-            print(f"   ⚠️ {ticker}: ไม่พบ scaler สำหรับ Ticker_ID {ticker_id}")
-            validation_results.append({'ticker': ticker, 'status': 'missing_scaler'})
-            continue
-        
+def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df['Date'] = pd.to_datetime(df['Date'])
+    def _per_symbol(g: pd.DataFrame):
+        g = g.sort_values('Date').copy()
+        if 'Change (%)' not in g.columns:
+            g['Change (%)'] = g['Close'].pct_change()*100
         try:
-            # ทดสอบ feature scaler
-            test_features = ticker_data[feature_columns].iloc[:3].fillna(0)
-            scaler_info = ticker_scalers[ticker_id]
-            
-            transformed_features = scaler_info['feature_scaler'].transform(test_features)
-            
-            # ทดสอบ price scaler
-            test_prices = ticker_data[['Close']].iloc[:3]
-            transformed_prices = scaler_info['price_scaler'].transform(test_prices)
-            
-            valid_scalers[ticker_id] = scaler_info
-            validation_results.append({'ticker': ticker, 'status': 'valid'})
-            print(f"   ✅ {ticker}: Scaler ใช้งานได้")
-            
-        except Exception as e:
-            print(f"   ❌ {ticker}: Scaler ใช้งานไม่ได้ - {e}")
-            validation_results.append({'ticker': ticker, 'status': 'invalid', 'error': str(e)})
-    
-    # สรุปผล
-    valid_count = len([r for r in validation_results if r['status'] == 'valid'])
-    total_count = len(validation_results)
-    
-    print(f"\n📊 ผลการตรวจสอบ:")
-    print(f"   ✅ ใช้งานได้: {valid_count}/{total_count} tickers")
-    print(f"   ❌ ใช้งานไม่ได้: {total_count - valid_count}/{total_count} tickers")
-    
-    return valid_scalers, validation_results
+            g['RSI'] = ta.momentum.RSIIndicator(g['Close'], window=14).rsi()
+        except Exception:
+            g['RSI'] = 0.0
+        g['EMA_10'] = g['Close'].ewm(span=10, adjust=False).mean()
+        g['EMA_20'] = g['Close'].ewm(span=20, adjust=False).mean()
+        g['SMA_50'] = g['Close'].rolling(50).mean()
+        g['SMA_200'] = g['Close'].rolling(200).mean()
+        ema12 = g['Close'].ewm(span=12, adjust=False).mean()
+        ema26 = g['Close'].ewm(span=26, adjust=False).mean()
+        g['MACD'] = ema12 - ema26
+        g['MACD_Signal'] = g['MACD'].rolling(9).mean()
+        try:
+            atr = ta.volatility.AverageTrueRange(g['High'], g['Low'], g['Close'], window=14)
+            g['ATR'] = atr.average_true_range()
+        except Exception:
+            g['ATR'] = 0.0
+        try:
+            bb = ta.volatility.BollingerBands(g['Close'], window=20, window_dev=2)
+            g['Bollinger_High'] = bb.bollinger_hband()
+            g['Bollinger_Low']  = bb.bollinger_lband()
+        except Exception:
+            g['Bollinger_High'] = 0.0
+            g['Bollinger_Low'] = 0.0
+        try:
+            kel = ta.volatility.KeltnerChannel(g['High'], g['Low'], g['Close'], window=20, window_atr=10)
+            g['Keltner_High']   = kel.keltner_channel_hband()
+            g['Keltner_Low']    = kel.keltner_channel_lband()
+            g['Keltner_Middle'] = kel.keltner_channel_mband()
+        except Exception:
+            g['Keltner_High'] = g['Keltner_Low'] = g['Keltner_Middle'] = 0.0
+        try:
+            diff = (g['High'] - g['Low']).ewm(span=10, adjust=False).mean()
+            g['Chaikin_Vol'] = diff.pct_change(10) * 100
+        except Exception:
+            g['Chaikin_Vol'] = 0.0
+        try:
+            g['Donchian_High'] = g['High'].rolling(20).max()
+            g['Donchian_Low']  = g['Low'].rolling(20).min()
+        except Exception:
+            g['Donchian_High'] = 0.0
+            g['Donchian_Low'] = 0.0
+        try:
+            psar = ta.trend.PSARIndicator(g['High'], g['Low'], g['Close'], step=0.02, max_step=0.2)
+            g['PSAR'] = psar.psar()
+        except Exception:
+            g['PSAR'] = 0.0
+        for c in FEATURE_COLUMNS:
+            if c in g.columns:
+                g[c] = pd.to_numeric(g[c], errors='coerce')
+        g[FEATURE_COLUMNS] = g[FEATURE_COLUMNS].ffill().bfill().fillna(0)
+        return g
+    df = df.groupby("StockSymbol", group_keys=False).apply(_per_symbol).reset_index(drop=True)
+    return df
 
-def save_predictions_simple(predictions_df):
+def fetch_latest_data(engine: sqlalchemy.Engine) -> pd.DataFrame:
+    q = """
+        SELECT 
+            sd.Date,
+            sd.StockSymbol,
+            s.Market,
+            sd.OpenPrice  AS Open,
+            sd.HighPrice  AS High,
+            sd.LowPrice   AS Low,
+            sd.ClosePrice AS Close,
+            sd.Volume,
+            sd.P_BV_Ratio,
+            sd.Sentiment,
+            sd.Changepercen,
+            sd.TotalRevenue,
+            sd.QoQGrowth,
+            sd.EPS,
+            sd.ROE,
+            sd.NetProfitMargin,
+            sd.DebtToEquity,
+            sd.PERatio,
+            sd.Dividend_Yield,
+            sd.positive_news,
+            sd.negative_news,
+            sd.neutral_news
+        FROM StockDetail sd
+        LEFT JOIN Stock s ON sd.StockSymbol = s.StockSymbol
+        WHERE s.Market in ('America','Thailand')
+          AND sd.Date >= CURDATE() - INTERVAL 370 DAY
+        ORDER BY sd.StockSymbol, sd.Date;
     """
-    บันทึกผลลัพธ์การพยากรณ์แบบเรียบง่าย
-    เก็บ: วันที่, หุ้น, ราคาทำนาย (LSTM, GRU, Ensemble), ทิศทางทำนาย (LSTM, GRU, Ensemble)
-    """
-    if predictions_df.empty:
+    df = pd.read_sql(q, engine)
+    if df.empty:
+        print("❌ No data returned from DB")
+        return df
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce', utc=False)
+    df = standardize_columns(df)
+
+    filled = []
+    for sym, g in df.groupby("StockSymbol", sort=False):
+        g = g.sort_values("Date").copy()
+        g['Date'] = pd.to_datetime(g['Date'], errors='coerce', utc=False)
+        g['StockSymbol'] = g['StockSymbol'].astype(str)
+        start = g['Date'].min()
+        end   = g['Date'].max()
+        if pd.isna(start) or pd.isna(end):
+            continue
+        tmp = pd.DataFrame({"Date": pd.date_range(start, end, freq='D'),
+                            "StockSymbol": str(sym)})
+        merged = pd.merge(tmp, g, on=["Date","StockSymbol"], how="left")
+        if 'Market' in merged.columns:
+            mval = g['Market'].dropna().iloc[-1] if g['Market'].notna().any() else None
+            merged['Market'] = merged['Market'].ffill().bfill()
+            if merged['Market'].isna().any():
+                merged['Market'] = merged['Market'].fillna(mval if mval is not None else "America")
+        financial = [
+            'Total Revenue','QoQ Growth (%)','Earnings Per Share (EPS)','ROE (%)',
+            'Net Profit Margin (%)','Debt to Equity','P/E Ratio','P/BV Ratio','Dividend Yield (%)',
+            'positive_news','negative_news','neutral_news','Sentiment'
+        ]
+        for c in financial:
+            if c in merged.columns:
+                merged[c] = pd.to_numeric(merged[c], errors='coerce').ffill().bfill().fillna(0)
+        for c in ['Open','High','Low','Close','Volume']:
+            if c in merged.columns:
+                merged[c] = pd.to_numeric(merged[c], errors='coerce')
+        filled.append(merged)
+    df = pd.concat(filled, ignore_index=True)
+    df = compute_indicators(df)
+    need = list(set(['Open','High','Low','Close']).intersection(df.columns))
+    if need:
+        df = df.dropna(subset=need)
+    df = df.ffill().bfill().fillna(0)
+    return df
+
+# ---------------------------------------------------------------------
+# Scalers & alignment
+# ---------------------------------------------------------------------
+def load_scalers():
+    if not os.path.exists(SCALER_PATH):
+        print(f"❌ Scaler file missing: {SCALER_PATH}")
+        sys.exit(1)
+    sc = joblib.load(SCALER_PATH)
+    print(f"✅ Loaded scalers for {len(sc)} tickers")
+    return sc
+
+def align_features_to_scaler(df_feat: pd.DataFrame, scaler) -> pd.DataFrame:
+    df_feat = df_feat.copy()
+    names = getattr(scaler, "feature_names_in_", None)
+    if names is not None:
+        for c in names:
+            if c not in df_feat.columns:
+                df_feat[c] = 0.0
+        df_feat = df_feat.loc[:, list(names)]
+        return df_feat
+    for c in FEATURE_COLUMNS:
+        if c not in df_feat.columns:
+            df_feat[c] = 0.0
+    return df_feat.loc[:, FEATURE_COLUMNS]
+
+# ---------------------------------------------------------------------
+# Load models (safe)
+# ---------------------------------------------------------------------
+def load_model_checked(path: str):
+    custom = {
+        "quantile_loss": quantile_loss,
+        "focal_weighted_binary_crossentropy": focal_weighted_binary_crossentropy(load_class_weights())
+    }
+    try:
+        model = tf.keras.models.load_model(path, custom_objects=custom, compile=False, safe_mode=False)
+    except Exception as e:
+        print(f"❌ load_model_checked error for {path}: {e}")
+        return None, (None, None)
+    try:
+        n_in = len(model.inputs); n_out = len(model.outputs)
+        ok = (n_in == 3 and n_out == 2)
+        print(f"{'✅' if ok else '⚠️'} {os.path.basename(path)} signature: inputs={n_in}, outputs={n_out}")
+        seq_len = model.inputs[0].shape[1] or 10
+        n_feat  = model.inputs[0].shape[-1] or len(FEATURE_COLUMNS)
+        return model, (int(seq_len), int(n_feat))
+    except Exception:
+        return model, (10, len(FEATURE_COLUMNS))
+
+# ---------------------------------------------------------------------
+# Inverse price (dynamic cap + candidates)
+# ---------------------------------------------------------------------
+def dynamic_cap_pct(row):
+    close = float(row.get("Close", 0) or 0)
+    atr   = float(row.get("ATR", 0) or 0)
+    if close <= 0 or atr <= 0:
+        return 0.05
+    base = 2.5 * (atr / close)
+    mkt  = str(row.get("Market", "")).lower()
+    if mkt in ("america", "us"):  lo, hi = 0.02, 0.08
+    elif mkt in ("thailand", "th"): lo, hi = 0.03, 0.12
+    else: lo, hi = 0.02, 0.10
+    return float(np.clip(base, lo, hi))
+
+def apply_cap(cur_price: float, raw_price: float, cap_pct: float):
+    lo = cur_price * (1.0 - cap_pct); hi = cur_price * (1.0 + cap_pct)
+    clipped = float(np.clip(raw_price, lo, hi))
+    return clipped, bool(raw_price < lo or raw_price > hi)
+
+def price_from_return(cur_price: float, ret: float, mode: str):
+    if mode == "log":     return cur_price * float(np.exp(ret))
+    elif mode == "simple":return cur_price * float(1.0 + ret)
+    else:                 return float(ret)
+
+def choose_price_from_candidates(ticker, cur_price, inv_val, row_ctx):
+    cap = dynamic_cap_pct(row_ctx)
+    candidates = [
+        ("absolute", inv_val, price_from_return(cur_price, inv_val, "absolute")),
+        ("log",      inv_val, price_from_return(cur_price, inv_val, "log")),
+        ("simple",   inv_val, price_from_return(cur_price, inv_val, "simple")),
+    ]
+    def score(mode, r, p):
+        if not np.isfinite(p) or p <= 0: return -1e9
+        atr = float(row_ctx.get("ATR", 0) or 0); pen = 0.0
+        move = abs(p - cur_price)
+        if atr > 0 and move > 8.0 * atr: pen -= (move/atr)
+        pen -= 5.0 * max(0.0, abs(r) - 0.20)
+        if mode == "absolute" and atr > 0 and move > 15.0 * atr: pen -= (move/atr)
+        return -pen
+    candidates.sort(key=lambda x: score(*x), reverse=True)
+    mode, inv_r, raw_price = candidates[0]
+    clipped, used_clip = apply_cap(cur_price, raw_price, cap)
+    print(f"ℹ️ [{ticker}] used {('1+r' if mode=='simple' else 'exp(logret)' if mode=='log' else 'absolute')} (raw={inv_r:+.4f}) -> {clipped:.2f}{' [CLIPPED]' if used_clip else ''}")
+    return clipped, mode, cap, used_clip, raw_price
+
+# ---------------------------------------------------------------------
+# Calibrator helpers
+# ---------------------------------------------------------------------
+class SimpleCalibrator:
+    def transform(self, p):
+        arr = np.asarray(p, dtype=float).ravel()
+        out = 0.5 + CALIB_STRENGTH*(arr - 0.5)  # ใช้ CALIB_STRENGTH ปัจจุบัน
+        return np.clip(out, 0.0, 1.0)
+
+class IsotonicDictCalibrator:
+    def __init__(self, payload):
+        self.x, self.y = self._extract_xy(payload)
+        self.x = np.asarray(self.x, dtype=float).ravel()
+        self.y = np.asarray(self.y, dtype=float).ravel()
+        order = np.argsort(self.x); self.x = self.x[order]; self.y = self.y[order]
+        self.x = np.clip(self.x, 0.0, 1.0); self.y = np.clip(self.y, 0.0, 1.0)
+        self.y = np.maximum.accumulate(self.y)
+        if self.x.size < 2: self.x = np.array([0.0, 1.0]); self.y = np.array([0.0, 1.0])
+    def _extract_xy(self, obj):
+        pairs = [("x","y"),("X","Y"),("X_thresholds_","y_thresholds_"),("X_","y_"),("thresholds","values"),("bin_edges","bin_values")]
+        if isinstance(obj, dict):
+            for a,b in pairs:
+                if a in obj and b in obj:
+                    xa, yb = obj[a], obj[b]
+                    if isinstance(xa,(list,tuple,np.ndarray)) and isinstance(yb,(list,tuple,np.ndarray)) and len(xa)==len(yb)>=2:
+                        return list(xa), list(yb)
+        if isinstance(obj,(list,tuple)) and len(obj)==2:
+            a,b = obj
+            if isinstance(a,(list,tuple,np.ndarray)) and isinstance(b,(list,tuple,np.ndarray)) and len(a)==len(b)>=2:
+                return list(a), list(b)
+        return [0.0,1.0],[0.0,1.0]
+    def transform(self, p):
+        arr = np.asarray(p, dtype=float).ravel()
+        out = np.interp(arr, self.x, self.y, left=self.y[0], right=self.y[-1])
+        out = 0.5 + CALIB_STRENGTH*(out - 0.5)
+        return np.clip(out, 0.0, 1.0)
+
+class CallableWrapperCalibrator:
+    def __init__(self, fn): self.fn = fn
+    def transform(self, p):
+        arr = np.asarray(p, dtype=float).ravel()
+        out = [self.fn(float(x)) for x in arr]
+        out = 0.5 + CALIB_STRENGTH*(np.asarray(out, dtype=float) - 0.5)
+        return np.clip(out, 0.0, 1.0)
+
+def make_calibrator(obj):
+    try:
+        if obj is None: return SimpleCalibrator()
+        if hasattr(obj,'transform') and callable(getattr(obj,'transform')): return obj
+        if isinstance(obj,(dict,list,tuple)): return IsotonicDictCalibrator(obj)
+        if callable(obj): return CallableWrapperCalibrator(obj)
+    except Exception as e:
+        print(f"⚠️ make_calibrator failed: {e} → SimpleCalibrator")
+    return SimpleCalibrator()
+
+# ---------------------------------------------------------------------
+# XGB meta (optional)
+# ---------------------------------------------------------------------
+class XGBMeta:
+    def __init__(self):
+        self.ready = False; self.model = None; self.calib = None; self._printed_calib_err = False
+        self._load()
+    def _load(self):
+        try:
+            if os.path.exists(XGB_PKL):
+                self.model = joblib.load(XGB_PKL); self.ready = True; print("✅ Loaded XGB meta model")
+            elif os.path.exists(XGB_JSON):
+                import xgboost as xgb
+                self.model = xgb.Booster(); self.model.load_model(XGB_JSON); self.ready = True; print("✅ Loaded XGB meta booster")
+            else:
+                print("⚠️ XGB meta model not found -> fallback"); self.ready = False
+            if os.path.exists(ISO_CAL):
+                raw = joblib.load(ISO_CAL); self.calib = make_calibrator(raw)
+            else:
+                print("⚠️ Isotonic calibrator not found → SimpleCalibrator"); self.calib = SimpleCalibrator()
+        except Exception as e:
+            print(f"⚠️ XGB load failed: {e}"); self.ready = False; self.model = None; self.calib = SimpleCalibrator()
+    def _calibrate(self, p):
+        try:
+            if self.calib is None: val = float(np.clip(p,0,1))
+            elif hasattr(self.calib,'transform'): val = float(np.clip(float(self.calib.transform([p])[0]),0,1))
+            elif callable(self.calib): val = float(np.clip(float(self.calib(p)),0,1))
+            else: val = float(np.clip(p,0,1))
+        except Exception as e:
+            if not self._printed_calib_err: print(f"⚠️ Calibrator transform failed: {e} → identity"); self._printed_calib_err=True
+            val = float(np.clip(p,0,1))
+        # NOTE: CALIB_STRENGTH ถูกใช้ภายใน calibrator แล้ว ที่นี่ไม่ต้องซ้ำ
+        return val
+    def predict(self, rows):
+        out = []
+        for r in rows:
+            cur, pl, pg, dl, dg = float(r['cur']), float(r['lstm_price']), float(r['gru_price']), float(r['lstm_prob']), float(r['gru_prob'])
+            x = np.array([ (pl-cur)/max(cur,1e-9), (pg-cur)/max(cur,1e-9), dl, dg, abs(pl-pg)/max(cur,1e-9) ], dtype=float).reshape(1,-1)
+            if self.ready and hasattr(self.model,"predict"):
+                try:
+                    if hasattr(self.model,"get_params"):
+                        pred_change = float(np.ravel(self.model.predict(x))[0]); p_up = (dl+dg)/2.0
+                    else:
+                        import xgboost as xgb
+                        dm = xgb.DMatrix(x); pred_change = float(self.model.predict(dm)[0]); p_up=(dl+dg)/2.0
+                except Exception:
+                    pred_change = ((pl+pg)/2.0 - cur)/max(cur,1e-9); p_up=(dl+dg)/2.0
+            else:
+                pred_change = ((pl+pg)/2.0 - cur)/max(cur,1e-9); p_up=(dl+dg)/2.0
+            p_up = self._calibrate(p_up)
+            price_raw = cur*(1.0+pred_change)
+            dir_prob_only = 1 if p_up>=0.5 else 0
+            conf_raw = abs(p_up-0.5)*2.0
+            out.append({
+                "xgb_price_raw": price_raw, "xgb_dir_prob": dir_prob_only,
+                "xgb_prob_raw": p_up, "xgb_conf_raw": conf_raw,
+                "xgb_price": price_raw, "xgb_dir": dir_prob_only,
+                "xgb_prob": p_up, "xgb_conf": conf_raw,
+                "pred_change": pred_change,
+            })
+        return out
+
+# ---------------------------------------------------------------------
+# Pretty print
+# ---------------------------------------------------------------------
+def print_per_ticker_table(rows_sorted):
+    print("📈 Per-ticker results (sorted by confidence)")
+    print("Ticker          Cur       LSTM        GRU   XGB(raw)  XGB(cap)   Dir    Prob   Conf      Δ%   Cap   Score   Note")
+    print("-"*130)
+    for r in rows_sorted:
+        t = r['ticker']; cur = r['cur']; lstm = r['lstm_price']; gru  = r['gru_price']
+        xgb_raw = r.get('xgb_price_raw', r.get('xgb_price', float('nan')))
+        xgb_cap = r.get('xgb_price_cap', r.get('xgb_price_raw', r.get('xgb_price', float('nan'))))
+        dir_icon = "📈UP" if r['xgb_dir']==1 else "📉DOWN"
+        prob = r['xgb_prob']; conf = r['xgb_conf']
+        delta_pct = (xgb_cap/cur - 1.0) * 100.0 if cur>0 else 0.0
+        cap_txt = f"{r['cap_pct']*100:.1f}%"
+        score = r.get('score', abs(delta_pct/100.0) * conf)
+        notes = []
+        if r.get('lstm_clip'): notes.append('L')
+        if r.get('gru_clip'):  notes.append('G')
+        if r.get('xgb_clip'):  notes.append('X')
+        note = 'CLIPPED('+','.join(notes)+')' if notes else ''
+        print(f"{t:<12} {cur:>8.2f} {lstm:>10.2f} {gru:>10.2f} {xgb_raw:>10.2f} {xgb_cap:>10.2f}  {dir_icon:>6}  {prob:>5.3f}  {conf:>5.3f} {delta_pct:>7.2f}  {cap_txt:>5}  {score:>6.3f}  {note}")
+
+def print_direction_diagnostics(rows):
+    print("\n🔎 Direction diagnostics (เฉพาะตัวที่มีความขัดแย้ง):")
+    any_issue = False
+    for r in rows:
+        issues = []
+        if r.get('lstm_dir_price', -1) != -1 and r.get('lstm_dir_price') != r.get('lstm_dir_prob'):
+            issues.append(f"LSTM P({r['lstm_dir_price']}) vs Prob({r['lstm_dir_prob']}) eps={r['lstm_eps']:.4f} margin={r['lstm_margin']:.3f}")
+        if r.get('gru_dir_price', -1) != -1 and r.get('gru_dir_price') != r.get('gru_dir_prob'):
+            issues.append(f"GRU  P({r['gru_dir_price']}) vs Prob({r['gru_dir_prob']}) eps={r['gru_eps']:.4f} margin={r['gru_margin']:.3f}")
+        x_raw = r.get('xgb_dir_by_price_raw', None)
+        x_cap = r.get('xgb_dir_by_price_cap', None)
+        if (x_raw is not None) and (x_cap is not None):
+            if x_raw != x_cap:
+                issues.append(f"XGB price raw({x_raw}) → cap({x_cap}) [clip={'Y' if r.get('xgb_clip') else 'N'}]")
+        if r.get('xgb_dir', None) is not None and r.get('xgb_prob', None) is not None and x_cap is not None and x_cap != -1:
+            x_prob_dir = 1 if r['xgb_prob'] >= 0.5 else 0
+            if x_cap != x_prob_dir:
+                issues.append(f"XGB cap P({x_cap}) vs Prob({x_prob_dir}) prob={r['xgb_prob']:.3f}")
+        if r.get('xgb_enforced_flip', 0) == 1:
+            issues.append("ENFORCE flipped final dir")
+        if issues:
+            any_issue = True
+            print(f" • {r['ticker']}: " + " | ".join(issues))
+    if not any_issue:
+        print(" (ไม่มีความขัดแย้งที่ต้องสนใจ)")
+
+# ---------------------------------------------------------------------
+# Save predictions to DB (simple upsert for LSTM/GRU/Ensemble)
+# ---------------------------------------------------------------------
+def save_predictions_simple(predictions_df: pd.DataFrame, engine: sqlalchemy.Engine = None) -> bool:
+    if predictions_df is None or predictions_df.empty:
         print("❌ ไม่มีข้อมูลพยากรณ์ที่จะบันทึก")
         return False
-
     try:
-        DB_CONNECTION = f"mysql+mysqlconnector://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}/{os.getenv('DB_NAME')}"
-        engine = sqlalchemy.create_engine(DB_CONNECTION)
-        
-        with engine.connect() as connection:
-            success_count = 0
-            created_count = 0
-            updated_count = 0
-            
+        use_engine = engine if engine is not None else build_engine()
+        success_count = 0
+        created_count = 0
+        updated_count = 0
+        with use_engine.begin() as conn:
             for _, row in predictions_df.iterrows():
-                try:
-                    # ตรวจสอบว่ามี record อยู่แล้วหรือไม่
-                    check_query = sqlalchemy.text("""
-                        SELECT COUNT(*) FROM StockDetail 
+                sym = str(row['StockSymbol'])
+                dt  = pd.to_datetime(row['Date']).strftime('%Y-%m-%d')
+                exists = conn.execute(sqlalchemy.text("""
+                    SELECT COUNT(*) FROM StockDetail
+                    WHERE StockSymbol = :symbol AND Date = :date
+                """), {'symbol': sym, 'date': dt}).scalar()
+                params = {
+                    'symbol': sym,
+                    'date': dt,
+                    'lstm_price': float(row.get('LSTM_Price', 0.0) or 0.0),
+                    'lstm_trend': int(row.get('LSTM_Direction', 0) or 0),
+                    'gru_price': float(row.get('GRU_Price', 0.0) or 0.0),
+                    'gru_trend': int(row.get('GRU_Direction', 0) or 0),
+                    'ensemble_price': float(row.get('Ensemble_Price', 0.0) or 0.0),
+                    'ensemble_trend': int(row.get('Ensemble_Direction', 0) or 0),
+                }
+                if exists and int(exists) > 0:
+                    conn.execute(sqlalchemy.text("""
+                        UPDATE StockDetail
+                        SET PredictionClose_LSTM = :lstm_price,
+                            PredictionTrend_LSTM = :lstm_trend,
+                            PredictionClose_GRU = :gru_price,
+                            PredictionTrend_GRU = :gru_trend,
+                            PredictionClose_Ensemble = :ensemble_price,
+                            PredictionTrend_Ensemble = :ensemble_trend
                         WHERE StockSymbol = :symbol AND Date = :date
-                    """)
-                    
-                    result = connection.execute(check_query, {
-                        'symbol': row['StockSymbol'],
-                        'date': row['Date'].strftime('%Y-%m-%d')
-                    })
-                    exists = result.scalar()
-                    
-                    if exists > 0:
-                        # อัปเดต predictions ทั้ง LSTM, GRU, และ Ensemble
-                        update_query = sqlalchemy.text("""
-                            UPDATE StockDetail
-                            SET PredictionClose_LSTM = :lstm_price,
-                                PredictionTrend_LSTM = :lstm_trend,
-                                PredictionClose_GRU = :gru_price,
-                                PredictionTrend_GRU = :gru_trend,
-                                PredictionClose_Ensemble = :ensemble_price, 
-                                PredictionTrend_Ensemble = :ensemble_trend
-                            WHERE StockSymbol = :symbol AND Date = :date
-                        """)
-                        
-                        connection.execute(update_query, {
-                            'lstm_price': float(row.get('LSTM_Price', row.get('Predicted_Price', 0))),
-                            'lstm_trend': int(row.get('LSTM_Direction', row.get('Predicted_Direction', 0))),
-                            'gru_price': float(row.get('GRU_Price', row.get('Predicted_Price', 0))),
-                            'gru_trend': int(row.get('GRU_Direction', row.get('Predicted_Direction', 0))),
-                            'ensemble_price': float(row.get('Ensemble_Price', row.get('Predicted_Price', 0))),
-                            'ensemble_trend': int(row.get('Ensemble_Direction', row.get('Predicted_Direction', 0))),
-                            'symbol': row['StockSymbol'],
-                            'date': row['Date'].strftime('%Y-%m-%d')
-                        })
-                        print(f"✅ อัปเดต {row['StockSymbol']} (LSTM+GRU+Ensemble)")
-                        updated_count += 1
-                        
-                    else:
-                        # สร้าง record ใหม่พร้อม predictions ทั้งหมด
-                        insert_query = sqlalchemy.text("""
-                            INSERT INTO StockDetail 
-                            (StockSymbol, Date, 
+                    """), params)
+                    updated_count += 1
+                    print(f"✅ UPDATE {sym} @ {dt}")
+                else:
+                    conn.execute(sqlalchemy.text("""
+                        INSERT INTO StockDetail
+                            (StockSymbol, Date,
                              PredictionClose_LSTM, PredictionTrend_LSTM,
-                             PredictionClose_GRU, PredictionTrend_GRU,
+                             PredictionClose_GRU,  PredictionTrend_GRU,
                              PredictionClose_Ensemble, PredictionTrend_Ensemble)
-                            VALUES 
-                            (:symbol, :date, 
+                        VALUES
+                            (:symbol, :date,
                              :lstm_price, :lstm_trend,
-                             :gru_price, :gru_trend,
+                             :gru_price,  :gru_trend,
                              :ensemble_price, :ensemble_trend)
-                        """)
-                        
-                        connection.execute(insert_query, {
-                            'symbol': row['StockSymbol'],
-                            'date': row['Date'].strftime('%Y-%m-%d'),
-                            'lstm_price': float(row.get('LSTM_Price', row.get('Predicted_Price', 0))),
-                            'lstm_trend': int(row.get('LSTM_Direction', row.get('Predicted_Direction', 0))),
-                            'gru_price': float(row.get('GRU_Price', row.get('Predicted_Price', 0))),
-                            'gru_trend': int(row.get('GRU_Direction', row.get('Predicted_Direction', 0))),
-                            'ensemble_price': float(row.get('Ensemble_Price', row.get('Predicted_Price', 0))),
-                            'ensemble_trend': int(row.get('Ensemble_Direction', row.get('Predicted_Direction', 0)))
-                        })
-                        print(f"✅ สร้างใหม่ {row['StockSymbol']} (LSTM+GRU+Ensemble)")
-                        created_count += 1
-                    
-                    success_count += 1
-                    
-                except Exception as e:
-                    print(f"⚠️ ข้อผิดพลาดสำหรับ {row['StockSymbol']}: {e}")
-                    continue
-            
-            # Commit การเปลี่ยนแปลง
-            connection.commit()
-            
-            print(f"\n✅ บันทึกผลลัพธ์สำเร็จ!")
-            print(f"   📊 รวม: {success_count}/{len(predictions_df)} รายการ")
-            if updated_count > 0:
-                print(f"   🔄 อัปเดต: {updated_count} รายการ")
-            if created_count > 0:
-                print(f"   ➕ สร้างใหม่: {created_count} รายการ")
-            print(f"   💾 บันทึก: LSTM + GRU + Ensemble predictions")
-            
-            return success_count > 0
-            
+                    """), params)
+                    created_count += 1
+                    print(f"✅ INSERT {sym} @ {dt}")
+                success_count += 1
+        print(f"\n💾 DB upsert done: {success_count} rows (new {created_count}, updated {updated_count})")
+        return success_count > 0
     except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ เกิดข้อผิดพลาดในการบันทึก DB: {e}")
+        import traceback; traceback.print_exc()
         return False
 
-# ======================== WalkForwardMiniRetrainManager Class ========================
-class WalkForwardMiniRetrainManager:
-    """
-    Walk-Forward Validation + Retrain System พร้อม XGBoost Ensemble
-    - แบ่งข้อมูลเป็น chunks
-    - retrain ทุก N วัน
-    - Continuous learning แบบ incremental
-    - เสถียรและมีประสิทธิภาพ
-    """
-    def __init__(self, 
-                 lstm_model_path="../LSTM_model/best_hypertuned_model.keras",     # Optimal model
-                 gru_model_path="../GRU_Model/best_hypertuned_model.keras",       # Optimal model
-                 retrain_frequency=3,  # Optimal from hyperparameter tuning
-                 chunk_size=100,       # Optimal from hyperparameter tuning
-                 seq_length=10):
-        
-        self.lstm_model_path = lstm_model_path
-        self.gru_model_path = gru_model_path
-        self.retrain_frequency = retrain_frequency
-        self.chunk_size = chunk_size
-        self.seq_length = seq_length
-        
-        # โมเดล
-        self.lstm_model = None
-        self.gru_model = None
-        
-        # Performance tracking
-        self.all_predictions = []
-        self.chunk_metrics = []
-        
-    def load_models_for_prediction(self, model_path=None, compile_model=False):
-        """โหลดโมเดลสำหรับการทำนาย สามารถโหลดโมเดลเดี่ยวหรือทั้ง LSTM และ GRU"""
-        custom_objects = {
-            "quantile_loss": quantile_loss,
-            "focal_weighted_binary_crossentropy": focal_weighted_binary_crossentropy
+# ---------------------------------------------------------------------
+# Mini-retrain (per market, per ticker)
+# ---------------------------------------------------------------------
+def compile_for_miniretrain(model: tf.keras.Model):
+    class_weights = load_class_weights()
+    model.compile(optimizer=Adam(learning_rate=MINI_RETRAIN_LR),
+                  loss={"dense": tf.keras.losses.Huber()})
+    try:
+        losses = {
+            "price_output": tf.keras.losses.Huber(delta=0.75),
+            "direction_output": focal_weighted_binary_crossentropy(class_weights, gamma=1.95)
         }
-        try:
-            if model_path:  # กรณีโหลดโมเดลเดี่ยว
-                print(f"🔄 กำลังโหลดโมเดลจาก {model_path}...")
-                model = tf.keras.models.load_model(
-                    model_path,
-                    custom_objects=custom_objects,
-                    safe_mode=False,
-                    compile=False  # โหลดโดยไม่ compile ก่อน
-                )
-                
-                # Compile โมเดลถ้าจำเป็นสำหรับ mini-retrain
-                if compile_model:
-                    print(f"🔧 Compiling model for training...")
-                    
-                    # สร้าง loss functions
-                    price_loss = quantile_loss
-                    direction_loss = focal_weighted_binary_crossentropy(class_weights_dict)
-                    
-                    model.compile(
-                        optimizer=Adam(learning_rate=0.0001),
-                        loss={
-                            'price_output': price_loss,
-                            'direction_output': direction_loss
-                        },
-                        metrics={
-                            'price_output': ['mae'],
-                            'direction_output': ['accuracy']
-                        }
-                    )
-                    print(f"✅ Model compiled successfully")
-                
-                print("✅ โหลดโมเดลเดี่ยวสำเร็จ")
-                return model
-            else:  # กรณีโหลดทั้ง LSTM และ GRU
-                print("🔄 กำลังโหลดโมเดลสำหรับการทำนาย...")
-                
-                # โหลด LSTM
-                self.lstm_model = tf.keras.models.load_model(
-                    self.lstm_model_path,
-                    custom_objects=custom_objects,
-                    safe_mode=False,
-                    compile=False
-                )
-                
-                # โหลด GRU
-                self.gru_model = tf.keras.models.load_model(
-                    self.gru_model_path,
-                    custom_objects=custom_objects,
-                    safe_mode=False,
-                    compile=False
-                )
-                
-                # Compile โมเดลถ้าจำเป็นสำหรับ mini-retrain
-                if compile_model:
-                    print(f"🔧 Compiling both models for training...")
-                    
-                    # สร้าง loss functions
-                    price_loss = quantile_loss
-                    direction_loss = focal_weighted_binary_crossentropy(class_weights_dict)
-                    
-                    compile_config = {
-                        'optimizer': Adam(learning_rate=0.0001),
-                        'loss': {
-                            'price_output': price_loss,
-                            'direction_output': direction_loss
-                        },
-                        'metrics': {
-                            'price_output': ['mae'],
-                            'direction_output': ['accuracy']
-                        }
-                    }
-                    
-                    self.lstm_model.compile(**compile_config)
-                    self.gru_model.compile(**compile_config)
-                    print(f"✅ Both models compiled successfully")
-                
-                print("✅ โหลดโมเดลสำหรับการทำนายสำเร็จ")
-                return True
-        except Exception as e:
-            print(f"❌ เกิดข้อผิดพลาดในการโหลดโมเดล: {e}")
-            import traceback
-            traceback.print_exc()
-            return None if model_path else False
-
-# Fix 2: Enhanced data cleaning function
-def clean_data_for_scalers_enhanced(df, feature_columns):
-    """ทำความสะอาดข้อมูลก่อนสร้าง scalers - Enhanced version"""
-    print("🧹 กำลังทำความสะอาดข้อมูลสำหรับ scalers (Enhanced)...")
-    
-    df_clean = df.copy()
-    
-    # Enhanced data cleaning for each column
-    for col in feature_columns:
-        if col in df_clean.columns:
-            try:
-                print(f"   🔧 Processing {col}...")
-                
-                # Step 1: Handle object/string types
-                if df_clean[col].dtype == 'object':
-                    print(f"      📝 Converting {col} from object type")
-                    
-                    # Check for mixed numeric/string values
-                    sample_values = df_clean[col].dropna().astype(str).head(10)
-                    print(f"      Sample values: {sample_values.tolist()}")
-                    
-                    # Try different conversion strategies
-                    def smart_numeric_conversion(series):
-                        """Smart conversion that handles various string formats"""
-                        converted_series = series.copy()
-                        
-                        # Strategy 1: Direct numeric conversion
-                        numeric_converted = pd.to_numeric(converted_series, errors='coerce')
-                        
-                        # Strategy 2: Handle concatenated numbers (e.g., "49.0349.03")
-                        if numeric_converted.isna().sum() > len(converted_series) * 0.5:
-                            print(f"        🔧 Trying advanced string parsing...")
-                            def extract_first_number(x):
-                                if pd.isna(x):
-                                    return np.nan
-                                x_str = str(x).strip()
-                                
-                                # Handle empty strings
-                                if x_str == '' or x_str.lower() in ['nan', 'none', 'null']:
-                                    return np.nan
-                                
-                                # Extract first valid number using regex
-                                import re
-                                match = re.search(r'^-?\d*\.?\d+', x_str)
-                                if match:
-                                    try:
-                                        return float(match.group())
-                                    except:
-                                        return np.nan
-                                return np.nan
-                            
-                            converted_series = converted_series.apply(extract_first_number)
-                        else:
-                            converted_series = numeric_converted
-                        
-                        return converted_series
-                    
-                    df_clean[col] = smart_numeric_conversion(df_clean[col])
-                
-                # Step 2: Handle infinite values
-                if pd.api.types.is_numeric_dtype(df_clean[col]):
-                    inf_count = np.isinf(df_clean[col]).sum()
-                    if inf_count > 0:
-                        print(f"      ♾️ Replacing {inf_count} infinite values in {col}")
-                        df_clean[col] = df_clean[col].replace([np.inf, -np.inf], np.nan)
-                
-                # Step 3: Handle NaN values intelligently
-                nan_count = df_clean[col].isna().sum()
-                if nan_count > 0:
-                    print(f"      🔧 Handling {nan_count} NaN values in {col}")
-                    
-                    if col in ['Volume']:
-                        # For Volume, use median
-                        fill_value = df_clean[col].median()
-                        if pd.isna(fill_value):
-                            fill_value = 0
-                    elif col in ['Close', 'Open', 'High', 'Low']:
-                        # For price columns, use forward fill then backward fill
-                        df_clean[col] = df_clean[col].fillna(method='ffill').fillna(method='bfill')
-                        fill_value = df_clean[col].mean()
-                        if pd.isna(fill_value):
-                            fill_value = 1.0  # Default price
-                    else:
-                        # For other columns, use mean or 0
-                        fill_value = df_clean[col].mean()
-                        if pd.isna(fill_value):
-                            fill_value = 0.0
-                    
-                    df_clean[col] = df_clean[col].fillna(fill_value)
-                
-                # Step 4: Final data type validation
-                if not pd.api.types.is_numeric_dtype(df_clean[col]):
-                    print(f"      ❌ {col} still not numeric, forcing conversion")
-                    df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce').fillna(0).astype('float64')
-                else:
-                    df_clean[col] = df_clean[col].astype('float64')
-                
-                # Step 5: Sanity check for extreme values
-                if col in ['Close', 'Open', 'High', 'Low'] and (df_clean[col] <= 0).any():
-                    positive_mean = df_clean[col][df_clean[col] > 0].mean()
-                    if not pd.isna(positive_mean):
-                        df_clean.loc[df_clean[col] <= 0, col] = positive_mean
-                        print(f"      🔧 Replaced {(df_clean[col] <= 0).sum()} non-positive values in {col}")
-                
-                print(f"   ✅ Cleaned {col}: dtype={df_clean[col].dtype}, "
-                      f"range=[{df_clean[col].min():.3f}, {df_clean[col].max():.3f}], "
-                      f"NaN={df_clean[col].isna().sum()}")
-                
-            except Exception as e:
-                print(f"   ❌ Failed to clean {col}: {e}")
-                # Use safe default values
-                if col in ['Close', 'Open', 'High', 'Low']:
-                    df_clean[col] = 1.0  # Default price
-                elif col in ['Volume']:
-                    df_clean[col] = 1000.0  # Default volume
-                else:
-                    df_clean[col] = 0.0  # Default for indicators
-                
-                df_clean[col] = df_clean[col].astype('float64')
-                print(f"   🔧 Used default value for {col}")
-    
-    # Final validation
-    print("🔍 Final data validation...")
-    for col in feature_columns:
-        if col in df_clean.columns:
-            if not pd.api.types.is_numeric_dtype(df_clean[col]):
-                print(f"❌ Column {col} is still not numeric: {df_clean[col].dtype}")
-                df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce').fillna(0).astype('float64')
-            
-            if df_clean[col].isna().any():
-                print(f"❌ Column {col} still has NaN values")
-                df_clean[col] = df_clean[col].fillna(0)
-            
-            if np.isinf(df_clean[col]).any():
-                print(f"❌ Column {col} still has infinite values")
-                df_clean[col] = df_clean[col].replace([np.inf, -np.inf], 0)
-    
-    print(f"✅ Enhanced data cleaning completed. Shape: {df_clean.shape}")
-    return df_clean
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Setup logging
-import joblib
-from sklearn.preprocessing import StandardScaler
-
-class XGBoostEnsembleMetaLearner:
-    """
-    XGBoost Ensemble Meta Learner - ใช้ XGBoost รวม LSTM และ GRU predictions
-    
-    Features:
-    - ใช้ XGBoost แทน rule-based weighting
-    - Direction accuracy 72%+ 
-    - Model consistency 93%+
-    - Automatic feature engineering
-    """
-    
-    def __init__(self, model_path='../Ensemble_Model/fixed_unified_trading_model.pkl'):
-        self.model_path = model_path
-        self.trading_system = None
-        self.performance_history = {}
-        self.load_model()
-    
-    def load_model(self):
-        """Load XGBoost ensemble model"""
-        try:
-            import sys
-            import os
-            sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'Ensemble_Model'))
-            from XGBoost import FixedUnifiedTradingSystem
-            
-            if os.path.exists(self.model_path):
-                self.trading_system = FixedUnifiedTradingSystem()
-                self.trading_system.load_model(self.model_path)
-                print(f"✅ Loaded XGBoost ensemble model from {self.model_path}")
-            else:
-                print(f"⚠️ XGBoost model not found at {self.model_path}, will use fallback method")
-                self.trading_system = None
-        except Exception as e:
-            print(f"⚠️ Failed to load XGBoost model: {e}, using fallback method")
-            self.trading_system = None
-            
-        print("🎆 XGBoost Ensemble Meta Learner initialized")
-        print(f"🎨 Model path: {self.model_path}")
-        print(f"🎯 Expected: 72% direction accuracy, 93% consistency")
-        print(f"🔥 **XGBoost Ensemble Ready** 🔥")
-
-    def predict_meta(self, df):
-        """Main Prediction Method using XGBoost Ensemble"""
-        
-        print("🚀 Starting XGBoost Ensemble Prediction...")
-        
-        if self.trading_system is None:
-            print("⚠️ XGBoost model not available, using fallback method")
-            return self._fallback_prediction(df)
-        
-        # Prepare data for XGBoost
-        prepared_df = self.prepare_data_for_xgboost(df)
-        if prepared_df is None or len(prepared_df) == 0:
-            print("❌ No data to process")
-            return df
-        
-        print(f"📊 Processing {len(prepared_df)} stocks with XGBoost")
-        
-        try:
-            # Get XGBoost predictions
-            xgb_results = self.trading_system.predict_signals(prepared_df)
-            
-            if len(xgb_results) == 0:
-                print("❌ No XGBoost predictions generated")
-                return df
-                
-            # Calculate summary statistics
-            avg_confidence = xgb_results['Confidence'].mean()
-            consistency_rate = (1 - xgb_results['Is_Inconsistent']).mean()
-            direction_dist = xgb_results['Predicted_Direction'].value_counts()
-            
-            print(f"✅ Results: {len(xgb_results)} stocks processed")
-            print(f"📊 Avg Confidence: {avg_confidence:.3f}")
-            print(f"📊 Consistency Rate: {consistency_rate:.1%}")
-            print(f"📊 Direction Distribution: UP={direction_dist.get(1, 0)}, DOWN={direction_dist.get(0, 0)}")
-            
-            # Map results back to dataframe
-            ticker_col = 'StockSymbol' if 'StockSymbol' in df.columns else 'Ticker'
-            
-            for idx, result in xgb_results.iterrows():
-                ticker = result['Ticker']
-                mask = df[ticker_col] == ticker
-                
-                if mask.any():
-                    df_idx = df[mask].index[0]
-                    
-                    # Core XGBoost predictions
-                    df.loc[df_idx, 'XGB_Predicted_Direction'] = result['Predicted_Direction']
-                    df.loc[df_idx, 'XGB_Predicted_Price'] = result['Predicted_Price']
-                    df.loc[df_idx, 'XGB_Confidence'] = result['Confidence']
-                    df.loc[df_idx, 'XGB_Predicted_Direction_Proba'] = result['Direction_Probability']
-                    
-                    # Additional info
-                    df.loc[df_idx, 'Price_Change_Percent'] = result['Predicted_Return_Pct']
-                    df.loc[df_idx, 'Is_Consistent'] = not result['Is_Inconsistent']
-                    df.loc[df_idx, 'Model_Consistency'] = result['Model_Consistency']
-                    df.loc[df_idx, 'Ensemble_Method'] = "XGBoost_Ensemble_v1.0"
-                    
-                    # Set reliability info based on confidence
-                    if result['Confidence'] >= 0.8:
-                        df.loc[df_idx, 'Risk_Level'] = 'LOW'
-                        df.loc[df_idx, 'Suggested_Action'] = 'STRONG_BUY' if result['Predicted_Direction'] == 1 else 'STRONG_SELL'
-                        df.loc[df_idx, 'Reliability_Warning'] = 'High confidence prediction'
-                    elif result['Confidence'] >= 0.6:
-                        df.loc[df_idx, 'Risk_Level'] = 'MEDIUM'
-                        df.loc[df_idx, 'Suggested_Action'] = 'BUY' if result['Predicted_Direction'] == 1 else 'SELL'
-                        df.loc[df_idx, 'Reliability_Warning'] = 'Moderate confidence'
-                    else:
-                        df.loc[df_idx, 'Risk_Level'] = 'HIGH'
-                        df.loc[df_idx, 'Suggested_Action'] = 'HOLD'
-                        df.loc[df_idx, 'Reliability_Warning'] = 'Low confidence - consider holding'
-                    
-                    df.loc[df_idx, 'Reliability_Score'] = result['Confidence']
-            
-            print("✅ XGBoost Ensemble prediction completed")
-            return df
-            
-        except Exception as e:
-            print(f"❌ XGBoost prediction failed: {e}")
-            return self._fallback_prediction(df)
-    
-    def prepare_data_for_xgboost(self, df):
-        """Prepare data in format expected by XGBoost model"""
-        try:
-            # Check if we have LSTM and GRU predictions
-            required_cols = ['Predicted_Price_LSTM', 'Predicted_Price_GRU', 
-                           'Predicted_Dir_LSTM', 'Predicted_Dir_GRU', 'Current_Price']
-            
-            ticker_col = 'StockSymbol' if 'StockSymbol' in df.columns else 'Ticker'
-            
-            # Use current price if available, otherwise use last close price
-            if 'Current_Price' not in df.columns:
-                if 'ClosePrice' in df.columns:
-                    df = df.copy()
-                    df['Current_Price'] = df['ClosePrice']
-                elif 'Close' in df.columns:
-                    df = df.copy()
-                    df['Current_Price'] = df['Close']
-                else:
-                    print("❌ No price data available")
-                    return None
-            
-            # Check for required prediction columns
-            missing_cols = [col for col in required_cols if col not in df.columns]
-            if missing_cols:
-                print(f"❌ Missing required columns for XGBoost: {missing_cols}")
-                return None
-            
-            # Prepare data in XGBoost format
-            xgb_data = pd.DataFrame({
-                'Ticker': df[ticker_col],
-                'Date': df.get('Date', pd.Timestamp.now().strftime('%Y-%m-%d')),
-                'Actual_Price': df['Current_Price'],  # XGBoost expects this as current price
-                'Predicted_Price_LSTM': df['Predicted_Price_LSTM'],
-                'Predicted_Price_GRU': df['Predicted_Price_GRU'],
-                'Predicted_Dir_LSTM': df['Predicted_Dir_LSTM'],
-                'Predicted_Dir_GRU': df['Predicted_Dir_GRU']
-            })
-            
-            # Remove rows with missing data
-            xgb_data = xgb_data.dropna()
-            
-            print(f"📊 Prepared {len(xgb_data)} stocks for XGBoost prediction")
-            return xgb_data
-            
-        except Exception as e:
-            print(f"❌ Error preparing data for XGBoost: {e}")
-            return None
-    
-    def _fallback_prediction(self, df):
-        """Fallback prediction method when XGBoost is not available"""
-        print("🔄 Using simple ensemble fallback method")
-        
-        ticker_col = 'StockSymbol' if 'StockSymbol' in df.columns else 'Ticker'
-        
-        if 'Predicted_Price_LSTM' in df.columns and 'Predicted_Price_GRU' in df.columns:
-            # Simple average ensemble
-            df['XGB_Predicted_Price'] = (df['Predicted_Price_LSTM'] + df['Predicted_Price_GRU']) / 2
-            df['XGB_Predicted_Direction'] = ((df.get('Predicted_Dir_LSTM', 0.5) + df.get('Predicted_Dir_GRU', 0.5)) / 2 > 0.5).astype(int)
-            df['XGB_Confidence'] = 0.5  # Medium confidence for fallback
-            df['XGB_Predicted_Direction_Proba'] = (df.get('Predicted_Dir_LSTM', 0.5) + df.get('Predicted_Dir_GRU', 0.5)) / 2
-            df['Ensemble_Method'] = "Simple_Average_Fallback"
-            df['Risk_Level'] = 'MEDIUM'
-            df['Suggested_Action'] = 'HOLD'
-            df['Reliability_Warning'] = 'Fallback method - XGBoost not available'
-            df['Reliability_Score'] = 0.5
-        
-        return df
-    
-    def get_stock_recommendations(self):
-        """Get stock recommendations based on XGBoost performance"""
-        recommendations = {}
-        
-        # Since XGBoost handles ensemble automatically, provide general recommendations
-        general_performance = {
-            'direction_accuracy': 0.72,
-            'consistency': 0.93,
-            'confidence_threshold': 0.6
-        }
-        
-        # Placeholder recommendations - in practice, this would be based on recent XGBoost results
-        default_tickers = ['AAPL', 'ADVANC', 'AMD', 'AMZN', 'AVGO', 'DIF', 'DITTO', 'GOOGL', 
-                          'HUMAN', 'INET', 'INSET', 'JAS', 'JMART', 'META', 'MSFT', 'NVDA', 'TRUE', 'TSLA', 'TSM']
-        
-        for ticker in default_tickers:
-            recommendations[ticker] = {
-                'score': general_performance['direction_accuracy'],
-                'recommendation': "🟢 HIGH_CONFIDENCE_XGB_ENSEMBLE",
-                'expected_accuracy': general_performance['direction_accuracy'],
-                'expected_consistency': general_performance['consistency']
-            }
-        
-        return recommendations
-    
-    # Compatibility methods
-    def is_model_available(self):
-        return self.trading_system is not None
-    
-    def get_model_status(self):
-        if self.trading_system is not None:
-            return "XGBoost_Ensemble_v1.0_READY"
-        else:
-            return "XGBoost_Ensemble_v1.0_FALLBACK"
-    
-    def should_retrain_meta(self):
-        return False  # XGBoost model handles its own retraining
-    
-    def validate_predictions(self, df):
-        return 'XGB_Predicted_Price' in df.columns and df['XGB_Predicted_Price'].notna().any()
-    
-    # Legacy compatibility methods (do nothing)
-    def update_performance_history(self, ticker, actual_price, lstm_pred, gru_pred, date):
+        model.compile(optimizer=Adam(learning_rate=MINI_RETRAIN_LR), loss=losses,
+                      loss_weights={"price_output":0.39, "direction_output":0.61})
+    except Exception:
         pass
-    
-    def prepare_data_for_model(self, df):
-        return df
 
-# Backward compatibility - use XGBoost as default
-DynamicEnsembleMetaLearner = XGBoostEnsembleMetaLearner
-XGBoostMetaLearner = XGBoostEnsembleMetaLearner  
-UpdatedXGBoostMetaLearner = XGBoostEnsembleMetaLearner
-EnhancedDynamicEnsembleMetaLearner = XGBoostEnsembleMetaLearner
-EnhancedGRUBiasedEnsembleMetaLearner = XGBoostEnsembleMetaLearner
-# ======================== ENHANCED PREDICTION SYSTEM ========================
+def mini_retrain_for_ticker(symbol: str,
+                            df_sym: pd.DataFrame,
+                            ticker_id: int,
+                            market_id: int,
+                            feature_scaler,
+                            price_scaler,
+                            seq_len: int,
+                            lstm_model: tf.keras.Model,
+                            gru_model:  tf.keras.Model) -> int:
+    if df_sym.empty: return 0
+    end_date = df_sym['Date'].max()
+    start_date = end_date - pd.Timedelta(days=MINI_RETRAIN_WINDOW_DAYS)
+    g = df_sym[df_sym['Date'].between(start_date, end_date)].sort_values("Date").copy()
+    if len(g) < seq_len + 1: return 0
 
-# โหลด configuration และตรวจสอบ environment
-print("🔧 กำลังโหลด configuration...")
-path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.env')
+    Xf_list = []; Xt_list=[]; Xm_list=[]; Yp_list=[]; Yd_list=[]
+    vals = feature_scaler.transform(align_features_to_scaler(g[FEATURE_COLUMNS], feature_scaler).values.astype(np.float32))
+    close = g['Close'].values.astype(np.float32)
 
-if not os.path.exists(path):
-    print(f"❌ ไม่พบไฟล์ config.env ที่ {path}")
-    print("📝 กำลังสร้างไฟล์ตัวอย่าง config.env...")
-    
+    for i in range(len(g)-seq_len):
+        last_close = float(close[i+seq_len-1])
+        next_close = float(close[i+seq_len])
+        logret = math.log(max(next_close,1e-9)/max(last_close,1e-9))
+        y_price_scaled = float(price_scaler.transform(np.array([[logret]], dtype=np.float32))[0,0])
+        y_dir = 1.0 if next_close > last_close else 0.0
+        Xf_list.append(vals[i:i+seq_len])
+        Xt_list.append(np.full((seq_len,), ticker_id, dtype=np.int32))
+        Xm_list.append(np.full((seq_len,), market_id, dtype=np.int32))
+        Yp_list.append([y_price_scaled]); Yd_list.append([y_dir])
+
+    Xf = np.asarray(Xf_list, dtype=np.float32)
+    Xt = np.asarray(Xt_list, dtype=np.int32)
+    Xm = np.asarray(Xm_list, dtype=np.int32)
+    Yp = np.asarray(Yp_list, dtype=np.float32)
+    Yd = np.asarray(Yd_list, dtype=np.float32)
+
+    n = len(Xf)
+    if n < MINI_RETRAIN_MIN_SAMPLES:
+        return 0
+
     try:
-        with open(path, 'w') as f:
-            f.write("# Database Configuration\n")
-            f.write("DB_USER=your_username\n")
-            f.write("DB_PASSWORD=your_password\n")
-            f.write("DB_HOST=localhost\n")
-            f.write("DB_NAME=your_database\n")
-        
-        print(f"✅ สร้างไฟล์ตัวอย่าง config.env สำเร็จที่ {path}")
-        print("📋 กรุณาแก้ไขค่าในไฟล์นี้ให้ตรงกับการตั้งค่าฐานข้อมูลของคุณ")
-        exit()
-        
-    except Exception as e:
-        print(f"❌ ไม่สามารถสร้างไฟล์ config.env ได้: {e}")
-        print("📝 กรุณาสร้างไฟล์ config.env ด้วยข้อมูล:")
-        print("   DB_USER=your_username")
-        print("   DB_PASSWORD=your_password") 
-        print("   DB_HOST=your_host")
-        print("   DB_NAME=your_database")
-        exit()
+        if not hasattr(lstm_model, "optimizer") or lstm_model.optimizer is None:
+            compile_for_miniretrain(lstm_model)
+        if not hasattr(gru_model, "optimizer") or gru_model.optimizer is None:
+            compile_for_miniretrain(gru_model)
+    except Exception:
+        pass
 
-load_dotenv(path)
+    lstm_model.fit([Xf, Xt, Xm], {"price_output":Yp, "direction_output":Yd},
+                   epochs=MINI_RETRAIN_EPOCHS, batch_size=min(MINI_RETRAIN_BATCH_SIZE, n),
+                   shuffle=False, verbose=0)
+    gru_model.fit([Xf, Xt, Xm], {"price_output":Yp, "direction_output":Yd},
+                  epochs=MINI_RETRAIN_EPOCHS, batch_size=min(MINI_RETRAIN_BATCH_SIZE, n),
+                  shuffle=False, verbose=0)
+    return n
 
-# ตรวจสอบ environment variables
-required_vars = ['DB_USER', 'DB_PASSWORD', 'DB_HOST', 'DB_NAME']
-missing_vars = [var for var in required_vars if not os.getenv(var)]
-
-if missing_vars:
-    print(f"❌ ขาด environment variables: {missing_vars}")
-    exit()
-
-try:
-    DB_CONNECTION = f"mysql+mysqlconnector://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}/{os.getenv('DB_NAME')}"
-    print("✅ Database connection string สร้างสำเร็จ")
-except Exception as e:
-    print(f"❌ เกิดข้อผิดพลาดในการสร้าง database connection: {e}")
-    exit()
-
-# ตั้งค่าตลาด    
-MODEL_LSTM_PATH = "../LSTM_model/best_hypertuned_model.keras"  # Optimal model from hyperparameter tuning
-MODEL_GRU_PATH = "../GRU_Model/best_hypertuned_model.keras"    # Optimal model from hyperparameter tuning
-SEQ_LENGTH = 10
-RETRAIN_FREQUENCY = 3  # Optimal value from hyperparameter tuning
-
-# Dynamic weight parameters
-WEIGHT_DECAY = 0.95
-MIN_WEIGHT = 0.1
-MAX_WEIGHT = 0.9
-
-# สร้าง XGBoost Meta-Learner
-print("🧠 กำลังเตรียม XGBoost Meta-Learner...")
-meta_learner = UpdatedXGBoostMetaLearner()
-
-def fetch_latest_data():
-    """ดึงข้อมูลล่าสุดจากฐานข้อมูล"""
-    try:
-        engine = sqlalchemy.create_engine(DB_CONNECTION)
-
-        query = f"""
-            SELECT 
-                StockDetail.Date, 
-                StockDetail.StockSymbol, 
-                Stock.Market,  
-                StockDetail.OpenPrice AS Open, 
-                StockDetail.HighPrice AS High, 
-                StockDetail.LowPrice AS Low, 
-                StockDetail.ClosePrice AS Close, 
-                StockDetail.Volume, 
-                StockDetail.P_BV_Ratio,
-                StockDetail.Sentiment, 
-                StockDetail.Changepercen AS Change_Percent, 
-                StockDetail.TotalRevenue, 
-                StockDetail.QoQGrowth, 
-                StockDetail.EPS, 
-                StockDetail.ROE, 
-                StockDetail.NetProfitMargin, 
-                StockDetail.DebtToEquity, 
-                StockDetail.PERatio, 
-                StockDetail.Dividend_Yield, 
-                StockDetail.positive_news, 
-                StockDetail.negative_news, 
-                StockDetail.neutral_news,
-                StockDetail.PredictionClose_GRU, 
-                StockDetail.PredictionClose_LSTM, 
-                StockDetail.PredictionTrend_GRU, 
-                StockDetail.PredictionTrend_LSTM 
-            FROM StockDetail
-            LEFT JOIN Stock ON StockDetail.StockSymbol = Stock.StockSymbol
-            WHERE Stock.Market in ('America','Thailand')
-            AND StockDetail.Date >= CURDATE() - INTERVAL 350 DAY
-            ORDER BY StockDetail.StockSymbol, StockDetail.Date ASC;
-        """
-
-        df = pd.read_sql(query, engine)
-        engine.dispose()
-        
-        print(f"📊 ข้อมูลดิบจาก DB:")
-        print(f"   📅 วันที่: {df['Date'].min()} ถึง {df['Date'].max()}")
-        print(f"   🏷️ TRUE data:")
-        true_data = df[df['StockSymbol'] == 'TRUE']
-        if not true_data.empty:
-            print(f"      📅 TRUE วันที่: {true_data['Date'].min()} ถึง {true_data['Date'].max()}")
-            print(f"      📋 จำนวน: {len(true_data)} วัน")
-            print(f"      💰 วันที่ล่าสุด: {true_data.iloc[-1]['Date']} = {true_data.iloc[-1]['Close']}")
-        
-
-        if df.empty:
-            print("❌ ไม่มีข้อมูลหุ้นสำหรับตลาดที่กำลังเปิดอยู่")
-            return df
-
-        # Data processing
-        df['Date'] = pd.to_datetime(df['Date'])
-        
-        # 🔧 Debug หลัง convert datetime
-        print(f"\n📊 หลัง convert datetime:")
-        true_data = df[df['StockSymbol'] == 'TRUE']
-        if not true_data.empty:
-            print(f"   🏷️ TRUE data: {true_data['Date'].min()} ถึง {true_data['Date'].max()} ({len(true_data)} วัน)")
-        
-        # Fill missing dates for each stock
-        grouped = df.groupby('StockSymbol')
-        filled_dfs = []
-        
-        for name, group in grouped:
-            if name == 'TRUE':  # 🔧 Debug เฉพาะ TRUE
-                print(f"\n🔍 Processing TRUE:")
-                print(f"   📅 ก่อน fill: {group['Date'].min()} ถึง {group['Date'].max()} ({len(group)} วัน)")
-                print(f"   💰 ข้อมูลจริง: {group['Close'].notna().sum()} วัน")
-                print(f"   🔍 วันที่ล่าสุด: {group.iloc[-1]['Date']} (Close: {group.iloc[-1]['Close']})")
-            
-            # Create complete date range for this stock
-            all_dates = pd.date_range(start=group['Date'].min(), end=group['Date'].max(), freq='D')
-            temp_df = pd.DataFrame({'Date': all_dates})
-            temp_df['StockSymbol'] = name
-            # Merge with original data
-            merged = pd.merge(temp_df, group, on=['StockSymbol', 'Date'], how='left')
-            
-            if name == 'TRUE':  # 🔧 Debug หลัง merge
-                print(f"   📅 หลัง merge: {merged['Date'].min()} ถึง {merged['Date'].max()} ({len(merged)} วัน)")
-                print(f"   💰 ข้อมูลจริงก่อน fill: {merged['Close'].notna().sum()} วัน")
-                print(f"   🔍 วันที่ล่าสุด: {merged.iloc[-1]['Date']} (Close: {merged.iloc[-1]['Close']})")
-            
-            # Forward fill missing values
-            financial_cols = [
-                'TotalRevenue', 'QoQGrowth', 'EPS', 'ROE',
-                'NetProfitMargin', 'DebtToEquity', 'PERatio', 'Dividend_Yield'
-            ]
-            merged[financial_cols] = merged[financial_cols].fillna(0)
-            merged = merged.ffill()
-            
-            if name == 'TRUE':  # 🔧 Debug หลัง ffill
-                print(f"   📅 หลัง ffill: {merged['Date'].min()} ถึง {merged['Date'].max()} ({len(merged)} วัน)")
-                print(f"   💰 วันที่ล่าสุด: {merged.iloc[-1]['Date']} = {merged.iloc[-1]['Close']}")
-                # ตรวจสอบ critical columns
-                critical_check = merged.iloc[-1][['Open', 'High', 'Low', 'Close']].isna()
-                print(f"   🔍 Critical columns สำหรับวันล่าสุด: {critical_check.to_dict()}")
-            
-            filled_dfs.append(merged)
-        
-        df = pd.concat(filled_dfs, ignore_index=True)
-        
-        # 🔧 Debug หลัง concat
-        print(f"\n📊 หลัง fill missing dates:")
-        true_data = df[df['StockSymbol'] == 'TRUE']
-        if not true_data.empty:
-            print(f"   🏷️ TRUE data: {true_data['Date'].min()} ถึง {true_data['Date'].max()} ({len(true_data)} วัน)")
-            print(f"   💰 วันที่ล่าสุด: {true_data.iloc[-1]['Date']} = {true_data.iloc[-1]['Close']}")
-        
-        # Calculate technical indicators for each stock - แก้ไข DeprecationWarning
-        def calculate_indicators(group):
-            if len(group) < 14:
-                return group
-                
-            try:
-                # Calculate RSI
-                group['RSI'] = ta.momentum.RSIIndicator(group['Close'], window=14).rsi()
-                
-                # Calculate EMAs
-                group['EMA_12'] = group['Close'].ewm(span=12, adjust=False).mean()
-                group['EMA_26'] = group['Close'].ewm(span=26, adjust=False).mean()
-                group['EMA_10'] = group['Close'].ewm(span=10, adjust=False).mean()
-                group['EMA_20'] = group['Close'].ewm(span=20, adjust=False).mean()
-                
-                # Calculate SMAs
-                group['SMA_50'] = group['Close'].rolling(window=50).mean()
-                group['SMA_200'] = group['Close'].rolling(window=200).mean()
-                
-                # Calculate MACD
-                group['MACD'] = group['EMA_12'] - group['EMA_26']
-                group['MACD_Signal'] = group['MACD'].rolling(window=9).mean()
-                
-                # Calculate ATR
-                if len(group) >= 14:
-                    atr = ta.volatility.AverageTrueRange(high=group['High'], low=group['Low'], close=group['Close'], window=14)
-                    group['ATR'] = atr.average_true_range()
-                
-                # Calculate Bollinger Bands
-                bollinger = ta.volatility.BollingerBands(group['Close'], window=20, window_dev=2)
-                group['Bollinger_High'] = bollinger.bollinger_hband()
-                group['Bollinger_Low'] = bollinger.bollinger_lband()
-                
-                # Convert Sentiment to numerical values
-                group['Sentiment'] = group['Sentiment'].map({'Positive': 1, 'Negative': -1, 'Neutral': 0})
-                
-                # Calculate Keltner Channel
-                keltner = ta.volatility.KeltnerChannel(high=group['High'], low=group['Low'], close=group['Close'], window=20, window_atr=10)
-                group['Keltner_High'] = keltner.keltner_channel_hband()
-                group['Keltner_Low'] = keltner.keltner_channel_lband()
-                group['Keltner_Middle'] = keltner.keltner_channel_mband()
-                
-                # Calculate Chaikin Volatility
-                window_cv = 10
-                group['High_Low_Diff'] = group['High'] - group['Low']
-                group['High_Low_EMA'] = group['High_Low_Diff'].ewm(span=window_cv, adjust=False).mean()
-                group['Chaikin_Vol'] = group['High_Low_EMA'].pct_change(periods=window_cv) * 100
-                
-                # Calculate Donchian Channel
-                window_dc = 20
-                group['Donchian_High'] = group['High'].rolling(window=window_dc).max()
-                group['Donchian_Low'] = group['Low'].rolling(window=window_dc).min()
-                
-                # Calculate PSAR
-                psar = ta.trend.PSARIndicator(high=group['High'], low=group['Low'], close=group['Close'], step=0.02, max_step=0.2)
-                group['PSAR'] = psar.psar()
-                
-                # Add date-related features
-                group['DayOfWeek'] = group['Date'].dt.dayofweek
-                group['Is_Day_0'] = (group['Date'].dt.dayofweek == 0).astype(int)  # Monday
-                group['Is_Day_4'] = (group['Date'].dt.dayofweek == 4).astype(int)  # Friday
-                group['DayOfMonth'] = group['Date'].dt.day
-                group['IsFirstHalfOfMonth'] = (group['Date'].dt.day <= 15).astype(int)
-                group['IsSecondHalfOfMonth'] = (group['Date'].dt.day > 15).astype(int)
-                
-            except Exception as e:
-                print(f"⚠️ เกิดข้อผิดพลาดในการคำนวณ indicators สำหรับ {group['StockSymbol'].iloc[0] if not group.empty else 'Unknown'}: {e}")
-            
-            return group
-        
-        # Apply indicators calculation to each stock group - แก้ไข DeprecationWarning
-        df = df.groupby('StockSymbol', group_keys=False).apply(calculate_indicators)
-        df = df.reset_index(drop=True)
-        
-        # 🔧 Debug หลัง calculate indicators
-        print(f"\n📊 หลัง calculate indicators:")
-        true_data = df[df['StockSymbol'] == 'TRUE']
-        if not true_data.empty:
-            print(f"   🏷️ TRUE data: {true_data['Date'].min()} ถึง {true_data['Date'].max()} ({len(true_data)} วัน)")
-            print(f"   💰 วันที่ล่าสุด: {true_data.iloc[-1]['Date']} = {true_data.iloc[-1]['Close']}")
-            # ตรวจสอบ critical columns หลัง indicators
-            critical_check = true_data.iloc[-1][['Open', 'High', 'Low', 'Close']].isna()
-            print(f"   🔍 Critical columns: {critical_check.to_dict()}")
-        
-        # Handle missing values
-        critical_columns = ['Open', 'High', 'Low', 'Close']
-        before_drop = len(df)
-        before_drop_true = len(df[df['StockSymbol'] == 'TRUE'])
-        
-        df = df.dropna(subset=critical_columns)
-        
-        after_drop = len(df)
-        after_drop_true = len(df[df['StockSymbol'] == 'TRUE'])
-        
-        # 🔧 Debug หลัง dropna
-        print(f"\n📊 หลัง dropna critical columns:")
-        print(f"   📋 ทั้งหมด: ลบออก {before_drop - after_drop} แถว ({before_drop} → {after_drop})")
-        print(f"   🏷️ TRUE: ลบออก {before_drop_true - after_drop_true} แถว ({before_drop_true} → {after_drop_true})")
-        
-        true_data = df[df['StockSymbol'] == 'TRUE']
-        if not true_data.empty:
-            print(f"   🏷️ TRUE data: {true_data['Date'].min()} ถึง {true_data['Date'].max()} ({len(true_data)} วัน)")
-            print(f"   💰 วันที่ล่าสุด: {true_data.iloc[-1]['Date']} = {true_data.iloc[-1]['Close']}")
-        else:
-            print(f"   ❌ TRUE data หายไปหมด!")
-        
-        # Fill NaN values
-        df = df.ffill().bfill()
-        
-        # Fill remaining NaN with 0 for technical indicators
-        technical_columns = ['RSI', 'MACD', 'MACD_Signal', 'ATR', 
-                            'Bollinger_High', 'Bollinger_Low', 'SMA_50', 'SMA_200',
-                            'EMA_10', 'EMA_20', 'Keltner_High', 'Keltner_Low', 'Keltner_Middle',
-                            'Chaikin_Vol', 'Donchian_High', 'Donchian_Low', 'PSAR']
-        
-        for col in technical_columns:
-            if col in df.columns:
-                df[col] = df[col].fillna(0)
-        
-        # Fill remaining NaN with 0
-        df = df.fillna(0)
-        
-        # 🔧 Final debug
-        print(f"\n📊 ข้อมูลสุดท้าย:")
-        true_data = df[df['StockSymbol'] == 'TRUE']
-        if not true_data.empty:
-            print(f"   🏷️ TRUE data: {true_data['Date'].min()} ถึง {true_data['Date'].max()} ({len(true_data)} วัน)")
-            print(f"   💰 วันที่ล่าสุด: {true_data.iloc[-1]['Date']} = {true_data.iloc[-1]['Close']}")
-        
-        print(f"\n✅ ข้อมูลพร้อมใช้งาน: {len(df)} แถว, {len(df['StockSymbol'].unique())} หุ้น")
-        print(f"📊 Technical indicators ที่คำนวณได้: {[col for col in technical_columns if col in df.columns]}")
-        
-        return df
-        
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูล: {e}")
-        import traceback
-        traceback.print_exc()
-        return pd.DataFrame()
-
-def verify_model_paths():
-    """ตรวจสอบ path ของโมเดลก่อนใช้งาน"""
-    import os
-    
-    lstm_path = "../LSTM_model/best_hypertuned_model.keras"     # Optimal model from tuning
-    gru_path = "../GRU_Model/best_hypertuned_model.keras"       # Optimal model from tuning
-    scaler_path = "../LSTM_model/ticker_scalers.pkl"
-    
-    print("🔍 Verifying model paths...")
-    
-    if os.path.exists(lstm_path):
-        size = os.path.getsize(lstm_path)
-        print(f"✅ LSTM model found: {size:,} bytes")
-    else:
-        print(f"❌ LSTM model not found: {lstm_path}")
-        return False
-    
-    if os.path.exists(gru_path):
-        size = os.path.getsize(gru_path)
-        print(f"✅ GRU model found: {size:,} bytes")
-    else:
-        print(f"❌ GRU model not found: {gru_path}")
-        return False
-    
-    if os.path.exists(scaler_path):
-        print(f"✅ Scaler file found")
-    else:
-        print(f"❌ Scaler file not found: {scaler_path}")
-        return False
-    
-    return True
-
-# เรียกใช้ตรวจสอบก่อนโหลดโมเดล
-if not verify_model_paths():
-    print("❌ Path verification failed!")
-    sys.exit(1)
-
-
-def check_last_retrain_date():
-    """
-    เช็ควันที่ retrain ล่าสุดและแสดงข้อมูล
-    """
-    print("\n📅 Checking last retrain dates...")
-    
-    retrain_files = [
-        ('last_retrain_model.txt', 'Model Retrain'),
-        ('last_retrain_walkforward.txt', 'Walk-Forward Validation'),
-        ('last_retrain_start.txt', 'Retrain Process Start')
-    ]
-    
-    for file_name, description in retrain_files:
-        try:
-            if os.path.exists(file_name):
-                with open(file_name, 'r', encoding='utf-8') as f:
-                    content = f.read().strip()
-                    first_line = content.split('\n')[0] if content else 'No data'
-                    print(f"   📄 {description}: {first_line}")
-                    
-                    # คำนวณวันที่ผ่านมา
-                    if 'Last' in first_line or 'Started' in first_line:
-                        try:
-                            date_str = first_line.split(': ')[1]
-                            last_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-                            days_since = (datetime.now() - last_date).days
-                            hours_since = (datetime.now() - last_date).total_seconds() / 3600
-                            
-                            if days_since > 0:
-                                print(f"      ⏰ {days_since} days ago ({hours_since:.1f} hours)")
-                            else:
-                                print(f"      ⏰ {hours_since:.1f} hours ago")
-                                
-                            # แจ้งเตือนถ้านานเกินไป
-                            if days_since > 7:
-                                print(f"      ⚠️ Warning: More than 7 days since last retrain!")
-                            elif days_since > 3:
-                                print(f"      💡 Info: Consider retraining soon")
-                                
-                        except (ValueError, IndexError) as e:
-                            print(f"      ❌ Cannot parse date: {e}")
-            else:
-                print(f"   ❌ {description}: File not found ({file_name})")
-                
-        except Exception as e:
-            print(f"   ❌ Error reading {file_name}: {e}")
-    
-    # เช็ค retrain logs directory
-    if os.path.exists('retrain_logs'):
-        log_files = [f for f in os.listdir('retrain_logs') if f.endswith('.csv')]
-        if log_files:
-            latest_log = max(log_files)
-            print(f"   📊 Latest retrain log: {latest_log}")
-        else:
-            print(f"   📊 No retrain logs found")
-    else:
-        print(f"   📊 Retrain logs directory not found")
-    
-    print("")
-
-def should_retrain_models():
-    """
-    ตรวจสอบจากไฟล์วันที่ว่าควร retrain หรือไม่
-    Returns: True ถ้าควร retrain, False ถ้าไม่ต้อง
-    """
-    try:
-        if not os.path.exists('last_retrain_model.txt'):
-            print("📅 ไม่พบไฟล์ last_retrain_model.txt -> ต้อง retrain")
-            return True
-            
-        with open('last_retrain_model.txt', 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-            first_line = content.split('\n')[0] if content else ''
-            
-            if 'Last Retrain:' in first_line:
-                date_str = first_line.split(': ')[1]
-                last_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-                days_since = (datetime.now() - last_date).days
-                
-                print(f"📅 Last retrain: {days_since} days ago")
-                
-                if days_since >= RETRAIN_FREQUENCY:
-                    print(f"🔄 ถึงเวลา retrain แล้ว (>= {RETRAIN_FREQUENCY} days)")
-                    return True
-                else:
-                    print(f"✅ ยังไม่ถึงเวลา retrain (< {RETRAIN_FREQUENCY} days)")
-                    return False
-            else:
-                print("📅 ไม่พบวันที่ใน last_retrain_model.txt -> ต้อง retrain")
-                return True
-                
-    except Exception as e:
-        print(f"📅 Error checking retrain date: {e} -> ต้อง retrain")
-        return True
-
+# ---------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------
 if __name__ == "__main__":
-    print("\n🚀 เริ่มต้นระบบทำนายหุ้นแบบ Walk-Forward Validation Only")
-    print("🔧 Using Walk-Forward Validation with Mini-Retrain")  
-    print(f"⚡ ระบบจะ retrain ทุกๆ {RETRAIN_FREQUENCY} วันระหว่างการทำนาย (Optimal from hyperparameter tuning)")
-    print("🎯 Using optimal parameters:")
-    print("   - LSTM: chunk_size=100, units=48-24, retrain_freq=3, lr=1.70e-04")
-    print("   - GRU:  chunk_size=100, units=48-24, retrain_freq=3, lr=1.20e-04")
-    
-    # เช็ควันที่ retrain ล่าสุด
-    check_last_retrain_date()
-    
-    # ตรวจสอบว่าต้อง retrain หรือไม่
-    need_retrain = should_retrain_models()
-    
-    if not need_retrain:
-        print("\n🎯 ไม่ต้อง retrain - ใช้โมเดลที่มีอยู่เพื่อทำนายเท่านั้น")
-        print("✅ จะรันในโหมด Prediction Only")
-        
-        # โหลดโมเดลเพื่อทำนายเท่านั้น
-        MODEL_LSTM_PATH = "../LSTM_model/best_hypertuned_model.keras"
-        MODEL_GRU_PATH = "../GRU_Model/best_hypertuned_model.keras"
-        
-        if not verify_model_paths():
-            print("❌ Model path verification failed!")
-            sys.exit(1)
-            
-        # รันโหมด prediction only
-        print("🚀 เรียกใช้ prediction system...")
-        
-        try:
-            # สร้าง instance ของ WalkForwardMiniRetrainManager
-            manager = WalkForwardMiniRetrainManager(
-                lstm_model_path=MODEL_LSTM_PATH,
-                gru_model_path=MODEL_GRU_PATH,
-                retrain_frequency=RETRAIN_FREQUENCY
-            )
-            
-            # โหลดโมเดลสำหรับ prediction เท่านั้น (ไม่ compile)
-            model_lstm_pred = manager.load_models_for_prediction(model_path=MODEL_LSTM_PATH, compile_model=False)
-            model_gru_pred = manager.load_models_for_prediction(model_path=MODEL_GRU_PATH, compile_model=False)
-            
-            if model_lstm_pred is None or model_gru_pred is None:
-                print("❌ ไม่สามารถโหลดโมเดลได้")
-                sys.exit(1)
-                
-            print("✅ โหลดโมเดลสำหรับ prediction สำเร็จ!")
-            
-            # โหลด XGBoost Meta-Learner
-            print("🤖 กำลังโหลด XGBoost Ensemble...")
-            meta_learner = XGBoostEnsembleMetaLearner()
-            
-            if not meta_learner.is_model_available():
-                print("⚠️ XGBoost model ไม่พร้อมใช้งาน - จะใช้ fallback")
-            else:
-                print("✅ XGBoost Ensemble พร้อมใช้งาน!")
-            
-            # โหลดข้อมูลและ scalers (ใช้โค้ดจากส่วนหลัก)
-            print("📊 กำลังโหลดข้อมูลล่าสุด...")
-            
-            # โหลดข้อมูลดิบ
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.env')
-            load_dotenv(path)
-            
-            # ใช้ฟังก์ชั่นที่มีอยู่แล้ว
-            DB_CONNECTION = f"mysql+mysqlconnector://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}/{os.getenv('DB_NAME')}"
-            engine = sqlalchemy.create_engine(DB_CONNECTION)
-            
-            # ใช้ fetch_latest_data() ที่มีอยู่แล้ว ซึ่งจะคืนค่า processed data
-            df_processed = fetch_latest_data()
-            
-            if df_processed.empty:
-                print("❌ ไม่มีข้อมูลสำหรับประมวลผล")
-                sys.exit(1)
-                
-            print(f"📊 ได้รับข้อมูล: {len(df_processed)} แถว จาก {len(df_processed['StockSymbol'].unique())} หุ้น")
-            
-            # ใช้ feature columns ที่กำหนดไว้แล้ว
-            training_features = ['Open', 'High', 'Low', 'Close', 'Volume', 'P_BV_Ratio', 'Sentiment', 
-                               'Change_Percent', 'TotalRevenue', 'QoQGrowth', 'EPS', 'ROE', 
-                               'NetProfitMargin', 'DebtToEquity', 'PERatio', 'Dividend_Yield', 
-                               'positive_news', 'negative_news', 'neutral_news']
-            
-            # โหลด scalers ที่มีอยู่แล้ว
-            try:
-                ticker_scalers = joblib.load("../LSTM_model/ticker_scalers.pkl")
-                print(f"✅ โหลด scalers สำเร็จ: {len(ticker_scalers)} tickers")
-                print(f"🔍 Scaler keys: {list(ticker_scalers.keys())}")
-            except Exception as e:
-                print(f"❌ ไม่สามารถโหลด scalers: {e}")
-                sys.exit(1)
-            
-            # เตรียม encoders และ Ticker_ID
-            ticker_encoder = LabelEncoder()
-            ticker_encoder.fit(df_processed["StockSymbol"])
-            
-            # เพิ่ม Ticker_ID ใน dataframe
-            if 'Ticker_ID' not in df_processed.columns:
-                df_processed['Ticker_ID'] = ticker_encoder.transform(df_processed["StockSymbol"])
-                print(f"✅ เพิ่ม Ticker_ID: {dict(zip(df_processed['StockSymbol'].unique(), df_processed.groupby('StockSymbol')['Ticker_ID'].first()))}")
-            
-            us_stock = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
-            thai_stock = ['ADVANC', 'TRUE', 'DITTO', 'DIF', 'INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
-            
-            market_encoder = LabelEncoder()
-            market_encoder.fit(['US', 'TH', 'OTHER'])
-            
-            print(f"✅ โหลดข้อมูลสำเร็จ: {len(df_processed)} records, {len(ticker_scalers)} scalers")
-            
-            # ใช้ตัวแปรที่ถูกต้อง
-            df = df_processed
-            feature_columns = training_features
-            valid_scalers = ticker_scalers
-            
-            # ทำ prediction โดยใช้ LSTM และ GRU
-            print("🔮 กำลังทำ prediction ด้วย LSTM และ GRU...")
-            print(f"⚠️ โมเดลต้องการ sequence length = 10, features = 36")
-            print(f"   เตรียมข้อมูล sequence สำหรับแต่ละ ticker...")
-            
-            # เตรียมข้อมูล sequence (10 timesteps) สำหรับแต่ละ ticker
-            seq_length = 10
-            
-            prediction_map = {}
-            
-            print(f"🔍 Data info:")
-            print(f"   📊 Total data shape: {df.shape}")
-            print(f"   🏷️ Available columns: {len(df.columns)} columns")
-            print(f"   📋 Tickers: {df['StockSymbol'].unique()}")
-            print(f"   🔧 Feature columns: {len(feature_columns)} features")
-            print(f"   ⚖️ Valid scalers: {len(valid_scalers)} tickers")
-            
-            # วนลูปแต่ละ ticker
-            for ticker in df['StockSymbol'].unique():
-                print(f"\n🔍 Processing {ticker}...")
-                
-                # ดึงข้อมูลของ ticker นี้
-                ticker_data = df[df['StockSymbol'] == ticker].copy()
-                ticker_data = ticker_data.sort_values('Date').reset_index(drop=True)
-                
-                if len(ticker_data) < seq_length:
-                    print(f"   ❌ Not enough data: {len(ticker_data)} < {seq_length}")
-                    continue
-                
-                # ใช้ Ticker_ID เป็น key (เนื่องจาก scaler keys เป็นตัวเลข)
-                ticker_id = ticker_data['Ticker_ID'].iloc[0]
-                
-                if ticker_id in valid_scalers:
-                    scaler_key = ticker_id
-                    print(f"   ✅ Found scaler with Ticker_ID: {ticker_id}")
-                else:
-                    print(f"   ❌ No scaler for {ticker} (Ticker_ID: {ticker_id})")
-                    print(f"       Available keys: {list(valid_scalers.keys())[:5]}...")
-                    continue
-                    
-                try:
-                    # ใช้ Market_ID แทน Market string
-                    us_stock = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
-                    thai_stock = ['ADVANC', 'TRUE', 'DITTO', 'DIF', 'INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
-                    
-                    if ticker in us_stock:
-                        market_id = 0  # US
-                    elif ticker in thai_stock:
-                        market_id = 1  # TH  
-                    else:
-                        market_id = 2  # OTHER
-                    
-                    print(f"   🌍 Market ID: {market_id} ({'US' if market_id==0 else 'TH' if market_id==1 else 'OTHER'})")
-                    print(f"   📊 Available data: {len(ticker_data)} rows")
-                    
-                    # ใช้ข้อมูล 10 วันล่าสุด
-                    recent_data = ticker_data.tail(seq_length).copy()
-                    
-                    # ตรวจสอบ available columns
-                    all_cols = list(recent_data.columns)
-                    expected_features = 36  # โมเดลต้องการ 36 features
-                    
-                    print(f"   🔧 Available columns: {len(all_cols)}")
-                    print(f"   ⚠️ Model expects: {expected_features} features")
-                    
-                    # สร้าง feature matrix ขนาด (seq_length, expected_features)
-                    X_sequence = []
-                    
-                    for i in range(len(recent_data)):
-                        row = recent_data.iloc[i]
-                        row_features = []
-                        
-                        # ใช้ feature columns ที่มี + padding
-                        for col in feature_columns:
-                            if col in row and not pd.isna(row[col]):
-                                row_features.append(float(row[col]))
-                            else:
-                                row_features.append(0.0)
-                        
-                        # เพิ่ม features ให้ครบ 36 (padding ด้วย 0)
-                        while len(row_features) < expected_features:
-                            row_features.append(0.0)
-                        
-                        # ตัด features ถ้าเกิน 36
-                        row_features = row_features[:expected_features]
-                        
-                        X_sequence.append(row_features)
-                    
-                    X_features = np.array(X_sequence, dtype=np.float32).reshape(1, seq_length, expected_features)
-                    
-                    # Ticker และ Market ต้องเป็น sequence ด้วย (ซ้ำทุก timestep)
-                    ticker_id_encoded = ticker_encoder.transform([ticker])[0]  # ได้ตัวเลข
-                    X_ticker = np.full((1, seq_length), ticker_id_encoded, dtype=np.int32)  # Shape (1, 10)
-                    X_market = np.full((1, seq_length), market_id, dtype=np.int32)  # Shape (1, 10)
-                    
-                    print(f"   🔧 Input shapes: features={X_features.shape}, ticker={X_ticker.shape}, market={X_market.shape}")
-                    print(f"   ✅ All shapes ready for model (sequence format)!")
-                    
-                    # LSTM prediction
-                    lstm_pred = model_lstm_pred.predict([X_features, X_ticker, X_market], verbose=0)
-                    print(f"   🔍 LSTM prediction type: {type(lstm_pred)}, length: {len(lstm_pred)}")
-                    print(f"       Shapes: {[p.shape for p in lstm_pred]}")
-                    
-                    # GRU prediction
-                    gru_pred = model_gru_pred.predict([X_features, X_ticker, X_market], verbose=0)
-                    print(f"   🔍 GRU prediction type: {type(gru_pred)}, length: {len(gru_pred)}")
-                    print(f"       Shapes: {[p.shape for p in gru_pred]}")
-                    
-                    # ตรวจสอบ scaler structure
-                    scaler_data = valid_scalers[scaler_key]
-                    print(f"   🔍 Scaler type: {type(scaler_data)}")
-                    
-                    if isinstance(scaler_data, dict):
-                        # Scaler เป็น dict ที่มี price_scaler และ feature_scaler
-                        if 'price_scaler' in scaler_data:
-                            scaler_p = scaler_data['price_scaler']
-                            print(f"   ✅ Found price_scaler: {type(scaler_p)}")
-                        else:
-                            print(f"   ⚠️ No price_scaler in dict, using feature_scaler")
-                            scaler_p = scaler_data.get('feature_scaler', scaler_data)
-                    elif isinstance(scaler_data, tuple) and len(scaler_data) == 2:
-                        scaler_p, scaler_d = scaler_data
-                        print(f"   ✅ Found 2 scalers: price={type(scaler_p)}, direction={type(scaler_d)}")
-                    else:
-                        print(f"   ⚠️ Unexpected scaler structure: {scaler_data}")
-                        scaler_p = scaler_data
-                    
-                    # ใช้ output ที่ 0 สำหรับ price และ output ที่ 1 สำหรับ direction
-                    lstm_price = scaler_p.inverse_transform(lstm_pred[0].reshape(1, -1))[0, 0]
-                    lstm_direction = lstm_pred[1][0, 0]  # direction ไม่ต้อง inverse transform
-                    
-                    gru_price = scaler_p.inverse_transform(gru_pred[0].reshape(1, -1))[0, 0]
-                    gru_direction = gru_pred[1][0, 0]  # direction ไม่ต้อง inverse transform
-                    
-                    prediction_map[ticker] = {
-                        'PredictionClose_LSTM': lstm_price,
-                        'PredictionTrend_LSTM': lstm_direction,
-                        'PredictionClose_GRU': gru_price,
-                        'PredictionTrend_GRU': gru_direction
-                    }
-                    
-                    # คำนวณทิศทางเป็น text
-                    lstm_dir_text = "📈UP" if lstm_direction > 0.5 else "📉DOWN"
-                    gru_dir_text = "📈UP" if gru_direction > 0.5 else "📉DOWN"
-                    
-                    print(f"   ✅ {ticker:>6}: LSTM=${lstm_price:>7.2f} {lstm_dir_text} ({lstm_direction:.3f}) | GRU=${gru_price:>7.2f} {gru_dir_text} ({gru_direction:.3f})")
-                    
-                except Exception as e:
-                    print(f"   ❌ Error predicting {ticker}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    continue
-            
-            print(f"\n✅ Individual Model Predictions Complete: {len(prediction_map)} tickers")
-            print("=" * 70)
-            
-            # สรุป LSTM vs GRU predictions
-            if prediction_map:
-                lstm_ups = sum(1 for v in prediction_map.values() if v['PredictionTrend_LSTM'] > 0.5)
-                gru_ups = sum(1 for v in prediction_map.values() if v['PredictionTrend_GRU'] > 0.5)
-                total = len(prediction_map)
-                
-                print(f"📊 Direction Summary:")
-                print(f"   LSTM: 📈 {lstm_ups} UP, 📉 {total-lstm_ups} DOWN")
-                print(f"   GRU:  📈 {gru_ups} UP, 📉 {total-gru_ups} DOWN")
-                print("=" * 70)
-            
-            if len(prediction_map) == 0:
-                print("❌ ไม่มี predictions สำหรับ XGBoost")
-                sys.exit(1)
-            
-            # เพิ่ม predictions เข้าไปใน dataframe พร้อม XGBoost ensemble
-            print("🔗 กำลังรวม predictions ด้วย XGBoost Ensemble...")
-            
-            # เตรียม latest_data สำหรับ XGBoost (ข้อมูลล่าสุดของแต่ละ ticker)
-            latest_data = df.groupby('StockSymbol').tail(1).reset_index(drop=True)
-            latest_data_with_predictions = latest_data.copy()
-            
-            # เพิ่ม predictions เข้าไปใน dataframe ด้วย column names ที่ XGBoost ต้องการ
-            latest_data_with_predictions['Predicted_Price_LSTM'] = latest_data_with_predictions['StockSymbol'].map(
-                lambda x: prediction_map.get(x, {}).get('PredictionClose_LSTM', np.nan)
-            )
-            latest_data_with_predictions['Predicted_Price_GRU'] = latest_data_with_predictions['StockSymbol'].map(
-                lambda x: prediction_map.get(x, {}).get('PredictionClose_GRU', np.nan)
-            )
-            latest_data_with_predictions['Predicted_Dir_LSTM'] = latest_data_with_predictions['StockSymbol'].map(
-                lambda x: prediction_map.get(x, {}).get('PredictionTrend_LSTM', np.nan)
-            )
-            latest_data_with_predictions['Predicted_Dir_GRU'] = latest_data_with_predictions['StockSymbol'].map(
-                lambda x: prediction_map.get(x, {}).get('PredictionTrend_GRU', np.nan)
-            )
-            
-            # Filter เฉพาะ rows ที่มี predictions ครบ
-            valid_predictions = latest_data_with_predictions.dropna(subset=[
-                'Predicted_Price_LSTM', 'Predicted_Price_GRU', 
-                'Predicted_Dir_LSTM', 'Predicted_Dir_GRU'
-            ])
-            
-            if len(valid_predictions) == 0:
-                print("❌ ไม่มี valid predictions สำหรับ XGBoost")
-                sys.exit(1)
-            
-            print(f"📊 Valid predictions สำหรับ XGBoost: {len(valid_predictions)} tickers")
-            
-            # ใช้ XGBoost Ensemble
-            if meta_learner.is_model_available():
-                print("🎯 กำลังใช้ XGBoost Ensemble...")
-                final_predictions = meta_learner.predict_meta(valid_predictions)
-                
-                if final_predictions is not None and len(final_predictions) > 0:
-                    print("✅ XGBoost Ensemble Predictions สำเร็จ!")
-                    print(f"📈 Final predictions: {len(final_predictions)} tickers")
-                    
-                    # แสดงผลลัพธ์แบบละเอียด
-                    print("\n📈 Detailed Model Predictions (All Tickers):")
-                    print("=" * 95)
-                    print(f"{'Ticker':<8} {'LSTM':<12} {'GRU':<12} {'XGBoost':<12} {'Direction':<12} {'Confidence':<10}")
-                    print("-" * 95)
-                    
-                    for _, row in final_predictions.iterrows():
-                        ticker = row.get('Ticker', row.get('StockSymbol', 'Unknown'))
-                        
-                        # ราคาจากแต่ละโมเดล
-                        lstm_price = row.get('Predicted_Price_LSTM', 0)
-                        gru_price = row.get('Predicted_Price_GRU', 0)
-                        xgb_price = row.get('XGB_Predicted_Price', row.get('Predicted_Price', 0))
-                        
-                        # ทิศทางและ confidence
-                        direction = row.get('XGB_Predicted_Direction', row.get('Predicted_Direction', 0))
-                        confidence = row.get('Confidence', 0)
-                        
-                        # ถ้าไม่มี confidence ให้คำนวณจาก direction probability
-                        if confidence == 0:
-                            if direction > 0.5:
-                                confidence = direction  # ถ้าเป็น UP ใช้ค่า direction เป็น confidence
-                            else:
-                                confidence = 1 - direction  # ถ้าเป็น DOWN ใช้ 1-direction เป็น confidence
-                        
-                        # แสดงผล
-                        dir_text = f"{'📈UP' if direction > 0.5 else '📉DOWN'}"
-                        print(f"{ticker:<8} ${lstm_price:<11.2f} ${gru_price:<11.2f} ${xgb_price:<11.2f} {dir_text:<12} {confidence:<9.3f}")
-                    
-                    print("=" * 95)
-                    
-                    # สรุปสถิติ
-                    total_tickers = len(final_predictions)
-                    up_count = len(final_predictions[final_predictions.get('XGB_Predicted_Direction', final_predictions.get('Predicted_Direction', 0)) > 0.5])
-                    down_count = total_tickers - up_count
-                    
-                    # คำนวณ average confidence อย่างปลอดภัย
-                    if 'Confidence' in final_predictions.columns:
-                        avg_confidence = final_predictions['Confidence'].mean()
-                    else:
-                        # ถ้าไม่มี column Confidence ให้คำนวณจาก direction probability
-                        if 'XGB_Predicted_Direction' in final_predictions.columns:
-                            directions = final_predictions['XGB_Predicted_Direction'].values
-                            avg_confidence = abs(directions - 0.5).mean() * 2  # แปลงเป็น confidence 0-1
-                        else:
-                            avg_confidence = 0.0
-                    
-                    print(f"📊 Summary: {total_tickers} tickers | 📈 UP: {up_count} | 📉 DOWN: {down_count} | Avg Confidence: {avg_confidence:.3f}")
-                    
-                    # แสดงหุ้นที่มี confidence สูง
-                    if 'Confidence' in final_predictions.columns:
-                        high_conf = final_predictions[final_predictions['Confidence'] > 0.7]
-                        if not high_conf.empty:
-                            print(f"\n🎯 High Confidence Predictions (>70%):")
-                            for _, row in high_conf.iterrows():
-                                ticker = row.get('Ticker', row.get('StockSymbol', 'Unknown'))
-                                price = row.get('XGB_Predicted_Price', row.get('Predicted_Price', 0))
-                                direction = row.get('XGB_Predicted_Direction', row.get('Predicted_Direction', 0))
-                                confidence = row.get('Confidence', 0)
-                                dir_text = f"{'📈UP' if direction > 0.5 else '📉DOWN'}"
-                                print(f"   {ticker}: ${price:.2f} {dir_text} (Confidence: {confidence:.3f})")
-                else:
-                    print("⚠️ XGBoost ไม่สามารถทำ prediction ได้")
-            else:
-                print("⚠️ ใช้ fallback predictions (ไม่มี XGBoost)")
-            
-            print("✅ Prediction completed in prediction-only mode with XGBoost Ensemble!")
-            
-        except Exception as e:
-            print(f"❌ Error in prediction mode: {e}")
-            sys.exit(1)
-            
+    print("🚀 เริ่มระบบทำนาย (Production) — Inference + XGB Meta (+ optional mini-retrain)")
+    print(f"🛡️ Policy: {POLICY_VERSION}")
+
+    # เลือกตลาดจากเวลารัน
+    hr = datetime.now().hour
+    if 8 <= hr < 18:
+        market_filter = "Thailand"
+        print("📊 กำลังประมวลผลตลาดหุ้นไทย (SET)...")
+    elif 19 <= hr or hr < 5:
+        market_filter = "America"
+        print("📊 กำลังประมวลผลตลาดหุ้นอเมริกา (NYSE & NASDAQ)...")
+    else:
+        print("❌ ไม่อยู่ในช่วงเวลาทำการของตลาดหุ้นไทยหรืออเมริกา")
         sys.exit(0)
 
-    print(f"\n🔄 ต้อง retrain โมเดล - เริ่มต้น Walk-Forward Validation")
+    # สถานะ mini-retrain (แยกไฟล์ตามตลาด)
+    STATE_PATH = _state_path_for(market_filter)
+    state = load_state(STATE_PATH)
+    print(f"🗂️ Mini-retrain state file: {STATE_PATH}")
 
-    # โหลดโมเดล LSTM และ GRU
-    print("\n🤖 กำลังโหลดโมเดล LSTM และ GRU...")
+    engine = build_engine()
+    print("✅ DB connection env OK")
 
-    MODEL_LSTM_PATH = "../LSTM_model/best_hypertuned_model.keras"
-    MODEL_GRU_PATH = "../GRU_Model/best_hypertuned_model.keras"
-
-    if not verify_model_paths():
-        print("❌ Model path verification failed!")
+    print(f"✅ LSTM found: {LSTM_PATH}" if os.path.exists(LSTM_PATH) else f"❌ LSTM missing: {LSTM_PATH}")
+    print(f"✅ GRU found:  {GRU_PATH}"  if os.path.exists(GRU_PATH)  else f"❌ GRU missing:  {GRU_PATH}")
+    print(f"✅ Scalers found: {SCALER_PATH}" if os.path.exists(SCALER_PATH) else f"❌ Scalers missing: {SCALER_PATH}")
+    if not (os.path.exists(LSTM_PATH) and os.path.exists(GRU_PATH) and os.path.exists(SCALER_PATH)):
         sys.exit(1)
 
-    try:
-        # สร้าง instance ของ WalkForwardMiniRetrainManager
-        manager = WalkForwardMiniRetrainManager(
-            lstm_model_path=MODEL_LSTM_PATH,
-            gru_model_path=MODEL_GRU_PATH,
-            retrain_frequency=RETRAIN_FREQUENCY
-        )
-        
-        # โหลดโมเดลสำหรับ Walk-Forward Validation + Mini-Retrain (compile เพื่อการ retrain)
-        print(f"\n✅ โหลดโมเดลสำหรับ Walk-Forward + Mini-Retrain...")
-        model_lstm_retrain = manager.load_models_for_prediction(model_path=MODEL_LSTM_PATH, compile_model=True)
-        model_gru_retrain = manager.load_models_for_prediction(model_path=MODEL_GRU_PATH, compile_model=True)
-        
-        if model_lstm_retrain is None or model_gru_retrain is None:
-            print("❌ ไม่สามารถโหลดโมเดลได้")
-            sys.exit()
-            
-        print("✅ โหลดโมเดลทั้งหมดสำเร็จ!")
-        print(f"🔧 LSTM retrain model: {'Compiled' if hasattr(model_lstm_retrain, 'optimizer') and model_lstm_retrain.optimizer else 'Not compiled'}")
-        print(f"🔧 GRU retrain model: {'Compiled' if hasattr(model_gru_retrain, 'optimizer') and model_gru_retrain.optimizer else 'Not compiled'}")
-        
-        # ======== 📅 บันทึกวันที่เริ่มต้น Retrain Process ========
-        try:
-            start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            with open('last_retrain_start.txt', 'w', encoding='utf-8') as f:
-                f.write(f"Retrain Process Started: {start_time}\n")
-                f.write(f"LSTM Model Loaded: {'✅ Success' if model_lstm_retrain else '❌ Failed'}\n")
-                f.write(f"GRU Model Loaded: {'✅ Success' if model_gru_retrain else '❌ Failed'}\n")
-            print(f"📅 บันทึกเวลาเริ่มต้น retrain: {start_time}")
-        except Exception as log_e:
-            print(f"⚠️ ไม่สามารถบันทึกเวลาเริ่มต้น retrain: {log_e}")
-        
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการโหลดโมเดล: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit()
+    ticker_scalers = load_scalers()
 
-    # ดึงและเตรียมข้อมูล
-    print("\n📥 กำลังดึงข้อมูลจากฐานข้อมูล...")
-    raw_df = fetch_latest_data()
-
-    if raw_df.empty:
-        print("❌ ไม่มีข้อมูลสำหรับประมวลผล")
-        sys.exit()
-
-    print(f"📊 ได้รับข้อมูลดิบ: {len(raw_df)} แถว จาก {len(raw_df['StockSymbol'].unique())} หุ้น")
-
-    # ======== TRAINING-COMPATIBLE DATA PROCESSING ========
-    print(f"\n🔧 เริ่มต้นระบบ Training-Compatible Data Processing...")
-    df_processed, training_features = process_data_training_compatible_enhanced(raw_df)
-    
-    print(f"✅ Data processed for training compatibility:")
-    print(f"   📊 Processed rows: {len(df_processed)}")
-    print(f"   🔧 Training-compatible features: {len(training_features)}")
-
-    # ======== TRAINING-COMPATIBLE SCALERS ========
-    print("\n🔧 เริ่มต้นระบบ Training-Compatible Scalers...")
-    print("🔍 DEBUG: กำลังเรียก load_training_scalers()...")
-    ticker_scalers, scalers_loaded = load_training_scalers("../LSTM_model/ticker_scalers.pkl")
-    print(f"🔍 DEBUG: scalers_loaded = {scalers_loaded}")
-    
-    if not scalers_loaded:
-        print("❌ ไม่สามารถโหลด trained scalers ได้!")
-        print("💡 กรุณาเทรนโมเดลใหม่ก่อนใช้งาน:")
-        print("   cd LSTM_model && python LSTM_model.py")
-        print("   cd GRU_Model && python GRU_model.py")
+    lstm_model, (seq_len_lstm, n_feat_lstm) = load_model_checked(LSTM_PATH)
+    gru_model,  (seq_len_gru,  n_feat_gru)  = load_model_checked(GRU_PATH)
+    if (lstm_model is None) or (gru_model is None):
         sys.exit(1)
 
-    # เตรียม prediction dataframe
-    prediction_df = df_processed.copy()
-    
-    if 'Ticker_ID' not in prediction_df.columns:
-        ticker_encoder = LabelEncoder()
-        prediction_df["Ticker_ID"] = ticker_encoder.fit_transform(prediction_df["StockSymbol"])
-    else:
-        ticker_encoder = LabelEncoder()
-        ticker_encoder.fit(prediction_df["StockSymbol"])
-    
-    if 'Market_ID' not in prediction_df.columns:
-        us_stock = ['AAPL', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'TSM', 'AMD']
-        thai_stock = ['ADVANC', 'TRUE', 'DITTO', 'DIF', 'INSET', 'JMART', 'INET', 'JAS', 'HUMAN']
-        prediction_df['Market_ID'] = prediction_df['StockSymbol'].apply(
-            lambda x: 0 if x in us_stock else 1 if x in thai_stock else 2
-        )
-        market_encoder = LabelEncoder()
-        market_encoder.fit(['US', 'TH', 'OTHER'])
-    else:
-        market_encoder = LabelEncoder()
-        market_encoder.fit(prediction_df['Market_ID'].astype(str).unique())
+    # ดึงข้อมูล & กรองตลาด
+    df = fetch_latest_data(engine)
+    if df.empty:
+        sys.exit(0)
+    df = df[df['Market'] == market_filter].copy()
+    if df.empty:
+        print(f"❌ ไม่มีข้อมูลสำหรับตลาด {market_filter}")
+        sys.exit(0)
 
-    # ตรวจสอบ scalers
-    valid_scalers, validation_results = validate_ticker_scalers(
-        ticker_scalers, prediction_df, training_features
-    )
-    
-    if len(valid_scalers) == 0:
-        print("❌ ไม่มี scaler ที่ใช้งานได้")
-        sys.exit()
+    all_syms = df['StockSymbol'].unique().tolist()
+    ticker_le = LabelEncoder().fit(all_syms)
+    df['Ticker_ID'] = ticker_le.transform(df['StockSymbol'])
+    df['Market_ID'] = df['Market'].map(lambda x: 0 if str(x).lower() in ("america","us") else 1 if str(x).lower() in ("thailand","th") else 2)
 
-    print(f"✅ Scalers พร้อมใช้งาน: {len(valid_scalers)} tickers")
+    print(f"✅ Data ready: {len(df)} rows, {df['StockSymbol'].nunique()} tickers (market={market_filter})")
 
-    # ======== 🔄 WALK-FORWARD VALIDATION WITH MINI-RETRAIN ONLY ========
-    print(f"\n🚶 เริ่มต้น Walk-Forward Validation พร้อม Mini-Retrain...")
-    print(f"🔄 ระบบจะ retrain ทุกๆ {RETRAIN_FREQUENCY} วันระหว่างการทำนาย")
-    
-    try:
-        # เทรนโมเดลหลักทั้งคู่พร้อมกัน (LSTM และ GRU) พร้อม chunk_size ที่แตกต่างกัน
-        print(f"🔧 กำลังรัน Walk-Forward Validation พร้อม Mini-Retrain สำหรับทั้ง LSTM และ GRU")
-        print(f"   📦 LSTM chunk_size: 100, GRU chunk_size: 100 (Optimal from hyperparameter tuning)")
-        
-        # เก็บผลลัพธ์จากทั้งสองโมเดล
-        all_walk_predictions = []
-        all_walk_metrics = []
-        
-        models_to_train = [
-            ("LSTM", model_lstm_retrain, 100),   # LSTM ใช้ optimal chunk_size = 100
-            ("GRU", model_gru_retrain, 100)      # GRU ใช้ optimal chunk_size = 100
-        ]
-        
-        for model_name, model, chunk_size in models_to_train:
-            print(f"\n🔧 กำลังประมวลผล {model_name} Model (chunk_size={chunk_size})...")
-            
-            # เรียกใช้ Walk-Forward Validation พร้อม Mini-Retrain สำหรับแต่ละโมเดล
-            walk_predictions_df, walk_metrics = walk_forward_validation_multi_task_batch(
-                model=model,
-                df=prediction_df,
-                feature_columns=training_features,
-                ticker_scalers=valid_scalers,
-                ticker_encoder=ticker_encoder,
-                market_encoder=market_encoder,
-                seq_length=10,
-                retrain_frequency=RETRAIN_FREQUENCY,  # Mini-retrain ทุกๆ 5 วัน
-                chunk_size=chunk_size  # ใช้ chunk_size ที่แตกต่างกันตามโมเดล
-            )
-            
-            if not walk_predictions_df.empty:
-                # เพิ่ม model name และ chunk_size ใน dataframe
-                walk_predictions_df['Model_Type'] = model_name
-                walk_predictions_df['Chunk_Size'] = chunk_size
-                all_walk_predictions.append(walk_predictions_df)
-                
-                # ✅ แก้ไข: ตรวจสอบประเภทของ metrics ก่อน assign
-                processed_metrics = []
-                for metric in walk_metrics:
-                    if isinstance(metric, dict):
-                        metric['Model_Type'] = model_name
-                        metric['Chunk_Size'] = chunk_size
-                        processed_metrics.append(metric)
-                    elif isinstance(metric, str):
-                        # สร้าง dict ใหม่สำหรับ string metrics
-                        print(f"⚠️ Found unexpected metric type in {model_name}: {type(metric)}")
-                        processed_metrics.append({
-                            'unexpected_metric': str(metric),
-                            'Model_Type': model_name,
-                            'Chunk_Size': chunk_size,
-                            'Direction_Accuracy': 0,
-                            'MAE': 0
-                        })
-                
-                all_walk_metrics.extend(processed_metrics)
-                
-                print(f"✅ {model_name} Walk-Forward Validation เสร็จสิ้น:")
-                print(f"   📊 Predictions: {len(walk_predictions_df)}")
-                print(f"   📈 Metrics: {len(processed_metrics)}")
-            else:
-                print(f"⚠️ {model_name}: ไม่มีข้อมูลผลลัพธ์")
-        
-        # รวมผลลัพธ์จากทั้งสองโมเดล
-        if all_walk_predictions:
-            combined_walk_df = pd.concat(all_walk_predictions, ignore_index=True)
-            combined_walk_df.to_csv('combined_walk_forward_predictions.csv', index=False)
-            print(f"💾 บันทึกผลลัพธ์รวม: {len(combined_walk_df)} predictions")
-            
-            # สรุปผลตามโมเดล
-            print(f"\n📊 สรุปผลลัพธ์ Walk-Forward Validation:")
-            for model_name in ['LSTM', 'GRU']:
-                model_data = combined_walk_df[combined_walk_df['Model_Type'] == model_name]
-                if not model_data.empty:
-                    avg_acc = model_data.groupby('Ticker')['Actual_Dir'].count().mean()
-                    print(f"   {model_name}: {len(model_data)} predictions, avg per stock: {avg_acc:.1f}")
-        
-        # บันทึก metrics รวม
-        if all_walk_metrics:
-            metrics_df = pd.DataFrame(all_walk_metrics)
-            metrics_df.to_csv('combined_walk_forward_metrics.csv', index=False)
-            print(f"💾 บันทึก metrics รวม: {len(metrics_df)} metrics")
-        
-        # ======== 📅 บันทึกวันที่หลังจาก Walk-Forward Validation เสร็จ ========
-        try:
-            current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            with open('last_retrain_walkforward.txt', 'w', encoding='utf-8') as f:
-                f.write(f"Last Walk-Forward Validation: {current_time}\n")
-                f.write(f"LSTM Model: {'✅ Success' if model_lstm_retrain else '❌ Failed'}\n")
-                f.write(f"GRU Model: {'✅ Success' if model_gru_retrain else '❌ Failed'}\n")
-                f.write(f"Total Predictions: {len(combined_walk_df) if 'combined_walk_df' in locals() else 0}\n")
-                f.write(f"Total Metrics: {len(metrics_df) if 'metrics_df' in locals() else 0}\n")
-            print(f"📅 บันทึกวันที่ Walk-Forward Validation: {current_time}")
-        except Exception as log_e:
-            print(f"⚠️ ไม่สามารถบันทึกวันที่ Walk-Forward Validation: {log_e}")
-        
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดใน Walk-Forward Validation: {e}")
-        import traceback
-        traceback.print_exc()
+    seq_len = seq_len_lstm or 10
+    n_features = n_feat_lstm or len(FEATURE_COLUMNS)
 
-    # ======== 🎯 ENSEMBLE PREDICTION FOR LATEST DATA ========
-    print(f"\n🎯 เริ่มต้นการทำนายล่าสุดด้วย Enhanced Ensemble...")
-    
-    try:
-        # โหลดโมเดลสำหรับ prediction (ไม่ต้อง compile)
-        model_lstm_pred = manager.load_models_for_prediction(model_path=MODEL_LSTM_PATH, compile_model=False)
-        model_gru_pred = manager.load_models_for_prediction(model_path=MODEL_GRU_PATH, compile_model=False)
-        
-        if model_lstm_pred is None or model_gru_pred is None:
-            print("❌ ไม่สามารถโหลดโมเดลสำหรับ prediction ได้")
+    # ============= Mini-retrain phase (ก่อน inference) =============
+    if ENABLE_MINI_RETRAIN:
+        today = datetime.now().date()
+        total_trained = 0
+        for sym in all_syms:
+            if not due_for_retrain(sym, state, today, MINI_RETRAIN_EVERY_DAYS):
+                continue
+            g = df[df['StockSymbol']==sym].sort_values("Date").copy()
+            if len(g) < seq_len + 1:
+                continue
+            t_id = int(g.iloc[-1]['Ticker_ID'])
+            sc = ticker_scalers.get(t_id) or ticker_scalers.get(sym)
+            if not sc: continue
+            feature_scaler = sc.get('feature_scaler'); price_scaler = sc.get('price_scaler')
+            if feature_scaler is None or price_scaler is None: continue
+            market_id = int(g.iloc[-1]['Market_ID'])
+            n_used = mini_retrain_for_ticker(sym, g, t_id, market_id, feature_scaler, price_scaler,
+                                             seq_len, lstm_model, gru_model)
+            if n_used >= MINI_RETRAIN_MIN_SAMPLES:
+                mark_retrained(sym, state, today)
+                total_trained += 1
+                print(f"🔄 mini-retrain {sym}: {n_used} samples")
+        if total_trained > 0:
+            save_state(STATE_PATH, state)
+            if SAVE_MINI_MODELS:
+                stamp = today.strftime("%Y%m%d")
+                lstm_out = os.path.join(os.path.dirname(LSTM_PATH), f"best_v6_plus_minimal_tuning_v2_final_model_mini_{market_filter}_{stamp}.keras")
+                gru_out  = os.path.join(os.path.dirname(GRU_PATH),  f"best_v6_plus_minimal_tuning_v2_final_model_mini_{market_filter}_{stamp}.keras")
+                try:
+                    lstm_model.save(lstm_out)
+                    gru_model.save(gru_out)
+                    print(f"💾 Saved mini LSTM → {os.path.basename(lstm_out)}")
+                    print(f"💾 Saved mini GRU  → {os.path.basename(gru_out)}")
+                except Exception as e:
+                    print(f"⚠️ save mini models failed: {e}")
         else:
-            print("✅ โหลดโมเดลสำหรับ prediction สำเร็จ")
-            
-            # ทำนายด้วย training-compatible scalers
-            print("🔧 ทำนายด้วย Training-Compatible Scalers...")
-            future_predictions = predict_with_training_compatible_scalers(
-                model_lstm=model_lstm_pred,
-                model_gru=model_gru_pred, 
-                df=prediction_df,
-                feature_columns=training_features,
-                ticker_scalers=valid_scalers,
-                ticker_encoder=ticker_encoder,
-                market_encoder=market_encoder,
-                seq_length=10
-            )
-            
-            if not future_predictions.empty:
-                print(f"✅ ได้ผลการทำนาย: {len(future_predictions)} หุ้น")
-                
-                # บันทึกผลการทำนาย
-                future_predictions.to_csv('latest_ensemble_predictions.csv', index=False)
-                print("💾 บันทึกผลการทำนายล่าสุด: latest_ensemble_predictions.csv")
-                
-                # แสดงสรุปผลการทำนาย
-                print(f"\n📊 สรุปผลการทำนายล่าสุด:")
-                print(f"   📈 หุ้นที่ทำนายขึ้น: {len(future_predictions[future_predictions['Ensemble_Direction'] == 1])}")
-                print(f"   📉 หุ้นที่ทำนายลง: {len(future_predictions[future_predictions['Ensemble_Direction'] == 0])}")
-                print(f"   🎯 ความเชื่อมั่นเฉลี่ย: {future_predictions['Confidence'].mean():.3f}")
-                
-                # แสดงหุ้นที่มีความเชื่อมั่นสูง
-                high_confidence = future_predictions[future_predictions['Confidence'] > 0.7]
-                if not high_confidence.empty:
-                    print(f"\n🎯 หุ้นที่มีความเชื่อมั่นสูง (>70%):")
-                    for _, stock in high_confidence.iterrows():
-                        direction = "📈 UP" if stock['Ensemble_Direction'] == 1 else "📉 DOWN"
-                        print(f"   {stock['StockSymbol']}: {direction} "
-                              f"(Price: {stock['Current_Price']:.2f} → {stock['Ensemble_Price']:.2f}, "
-                              f"Change: {stock['Ensemble_Change_Pct']:+.2f}%, "
-                              f"Confidence: {stock['Confidence']:.3f})")
-                
-                # # บันทึกลงฐานข้อมูล
-                # print(f"\n💾 บันทึกผลการทำนายลงฐานข้อมูล...")
-                # save_success = save_predictions_simple(future_predictions)
-                # if save_success:
-                #     print("✅ บันทึกลงฐานข้อมูลสำเร็จ")
-                # else:
-                #     print("⚠️ บันทึกลงฐานข้อมูลไม่สำเร็จ")
-                
-                # ======== 🧠 XGBoost META-LEARNER ENSEMBLE ========
-                print(f"\n🧠 เริ่มต้น Enhanced XGBoost Meta-Learner...")
-                
-                # เตรียมข้อมูลสำหรับ Meta-Learner
-                latest_data_with_predictions = raw_df.copy()
-                
-                # Map predictions กลับไปยัง raw data
-                prediction_map = {}
-                for _, pred in future_predictions.iterrows():
-                    prediction_map[pred['StockSymbol']] = {
-                        'PredictionClose_LSTM': pred['LSTM_Price'],
-                        'PredictionTrend_LSTM': pred['LSTM_Direction'],
-                        'PredictionClose_GRU': pred['GRU_Price'],
-                        'PredictionTrend_GRU': pred['GRU_Direction']
-                    }
-                
-                # เพิ่ม predictions เข้าไปใน dataframe ด้วย column names ที่ XGBoost ต้องการ
-                latest_data_with_predictions['Predicted_Price_LSTM'] = latest_data_with_predictions['StockSymbol'].map(
-                    lambda x: prediction_map.get(x, {}).get('PredictionClose_LSTM', np.nan)
-                )
-                latest_data_with_predictions['Predicted_Price_GRU'] = latest_data_with_predictions['StockSymbol'].map(
-                    lambda x: prediction_map.get(x, {}).get('PredictionClose_GRU', np.nan)
-                )
-                latest_data_with_predictions['Predicted_Dir_LSTM'] = latest_data_with_predictions['StockSymbol'].map(
-                    lambda x: prediction_map.get(x, {}).get('PredictionTrend_LSTM', np.nan)
-                )
-                latest_data_with_predictions['Predicted_Dir_GRU'] = latest_data_with_predictions['StockSymbol'].map(
-                    lambda x: prediction_map.get(x, {}).get('PredictionTrend_GRU', np.nan)
-                )
-                
-                # กรองเฉพาะข้อมูลล่าสุดที่มี predictions
-                latest_date = latest_data_with_predictions['Date'].max()
-                latest_data_filtered = latest_data_with_predictions[
-                    (latest_data_with_predictions['Date'] == latest_date) &
-                    (latest_data_with_predictions['Predicted_Price_LSTM'].notna()) &
-                    (latest_data_with_predictions['Predicted_Price_GRU'].notna())
-                ].copy()
-                
-                if not latest_data_filtered.empty:
-                    print(f"🔧 ข้อมูลสำหรับ Meta-Learner: {len(latest_data_filtered)} หุ้น")
-                    
-                    # รัน Enhanced XGBoost Meta-Learner
-                    enhanced_results = meta_learner.predict_meta(latest_data_filtered)
-                    
-                    if meta_learner.validate_predictions(enhanced_results):
-                        print("✅ Enhanced XGBoost Meta-Learner เสร็จสิ้น!")
-                        
-                        # บันทึกผลลัพธ์ Enhanced
-                        enhanced_results.to_csv('enhanced_meta_predictions.csv', index=False)
-                        print("💾 บันทึกผลลัพธ์ Enhanced: enhanced_meta_predictions.csv")
-                        
-                        # แสดงสรุปผล Enhanced
-                        xgb_results = enhanced_results[enhanced_results['XGB_Predicted_Price'].notna()]
-                        if not xgb_results.empty:
-                            print(f"\n🧠 สรุปผล Enhanced Meta-Learner:")
-                            print(f"   📊 หุ้นที่ประมวลผล: {len(xgb_results)}")
-                            print(f"   📈 ทิศทางขึ้น: {len(xgb_results[xgb_results['XGB_Predicted_Direction'] == 1])}")
-                            print(f"   📉 ทิศทางลง: {len(xgb_results[xgb_results['XGB_Predicted_Direction'] == 0])}")
-                            print(f"   🎯 ความเชื่อมั่นเฉลี่ย: {xgb_results['XGB_Confidence'].mean():.3f}")
-                            print(f"   ⚖️ GRU Dominance เฉลี่ย: {xgb_results['GRU_Dominance'].mean():.1%}")
-                            
-                            # แสดงแนะนำการลงทุน
-                            high_confidence_meta = xgb_results[xgb_results['XGB_Confidence'] > 0.6]
-                            if not high_confidence_meta.empty:
-                                print(f"\n🎯 แนะนำการลงทุนจาก Enhanced Meta-Learner (Confidence > 60%):")
-                                for _, stock in high_confidence_meta.iterrows():
-                                    action_icon = {"CONSIDER": "✅", "CAUTION": "⚠️", "AVOID": "❌", "HIGH_RISK": "🔴"}.get(
-                                        stock.get('Suggested_Action', 'UNKNOWN'), "❓"
-                                    )
-                                    direction = "📈 UP" if stock['XGB_Predicted_Direction'] == 1 else "📉 DOWN"
-                                    print(f"   {stock['StockSymbol']}: {direction} "
-                                          f"(Price: {stock['Close']:.2f} → {stock['XGB_Predicted_Price']:.2f}, "
-                                          f"Change: {stock.get('Price_Change_Percent', 0):+.2f}%, "
-                                          f"Confidence: {stock['XGB_Confidence']:.3f}) "
-                                          f"{action_icon} {stock.get('Suggested_Action', 'UNKNOWN')}")
-                        else:
-                            print("⚠️ ไม่มีผลลัพธ์จาก Enhanced Meta-Learner")
-                    else:
-                        print("❌ Enhanced Meta-Learner validation failed")
-                else:
-                    print("⚠️ ไม่มีข้อมูลล่าสุดสำหรับ Meta-Learner")
-            else:
-                print("❌ ไม่ได้ผลการทำนาย")
-        
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการทำนายล่าสุด: {e}")
-        import traceback
-        traceback.print_exc()
+            print("ℹ️ ไม่มีสัญลักษณ์ครบกำหนด mini-retrain วันนี้")
+    else:
+        print("ℹ️ Mini-retrain disabled (ENABLE_MINI_RETRAIN=0)")
 
-    # ======== 📊 FINAL SUMMARY & CLEANUP ========
-    print(f"\n" + "="*80)
-    print(f"🎉 สรุปผลการดำเนินงานทั้งหมด")
-    print(f"="*80)
-    
-    print(f"✅ ระบบ Walk-Forward Validation พร้อม Mini-Retrain")
-    print(f"   🔄 Retrain ทุกๆ {RETRAIN_FREQUENCY} วัน")
-    print(f"   📦 Chunk sizes: LSTM=90, GRU=200")
-    
-    print(f"✅ Training-Compatible Scalers")
-    print(f"   📊 Scalers ที่ใช้งานได้: {len(valid_scalers)} tickers")
-    
-    print(f"✅ Enhanced Ensemble Prediction")
-    print(f"   🧠 Meta-Learner: {meta_learner.get_model_status()}")
-    
-    # ตรวจสอบไฟล์ที่สร้าง
-    output_files = [
-        'predictions_chunk_walkforward.csv',
-        'chunk_metrics.csv', 
-        'overall_metrics_per_ticker.csv',
-        'combined_walk_forward_predictions.csv',
-        'combined_walk_forward_metrics.csv',
-        'latest_ensemble_predictions.csv',
-        'enhanced_meta_predictions.csv'
-    ]
-    
-    print(f"\n📁 ไฟล์ผลลัพธ์ที่สร้าง:")
-    for file in output_files:
-        if os.path.exists(file):
-            size = os.path.getsize(file)
-            print(f"   ✅ {file} ({size:,} bytes)")
-        else:
-            print(f"   ❌ {file} (ไม่พบไฟล์)")
-    
-    print(f"\n🚀 ระบบทำงานเสร็จสิ้นสมบูรณ์!")
-    print(f"💡 สามารถตรวจสอบผลลัพธ์ได้จากไฟล์ CSV ที่สร้างขึ้น")
-    print(f"📊 สำหรับการวิเคราะห์เพิ่มเติม ให้ดูที่ enhanced_meta_predictions.csv")
-    
-    # Cleanup memory
-    try:
-        import gc
-        del model_lstm_retrain, model_gru_retrain
-        if 'model_lstm_pred' in locals():
-            del model_lstm_pred, model_gru_pred
-        gc.collect()
-        print(f"🧹 ทำความสะอาด memory เสร็จสิ้น")
-    except:
-        pass
-    
-    # ======== 📅 บันทึกวันที่ Retrain ล่าสุด ========
-    try:
-        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # บันทึกวันที่ retrain ล่าสุด
-        with open('last_retrain_model.txt', 'w', encoding='utf-8') as f:
-            f.write(f"Last Retrain: {current_time}\n")
-            f.write(f"LSTM Retrain Frequency: {RETRAIN_FREQUENCY} days\n")
-            f.write(f"GRU Retrain Frequency: {RETRAIN_FREQUENCY} days\n")
-            f.write(f"Valid Scalers: {len(valid_scalers)} tickers\n")
-            f.write(f"Meta-Learner Status: {meta_learner.get_model_status()}\n")
-        
-        print(f"📅 บันทึกวันที่ retrain ล่าสุด: {current_time}")
-        print(f"💾 ไฟล์: last_retrain_model.txt")
-        
-        # บันทึกรายละเอียดการ retrain ลงไฟล์ log
-        log_file = f"retrain_logs/retrain_log_model_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-        os.makedirs('retrain_logs', exist_ok=True)
-        
-        retrain_log = pd.DataFrame({
-            'Retrain_Date': [current_time],
-            'LSTM_Retrain_Frequency': [RETRAIN_FREQUENCY],
-            'GRU_Retrain_Frequency': [RETRAIN_FREQUENCY], 
-            'Valid_Scalers_Count': [len(valid_scalers)],
-            'Meta_Learner_Status': [meta_learner.get_model_status()],
-            'Output_Files_Generated': [len([f for f in output_files if os.path.exists(f)])],
-            'Total_Output_Files': [len(output_files)]
+    # ===================== Inference phase =======================
+    latest = df.groupby("StockSymbol").tail(1).reset_index(drop=True)
+    per_ticker_rows = []
+
+    for sym in all_syms:
+        g = df[df['StockSymbol']==sym].sort_values("Date")
+        if len(g) < seq_len: continue
+        t_id = int(g.iloc[-1]['Ticker_ID'])
+        sc = ticker_scalers.get(t_id) or ticker_scalers.get(sym)
+        if not sc: continue
+        feature_scaler = sc.get('feature_scaler'); price_scaler   = sc.get('price_scaler')
+        if feature_scaler is None or price_scaler is None: continue
+
+        chunk = g.tail(seq_len).copy()
+        feat_df = chunk.loc[:, [c for c in FEATURE_COLUMNS if c in chunk.columns]].copy()
+        feat_df = align_features_to_scaler(feat_df, feature_scaler)
+        feat_arr = feature_scaler.transform(feat_df.values.astype(np.float32))
+
+        X_feat   = feat_arr.reshape(1, seq_len, -1).astype(np.float32)
+        X_ticker = np.full((1, seq_len), t_id, dtype=np.int32)
+        market_id = int(chunk.iloc[-1]['Market_ID'])
+        X_market = np.full((1, seq_len), market_id, dtype=np.int32)
+        cur_price = float(chunk.iloc[-1]['Close'])
+
+        # Predict LSTM/GRU
+        lstm_out = lstm_model.predict([X_feat, X_ticker, X_market], verbose=0)
+        lstm_price_scaled = float(np.squeeze(lstm_out[0])); lstm_prob = float(np.squeeze(lstm_out[1]))
+        gru_out  = gru_model.predict([X_feat, X_ticker, X_market], verbose=0)
+        gru_price_scaled  = float(np.squeeze(gru_out[0]));  gru_prob  = float(np.squeeze(gru_out[1]))
+
+        try: inv_lstm_raw = float(price_scaler.inverse_transform(np.array(lstm_price_scaled).reshape(-1,1))[0,0])
+        except Exception: inv_lstm_raw = float(lstm_price_scaled)
+        try: inv_gru_raw  = float(price_scaler.inverse_transform(np.array(gru_price_scaled).reshape(-1,1))[0,0])
+        except Exception: inv_gru_raw  = float(gru_price_scaled)
+
+        row_ctx = latest[latest['StockSymbol']==sym].iloc[0].to_dict()
+        lstm_price, lstm_mode, cap_pct1, lstm_clip, lstm_raw_price = choose_price_from_candidates(sym, cur_price, inv_lstm_raw, row_ctx)
+        gru_price,  gru_mode,  cap_pct2, gru_clip,  gru_raw_price  = choose_price_from_candidates(sym, cur_price, inv_gru_raw,  row_ctx)
+        cap_pct = max(cap_pct1, cap_pct2)
+
+        # ทิศทาง LSTM/GRU
+        l_dir_price, l_dir_prob, l_eps, l_margin = compute_dirs(cur_price, lstm_price, lstm_prob)
+        g_dir_price, g_dir_prob, g_eps, g_margin = compute_dirs(cur_price, gru_price,  gru_prob)
+
+        per_ticker_rows.append({
+            "ticker": sym,
+            "cur": cur_price,
+            "lstm_price": lstm_price,
+            "gru_price":  gru_price,
+            "lstm_prob":  lstm_prob,
+            "gru_prob":   gru_prob,
+            "cap_pct": cap_pct,
+            "lstm_clip": lstm_clip,
+            "gru_clip":  gru_clip,
+            "lstm_mode": lstm_mode, "gru_mode":  gru_mode,
+            "lstm_raw_price": lstm_raw_price, "gru_raw_price":  gru_raw_price,
+            "inv_lstm_raw": inv_lstm_raw, "inv_gru_raw":  inv_gru_raw,
+            "lstm_dir_price": l_dir_price, "lstm_dir_prob": l_dir_prob, "lstm_eps": l_eps, "lstm_margin": l_margin,
+            "gru_dir_price":  g_dir_price, "gru_dir_prob":  g_dir_prob, "gru_eps":  g_eps,  "gru_margin":  g_margin,
         })
-        
-        retrain_log.to_csv(log_file, index=False)
-        print(f"📊 บันทึก retrain log: {log_file}")
-        
+
+    # XGB meta (raw)
+    meta = XGBMeta()
+    meta_in = [{
+        "cur": r["cur"], "lstm_price": r["lstm_price"], "gru_price":  r["gru_price"],
+        "lstm_prob":  r["lstm_prob"], "gru_prob":   r["gru_prob"],
+    } for r in per_ticker_rows]
+    meta_out = meta.predict(meta_in)
+
+    # Post-process: cap + enforce (Neutral-first guard)
+    out_rows = []
+    for i, r in enumerate(per_ticker_rows):
+        m = meta_out[i]; cur = r['cur']
+        xgb_price_raw = float(m['xgb_price_raw']); p_up_raw = float(m['xgb_prob_raw']); dir_raw = int(m['xgb_dir_prob'])
+        cap_pct_xgb = r['cap_pct'] * float(XGB_CAP_SCALE)
+        if APPLY_XGB_CAP: xgb_price_cap, xgb_clipped = apply_cap(cur, xgb_price_raw, cap_pct_xgb)
+        else:             xgb_price_cap, xgb_clipped = xgb_price_raw, False
+
+        # ทิศทาง XGB จากราคา (ก่อน/หลัง cap)
+        x_dir_price_raw, _, x_eps_raw, _ = compute_dirs(cur, xgb_price_raw, p_up_raw)
+        x_dir_price_cap, _, x_eps_cap, _ = compute_dirs(cur, xgb_price_cap, p_up_raw)
+
+        # ENFORCE (guard: flip ได้เมื่อ prob อ่อน)
+        p_up_final = p_up_raw
+        dir_final = dir_raw
+        enforced_flip = 0
+
+        if ENFORCE_DIR_BY_PRICE:
+            eps = max(EPS_MIN, EPS_FRAC * max(abs(r['lstm_price']-cur), abs(r['gru_price']-cur))/max(cur,1e-9))
+            eps = float(np.clip(eps, EPS_MIN, EPS_MAX))
+            pred_dir_price = 1 if xgb_price_cap >= cur*(1.0+eps) else 0 if xgb_price_cap <= cur*(1.0-eps) else dir_raw
+
+            prob_margin = abs(p_up_raw - 0.5)
+            only_flip_if = (prob_margin < ONLY_FLIP_IF_MARGIN_LT)
+
+            if pred_dir_price in (0,1):
+                if pred_dir_price != dir_raw:
+                    if only_flip_if:
+                        p_up_final = 0.5 + 0.5*(p_up_raw - 0.5) if pred_dir_price == 1 else 0.5 - 0.5*(p_up_raw - 0.5)
+                        dir_final = pred_dir_price
+                        enforced_flip = 1
+                    else:
+                        dir_final = dir_raw  # block flip
+                else:
+                    dir_final = pred_dir_price  # เหมือนเดิม
+
+        conf_final = abs(p_up_final - 0.5) * 2.0
+        delta_final = (xgb_price_cap/cur - 1.0) if cur>0 else 0.0
+        score_final = abs(delta_final) * conf_final
+
+        merged = {
+            **r,
+            "xgb_price_raw": xgb_price_raw, "xgb_price_cap": xgb_price_cap, "xgb_clip": xgb_clipped,
+            "cap_pct_xgb": cap_pct_xgb,
+            "xgb_prob_raw": p_up_raw, "xgb_prob": p_up_final, "xgb_conf": conf_final,
+            "xgb_dir_raw": dir_raw, "xgb_dir": dir_final,
+            "xgb_dir_by_price_raw": x_dir_price_raw,
+            "xgb_dir_by_price_cap": x_dir_price_cap,
+            "xgb_eps_raw": x_eps_raw, "xgb_eps_cap": x_eps_cap,
+            "xgb_enforced_flip": enforced_flip,
+            "pred_change": m.get('pred_change', (xgb_price_raw/cur - 1.0) if cur>0 else 0.0),
+            "policy_version": POLICY_VERSION, "score": score_final,
+        }
+        out_rows.append(merged)
+
+    # ===== CSV =====
+    csv_simple = []
+    csv_detail = []
+    up = down = 0
+    conf_sum = 0.0
+
+    for r in out_rows:
+        sym = r["ticker"]; cur = r["cur"]
+        price_raw = r["xgb_price_raw"]; price_cap = r["xgb_price_cap"]
+        dir_f = r["xgb_dir"]; prob_f = r["xgb_prob"]; conf_f = r["xgb_conf"]
+        delta_pct_final = (price_cap/cur - 1.0) if cur>0 else 0.0
+        if dir_f == 1: up += 1
+        else: down += 1
+        conf_sum += conf_f
+
+        csv_simple.append({
+            "Policy_Version": POLICY_VERSION, "StockSymbol": sym, "Current_Price": cur,
+            "Predicted_Price": price_cap, "Predicted_Direction": dir_f,
+            "Direction_Probability": prob_f, "Confidence": conf_f,
+            "Score": abs(delta_pct_final) * conf_f,
+            "Date": (datetime.now().date() + timedelta(days=1)).strftime("%Y-%m-%d")
+        })
+        csv_detail.append({
+            "Policy_Version": POLICY_VERSION, "StockSymbol": sym, "Cur": cur,
+
+            "LSTM_RawInverse": r["inv_lstm_raw"], "GRU_RawInverse": r["inv_gru_raw"],
+            "LSTM_CandidateRaw": r["lstm_raw_price"], "GRU_CandidateRaw": r["gru_raw_price"],
+            "LSTM_Mode": r["lstm_mode"], "GRU_Mode": r["gru_mode"],
+            "LSTM_Price": r["lstm_price"], "GRU_Price": r["gru_price"],
+            "LSTM_Clipped": int(r.get("lstm_clip", False)), "GRU_Clipped": int(r.get("gru_clip", False)),
+
+            "LSTM_Dir_ByPrice": r.get("lstm_dir_price", None),
+            "LSTM_Dir_ByProb":  r.get("lstm_dir_prob",  None),
+            "LSTM_Eps":         r.get("lstm_eps",        None),
+            "LSTM_Prob_Margin": r.get("lstm_margin",    None),
+            "GRU_Dir_ByPrice":  r.get("gru_dir_price",  None),
+            "GRU_Dir_ByProb":   r.get("gru_dir_prob",   None),
+            "GRU_Eps":          r.get("gru_eps",        None),
+            "GRU_Prob_Margin":  r.get("gru_margin",     None),
+
+            "XGB_Price_Raw": price_raw, "XGB_Price_Capped": price_cap, "XGB_Clipped": int(r.get("xgb_clip", False)),
+            "XGB_Prob_Raw": r["xgb_prob_raw"], "XGB_Prob_Final": prob_f,
+            "XGB_Dir_Raw": r["xgb_dir_raw"], "XGB_Dir_Final": dir_f, "XGB_Conf_Final": conf_f,
+            "XGB_Dir_ByPrice_Raw": r.get("xgb_dir_by_price_raw", None),
+            "XGB_Dir_ByPrice_Cap": r.get("xgb_dir_by_price_cap", None),
+            "XGB_Eps_Raw": r.get("xgb_eps_raw", None),
+            "XGB_Eps_Cap": r.get("xgb_eps_cap", None),
+            "XGB_Enforced_Flip": r.get("xgb_enforced_flip", 0),
+
+            "DeltaPct_Raw": (price_raw/cur - 1.0) if cur>0 else 0.0,
+            "DeltaPct_Final": delta_pct_final,
+            "Cap_pct_LSTM_GRU": r["cap_pct"], "Cap_pct_XGB": r["cap_pct_xgb"],
+            "Score": abs(delta_pct_final) * conf_f,
+            "Date": (datetime.now().date() + timedelta(days=1)).strftime("%Y-%m-%d")
+        })
+
+    pred_df = pd.DataFrame(csv_simple)
+    det_df  = pd.DataFrame(csv_detail)
+    pred_path = os.path.join(BASE_DIR, "latest_ensemble_predictions.csv")
+    det_path  = os.path.join(BASE_DIR, "latest_ensemble_predictions_detailed.csv")
+    pred_df.to_csv(pred_path, index=False)
+    det_df.to_csv(det_path, index=False)
+    print(f"💾 Saved {os.path.basename(pred_path)} ({len(pred_df)} rows)")
+    print(f"💾 Saved {os.path.basename(det_path)}")
+
+    avg_conf = conf_sum / max(len(out_rows), 1)
+    print(f"📊 Summary: UP={up} DOWN={down} | Avg confidence={avg_conf:.3f}")
+    rows_sorted = sorted(out_rows, key=lambda x: x['xgb_conf'], reverse=True)
+    print_per_ticker_table(rows_sorted)
+    print_direction_diagnostics(rows_sorted)
+
+    # ===== บันทึกลง DB: ให้เป็น T+1 =====
+    try:
+        latest_map = latest.set_index('StockSymbol')['Date'].dt.date.to_dict()
+        db_rows = []
+        for r in out_rows:
+            sym = r['ticker']
+            d_base = latest_map.get(sym, datetime.now().date())   # วันล่าสุดจริงใน DB
+            d = d_base + timedelta(days=1)                        # → T+1
+            db_rows.append({
+                'Date': d,
+                'StockSymbol': sym,
+                'LSTM_Price': float(r['lstm_price']),
+                'LSTM_Direction': int(float(r['lstm_prob']) >= 0.5),
+                'GRU_Price': float(r['gru_price']),
+                'GRU_Direction': int(float(r['gru_prob']) >= 0.5),
+                'Ensemble_Price': float(r['xgb_price_cap']),
+                'Ensemble_Direction': int(r['xgb_dir']),
+            })
+        predictions_db_df = pd.DataFrame(db_rows)
+        ok = save_predictions_simple(predictions_db_df, engine)
+        print("💽 DB upsert status:", "OK" if ok else "FAILED")
     except Exception as e:
-        print(f"⚠️ ไม่สามารถบันทึกวันที่ retrain ได้: {e}")
-    
-    print(f"🎯 ระบบพร้อมสำหรับการใช้งานครั้งต่อไป!")
+        print(f"⚠️ ข้ามการบันทึก DB เพราะพบข้อผิดพลาดในการเตรียมข้อมูล: {e}")
+
+    print("✅ Done.")

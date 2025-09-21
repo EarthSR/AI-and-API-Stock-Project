@@ -1,0 +1,44 @@
+{
+  "tickers": {
+    "AAPL": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "AMD": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "AMZN": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "AVGO": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "GOOGL": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "META": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "MSFT": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "NVDA": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "TSLA": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "TSM": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    }
+  }
+}

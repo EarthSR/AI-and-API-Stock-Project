@@ -1,0 +1,10 @@
+import subprocess
+import os
+
+base = r"C:\Users\Earth\Documents\AI-and-API-Stock-Project"  # ใช้ชื่อโฟลเดอร์จริง
+
+# Run LSTM
+subprocess.run(["python", "LSTM_model.py"], cwd=os.path.join(base, "LSTM_model"))
+
+# Run GRU
+subprocess.run(["python", "GRU_model.py"], cwd=os.path.join(base, "GRU_Model"))
