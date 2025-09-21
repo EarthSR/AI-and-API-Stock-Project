@@ -2340,7 +2340,7 @@ app.get('/api/price/:market/:symbol', async (req, res) => {
     res.status(500).json({ detail: 'ไม่สามารถดึงราคาได้: ' + e.message });
   }
 });
-
+  
 // Helper function to get THB to USD exchange rate
 async function getThbToUsdRate() {
   try {
@@ -3489,6 +3489,122 @@ app.get("/api/model-performance", async (req, res) => {
     };
 
     res.json({ data: rows, performance });
+});
+
+// ===================================================================================== //
+// API: MARKET MOVERS BY RANGE (เปอร์เซ็นต์เปลี่ยนแปลงตามช่วงเวลา)
+// ใช้ market=Thailand|America + timeframe=5D|1M|3M|6M|1Y|ALL
+// หรือกำหนดช่วงเอง: from=YYYY-MM-DD&to=YYYY-MM-DD
+// Optional: limitSymbols (default 1000, max 5000)
+// ===================================================================================== //
+app.get("/api/market-movers/range", verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const market = (req.query.market || "").trim();
+    const timeframe = (req.query.timeframe || "").toUpperCase(); // 5D,1M,3M,6M,1Y,ALL
+    let from = (req.query.from || "").trim();
+    let to   = (req.query.to || "").trim();
+    const limitSymbols = Math.min(Math.max(parseInt(req.query.limitSymbols) || 1000, 1), 5000);
+
+    if (!market || !["Thailand","America"].includes(market)) {
+      return res.status(400).json({ error: "market is required: Thailand | America" });
+    }
+
+    // map timeframe -> จำนวน "วันเทรดจริง (distinct DATE)" ล่าสุด
+    const TF_LIMIT = { "5D": 5, "1M": 22, "3M": 66, "6M": 132, "1Y": 252, "ALL": null };
+
+    // ถ้าไม่ส่ง from/to ให้คำนวณจาก timeframe
+    if (!from || !to) {
+      const tf = TF_LIMIT.hasOwnProperty(timeframe) ? timeframe : "1M";
+      if (TF_LIMIT[tf] === null) {
+        // ALL = ทั้งหมดใน market นั้น
+        const [mm] = await db.query(
+          `
+          SELECT MIN(DATE(sd.Date)) AS minD, MAX(DATE(sd.Date)) AS maxD
+          FROM stockdetail sd
+          JOIN stock s ON s.StockSymbol = sd.StockSymbol
+          WHERE s.Market = ? AND sd.Volume > 0
+          `,
+          [market]
+        );
+        from = mm?.[0]?.minD;
+        to   = mm?.[0]?.maxD;
+      } else {
+        const N = TF_LIMIT[tf];
+        const [days] = await db.query(
+          `
+          SELECT d FROM (
+            SELECT DISTINCT DATE(sd.Date) AS d
+            FROM stockdetail sd
+            JOIN stock s ON s.StockSymbol = sd.StockSymbol
+            WHERE s.Market = ? AND sd.Volume > 0
+            ORDER BY d DESC
+            LIMIT ?
+          ) t
+          ORDER BY d ASC
+          `,
+          [market, N]
+        );
+        if (!days.length) return res.status(200).json({ message: "no trading days", data: [] });
+        from = days[0].d;
+        to   = days[days.length - 1].d;
+      }
+    }
+
+    if (!from || !to) {
+      return res.status(400).json({ error: "unable to resolve date range; please provide from & to" });
+    }
+
+    // ดึง first/last close ต่อสัญลักษณ์ในช่วง (กรอง Volume > 0)
+    const [rows] = await db.query(
+      `
+      SELECT 
+        s.StockSymbol,
+        (SELECT DATE(sd.Date) FROM stockdetail sd
+          WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
+            AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date ASC  LIMIT 1) AS firstDate,
+        (SELECT sd.ClosePrice FROM stockdetail sd
+          WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
+            AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date ASC  LIMIT 1) AS firstClose,
+        (SELECT DATE(sd.Date) FROM stockdetail sd
+          WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
+            AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date DESC LIMIT 1) AS lastDate,
+        (SELECT sd.ClosePrice FROM stockdetail sd
+          WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
+            AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date DESC LIMIT 1) AS lastClose
+      FROM stock s
+      WHERE s.Market = ?
+      ORDER BY s.StockSymbol
+      LIMIT ?
+      `,
+      [from, to, from, to, from, to, from, to, market, limitSymbols]
+    );
+
+    const data = rows
+      .filter(r => r.firstClose != null && r.lastClose != null)
+      .map(r => {
+        const first = Number(r.firstClose);
+        const last  = Number(r.lastClose);
+        const changePct = first ? ((last - first) / first) * 100 : null;
+        return { StockSymbol: r.StockSymbol, firstDate: r.firstDate, lastDate: r.lastDate, firstClose: first, lastClose: last, changePct };
+      });
+
+    // คืนลิสต์เต็ม + ลิสต์เรียงสองทาง
+    const topGainers = [...data].sort((a,b)=> (b.changePct ?? -Infinity) - (a.changePct ?? -Infinity));
+    const topLosers  = [...data].sort((a,b)=> (a.changePct ??  Infinity) - (b.changePct ??  Infinity));
+
+    return res.status(200).json({
+      message: "OK",
+      market,
+      range: { from, to },
+      count: data.length,
+      data,
+      sorted: { topGainers, topLosers }
+    });
+  } catch (err) {
+    console.error("error /api/market-movers/range:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 
