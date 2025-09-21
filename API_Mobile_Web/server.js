@@ -3235,23 +3235,25 @@ app.get('/api/admin/users/:userId/holdings-simple', verifyToken, verifyAdmin, as
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-//=====================================================================================================//
-//                                      API ทั้งหมดสำหรับหน้า Dashboard
-//=====================================================================================================//
+// ==============================
+//  APIs for Dashboard & Admin
+// ==============================
+// สมมุติว่ามี:
+//   const express = require('express');
+//   const app = express();
+//   const pool = require('./db');         // mysql2 pool
+//   const { verifyToken, verifyAdmin } = require('./auth'); // middlewares
+//   app.use(express.json());
 
 /**
- * API: ดึงรายชื่อหุ้นทั้งหมดตามตลาด (สำหรับ Dropdown)
- * - รับค่า market จาก query parameter เช่น /api/stocks?market=Thailand
- * - ตัด INTUCH ออก (ถูกควบรวม/ข้อมูลหาย)
+ * API: ดึงรายชื่อหุ้นทั้งหมดตามตลาด (Dropdown)
+ * - /api/stocks?market=Thailand|America
+ * - EXCLUDE 'INTUCH'
  */
 app.get("/api/stocks", verifyToken, async (req, res) => {
   try {
     const { market } = req.query;
-
-    if (!market) {
-      return res.status(400).json({ error: "Market query parameter is required." });
-    }
+    if (!market) return res.status(400).json({ error: "Market query parameter is required." });
 
     const validMarkets = ['Thailand', 'America'];
     if (!validMarkets.includes(market)) {
@@ -3262,118 +3264,92 @@ app.get("/api/stocks", verifyToken, async (req, res) => {
       SELECT StockSymbol, CompanyName
       FROM Stock
       WHERE Market = ?
-        AND StockSymbol <> 'INTUCH'        -- 👇 EXCLUDE INTUCH
+        AND StockSymbol <> 'INTUCH'
       ORDER BY StockSymbol ASC
     `;
-
     const [results] = await pool.promise().query(sql, [market]);
 
     res.status(200).json({
       message: `Successfully retrieved ${results.length} stocks for ${market}`,
       data: results
     });
-
   } catch (error) {
-    console.error("Internal server error in /api/stocks:", error.message);
+    console.error("Internal server error in /api/stocks:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-
-//=====================================================================================================//
-//                                      API: GET CHART DATA FOR A SPECIFIC STOCK (FIXED)
-//=====================================================================================================//
-
+/**
+ * API: Chart Data ของ Symbol เดียว (ตาม timeframe)
+ * - /api/chart-data/:symbol?timeframe=1D|5D|1M|3M|6M|1Y|ALL
+ */
 app.get("/api/chart-data/:symbol", verifyToken, async (req, res) => {
   try {
     const { symbol } = req.params;
     const { timeframe = '1M' } = req.query;
 
     const timeFrameLimits = {
-      '1D': 1,
-      '5D': 5,
-      '1M': 22,
-      '3M': 66,
-      '6M': 132,
-      '1Y': 252,
-      'ALL': null
+      '1D': 1, '5D': 5, '1M': 22, '3M': 66, '6M': 132, '1Y': 252, 'ALL': null
     };
-
-    const upperCaseTimeframe = timeframe.toUpperCase();
-    if (!timeFrameLimits.hasOwnProperty(upperCaseTimeframe)) {
-      return res.status(400).json({ error: "Invalid timeframe. Use '1D', '5D', '1M', '3M', '6M', '1Y', or 'ALL'." });
+    const tf = String(timeframe || '').toUpperCase();
+    if (!(tf in timeFrameLimits)) {
+      return res.status(400).json({ error: "Invalid timeframe. Use '1D','5D','1M','3M','6M','1Y','ALL'." });
     }
 
-    const limit = timeFrameLimits[upperCaseTimeframe];
-
-    let sql;
-    let params;
-
+    const limit = timeFrameLimits[tf];
+    let sql, params;
     if (limit !== null) {
       sql = `
         SELECT * FROM (
-          SELECT DATE_FORMAT(Date, '%Y-%m-%d') as date, ClosePrice
-          FROM stockdetail
+          SELECT DATE_FORMAT(Date, '%Y-%m-%d') AS date, ClosePrice
+          FROM trademine.stockdetail
           WHERE StockSymbol = ? AND Volume != 0
           ORDER BY Date DESC
           LIMIT ?
-        ) AS sub
-        ORDER BY date ASC;
+        ) sub
+        ORDER BY date ASC
       `;
       params = [symbol, limit];
     } else {
       sql = `
-        SELECT DATE_FORMAT(Date, '%Y-%m-%d') as date, ClosePrice
-        FROM stockdetail
+        SELECT DATE_FORMAT(Date, '%Y-%m-%d') AS date, ClosePrice
+        FROM trademine.stockdetail
         WHERE StockSymbol = ? AND Volume != 0
-        ORDER BY Date ASC;
+        ORDER BY Date ASC
       `;
       params = [symbol];
     }
 
-    const [results] = await pool.promise().query(sql, params);
+    const [rows] = await pool.promise().query(sql, params);
+    if (!rows.length) return res.status(404).json({ message: `No historical data found for symbol ${symbol}.` });
 
-    if (results.length === 0) {
-      return res.status(404).json({ message: `No historical data found for symbol ${symbol}.` });
-    }
-
-    res.status(200).json({
-      message: `Successfully retrieved chart data for ${symbol}`,
-      timeframe: timeframe,
-      data: results
-    });
-
+    res.status(200).json({ message: `OK`, timeframe: tf, data: rows });
   } catch (error) {
-    console.error("Internal server error in /api/chart-data:", error.message);
+    console.error("Internal server error in /api/chart-data:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-
-// API: GET TOP 3 GAINERS AND LOSERS BY MARKET (STRICT: trading day only)
-// ตัด INTUCH ออกจากผลลัพธ์
+/**
+ * API: Gainers/Losers (Top 3) ของวันล่าสุดตามตลาด
+ * - /api/market-movers?market=Thailand|America
+ * - EXCLUDE 'INTUCH'
+ */
 app.get("/api/market-movers", verifyToken, async (req, res) => {
   try {
-    const { market } = req.query; // 'Thailand' หรือ 'America'
-
+    const { market } = req.query;
     if (!market || !["Thailand", "America"].includes(market)) {
       return res.status(400).json({ error: "Invalid or missing market parameter." });
     }
 
-    const [latestDateRows] = await pool
-      .promise()
-      .query(
-        `
-        SELECT DATE(MAX(sd.Date)) AS latestDate
-        FROM stockdetail sd
-        JOIN stock s ON sd.StockSymbol = s.StockSymbol
-        WHERE s.Market = ? AND sd.Volume > 0
-      `,
-        [market]
-      );
+    const [latestDateRows] = await pool.promise().query(`
+      SELECT DATE(MAX(sd.Date)) AS latestDate
+      FROM trademine.stockdetail sd
+      JOIN Stock s ON sd.StockSymbol = s.StockSymbol
+      WHERE s.Market = ? AND sd.Volume > 0
+    `, [market]);
 
     const latestDate = latestDateRows?.[0]?.latestDate;
-
     if (!latestDate) {
       return res.status(200).json({
         message: "No trading day found for the specified market (Volume = 0).",
@@ -3383,49 +3359,120 @@ app.get("/api/market-movers", verifyToken, async (req, res) => {
 
     const gainersSql = `
       SELECT s.StockSymbol, sd.ClosePrice, sd.Changepercen, sd.Volume
-      FROM stockdetail sd
-      JOIN stock s ON sd.StockSymbol = s.StockSymbol
+      FROM trademine.stockdetail sd
+      JOIN Stock s ON sd.StockSymbol = s.StockSymbol
       WHERE s.Market = ?
-        AND s.StockSymbol <> 'INTUCH'       -- 👇 EXCLUDE INTUCH
+        AND s.StockSymbol <> 'INTUCH'
         AND DATE(sd.Date) = ?
         AND sd.Changepercen > 0
         AND sd.Volume > 0
       ORDER BY sd.Changepercen DESC
       LIMIT 3
     `;
-    const [topGainers] = await pool.promise().query(gainersSql, [market, latestDate]);
-
     const losersSql = `
       SELECT s.StockSymbol, sd.ClosePrice, sd.Changepercen, sd.Volume
-      FROM stockdetail sd
-      JOIN stock s ON sd.StockSymbol = s.StockSymbol
+      FROM trademine.stockdetail sd
+      JOIN Stock s ON sd.StockSymbol = s.StockSymbol
       WHERE s.Market = ?
-        AND s.StockSymbol <> 'INTUCH'       -- 👇 EXCLUDE INTUCH
+        AND s.StockSymbol <> 'INTUCH'
         AND DATE(sd.Date) = ?
         AND sd.Changepercen < 0
         AND sd.Volume > 0
       ORDER BY sd.Changepercen ASC
       LIMIT 3
     `;
-    const [topLosers] = await pool.promise().query(losersSql, [market, latestDate]);
+    const [[topGainers], [topLosers]] = await Promise.all([
+      pool.promise().query(gainersSql, [market, latestDate]),
+      pool.promise().query(losersSql,  [market, latestDate]),
+    ]);
 
-    return res.status(200).json({
-      message: `Successfully retrieved market movers for ${market}`,
-      date: latestDate,
-      data: { topGainers, topLosers },
-    });
+    res.status(200).json({ message: `OK`, date: latestDate, data: { topGainers, topLosers } });
   } catch (error) {
     console.error("Internal server error in /api/market-movers:", error);
-    return res.status(500).json({ error: "Internal server error" });
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
-
-//=====================================================================================================//
-//  API: AI TRADE MONITOR (ADMIN) — JOIN กับ user เพื่อเอา Username แทน UserID
-//=====================================================================================================//
-
+/**
+ * ADMIN: AI TRADES (อ่านจาก autotrade) + filters + pagination + sort
+ * - /api/admin/ai-trades?userId=&symbol=&action=&status=&date_from=&date_to=&orderBy=&order=&page=&limit=
+ * - alias: AutoTradeID → PaperTradeID (ให้หน้าเดิมใช้ได้)
+ */
 app.get('/api/admin/ai-trades', verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 200);
+    const offset = (page - 1) * limit;
+
+    const { userId, symbol, action, status, date_from, date_to } = req.query;
+
+    const ORDERABLE = new Set([
+      'AutoTradeID','PaperTradeID','TradeType','Quantity','Price','TradeDate','Username','StockSymbol','Status','PaperPortfolioID'
+    ]);
+    let orderBy = req.query.orderBy || 'TradeDate';
+    if (!ORDERABLE.has(orderBy)) orderBy = 'TradeDate';
+    if (orderBy === 'PaperTradeID') orderBy = 'AutoTradeID'; // map alias → real
+    const order = String(req.query.order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+    const where = [];
+    const params = [];
+    if (userId)    { where.push('at.UserID = ?');           params.push(userId); }
+    if (symbol)    { where.push('at.StockSymbol = ?');      params.push(symbol); }
+    if (action)    { where.push('at.TradeType = ?');        params.push(action); }
+    if (status)    { where.push('at.Status = ?');           params.push(status); }
+    if (date_from) { where.push('DATE(at.TradeDate) >= ?'); params.push(date_from); }
+    if (date_to)   { where.push('DATE(at.TradeDate) <= ?'); params.push(date_to); }
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const [countRows] = await db.query(`
+      SELECT COUNT(*) AS total
+      FROM trademine.autotrade at
+      JOIN trademine.user u ON at.UserID = u.UserID
+      ${whereClause}
+    `, params);
+    const totalTrades = countRows?.[0]?.total ?? 0;
+
+    const [rows] = await db.query(`
+      SELECT
+        at.AutoTradeID              AS PaperTradeID,   -- 👈 alias ให้ตรง UI เดิม
+        at.TradeType,
+        at.Quantity,
+        at.Price,
+        at.TradeDate,
+        at.StockSymbol,
+        at.Status,
+        at.PaperPortfolioID,
+        at.StockDetailID,
+        u.Username
+      FROM trademine.autotrade at
+      JOIN trademine.user u ON at.UserID = u.UserID
+      ${whereClause}
+      ORDER BY ${orderBy} ${order}
+      LIMIT ? OFFSET ?
+    `, [...params, limit, offset]);
+
+    res.status(200).json({
+      message: 'OK',
+      data: rows,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(totalTrades / limit),
+        totalTrades,
+        limit
+      }
+    });
+  } catch (err) {
+    console.error('Internal server error /api/admin/ai-trades:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * ADMIN: USER TRADES (อ่านจาก papertrade) — สำหรับหน้า /user-trade-history
+ * - /api/admin/user-trades?userId=&symbol=&action=&date_from=&date_to=&orderBy=&order=&page=&limit=
+ */
+app.get('/api/admin/user-trades', verifyToken, verifyAdmin, async (req, res) => {
   const db = pool.promise();
   try {
     const page  = Math.max(parseInt(req.query.page)  || 1, 1);
@@ -3442,35 +3489,563 @@ app.get('/api/admin/ai-trades', verifyToken, verifyAdmin, async (req, res) => {
 
     const where = [];
     const params = [];
-
     if (userId)    { where.push('pt.UserID = ?');           params.push(userId); }
     if (symbol)    { where.push('pt.StockSymbol = ?');      params.push(symbol); }
     if (action)    { where.push('pt.TradeType = ?');        params.push(action); }
     if (date_from) { where.push('DATE(pt.TradeDate) >= ?'); params.push(date_from); }
     if (date_to)   { where.push('DATE(pt.TradeDate) <= ?'); params.push(date_to); }
-
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    const countSql = `
+    const [countRows] = await db.query(`
       SELECT COUNT(*) AS total
       FROM trademine.papertrade pt
       JOIN trademine.user u ON pt.UserID = u.UserID
       ${whereClause}
-    `;
-    const [countRows] = await db.query(countSql, params);
+    `, params);
     const totalTrades = countRows?.[0]?.total ?? 0;
 
-    const dataSql = `
+    const [rows] = await db.query(`
       SELECT
         pt.PaperTradeID,
         pt.TradeType,
         pt.Quantity,
         pt.Price,
         pt.TradeDate,
-        u.Username AS Username,
-        pt.StockSymbol
+        pt.StockSymbol,
+        u.Username
       FROM trademine.papertrade pt
       JOIN trademine.user u ON pt.UserID = u.UserID
+      ${whereClause}
+      ORDER BY ${orderBy} ${order}
+      LIMIT ? OFFSET ?
+    `, [...params, limit, offset]);
+
+    res.status(200).json({
+      message: 'OK',
+      data: rows,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(totalTrades / limit),
+        totalTrades,
+        limit
+      }
+    });
+  } catch (err) {
+    console.error('Internal server error /api/admin/user-trades:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * ADMIN: สร้างออเดอร์ AI อัตโนมัติ → แทรกลง autotrade
+ * - body: { market, side, count, budgetPerTrade, aiUserId, paperPortfolioId, initStatus }
+ */
+app.post('/api/admin/ai-trades/auto-run', verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const {
+      market = 'Thailand',        // 'Thailand' | 'America'
+      side = 'BUY',               // 'BUY' | 'SELL'
+      count = 3,                  // เลือกกี่ตัว
+      budgetPerTrade = 10000,     // สำหรับ BUY
+      aiUserId = 1,               // UserID ของบอท
+      paperPortfolioId = null,    // ใส่ถ้ามีพอร์ต
+      initStatus = 'PENDING'      // สถานะตั้งต้น
+    } = req.body || {};
+
+    if (!['Thailand','America'].includes(market)) {
+      return res.status(400).json({ error: "market must be 'Thailand' or 'America'" });
+    }
+    if (!['BUY','SELL'].includes(String(side).toUpperCase())) {
+      return res.status(400).json({ error: "side must be 'BUY' or 'SELL'" });
+    }
+
+    // ล่าสุดของตลาด
+    const [drows] = await db.query(`
+      SELECT DATE(MAX(sd.Date)) AS latestDate
+      FROM trademine.stockdetail sd
+      JOIN Stock s ON sd.StockSymbol = s.StockSymbol
+      WHERE s.Market = ? AND sd.Volume > 0
+    `, [market]);
+    const latestDate = drows?.[0]?.latestDate;
+    if (!latestDate) return res.status(400).json({ error: 'no trading date for market' });
+
+    // เลือก Symbol (BUY = top gainers / SELL = top losers)
+    const orderExpr = side.toUpperCase()==='BUY' ? 'DESC' : 'ASC';
+    const [pick] = await db.query(`
+      SELECT s.StockSymbol
+      FROM trademine.stockdetail sd
+      JOIN Stock s ON sd.StockSymbol = s.StockSymbol
+      WHERE s.Market = ?
+        AND s.StockSymbol <> 'INTUCH'
+        AND DATE(sd.Date) = ?
+        AND sd.Volume > 0
+      ORDER BY sd.Changepercen ${orderExpr}
+      LIMIT ?
+    `, [market, latestDate, Number(count)]);
+    if (!pick.length) return res.status(200).json({ message: 'no symbols to trade', inserted: 0, trades: [] });
+
+    // สร้างรายการจากราคา/latest แท้ๆ
+    const trades = [];
+    for (const r of pick) {
+      const sym = r.StockSymbol;
+      const [last] = await db.query(`
+        SELECT StockDetailID, ClosePrice
+        FROM trademine.stockdetail
+        WHERE StockSymbol = ?
+        ORDER BY Date DESC
+        LIMIT 1
+      `, [sym]);
+      const lastRow = last?.[0];
+      if (!lastRow) continue;
+
+      const price = Number(lastRow.ClosePrice || 0);
+      let qty = 0;
+      if (side.toUpperCase()==='BUY') {
+        qty = price > 0 ? Math.max(1, Math.floor(budgetPerTrade / price)) : 0;
+      } else {
+        qty = 1; // TODO: ถ้ามีระบบถือครอง ให้คำนวณจาก position จริง
+      }
+      if (qty <= 0) continue;
+
+      trades.push({
+        UserID: aiUserId,
+        PaperPortfolioID: paperPortfolioId,
+        TradeType: side.toUpperCase(),
+        Quantity: qty,
+        Price: price,
+        StockDetailID: lastRow.StockDetailID,
+        Status: initStatus,
+        TradeDate: new Date(),
+        StockSymbol: sym
+      });
+    }
+
+    if (!trades.length) return res.status(200).json({ message: 'skip (qty=0)', inserted: 0, trades: [] });
+
+    const insertSql = `
+      INSERT INTO trademine.autotrade
+        (UserID, PaperPortfolioID, TradeType, Quantity, Price, StockDetailID, Status, TradeDate, StockSymbol)
+      VALUES ?
+    `;
+    const values = trades.map(t => [
+      t.UserID, t.PaperPortfolioID, t.TradeType, t.Quantity, t.Price,
+      t.StockDetailID, t.Status, t.TradeDate, t.StockSymbol
+    ]);
+    const [ins] = await db.query(insertSql, [values]);
+
+    res.json({ message: 'AI auto-run OK', inserted: ins?.affectedRows || 0, trades });
+  } catch (err) {
+    console.error('auto-run (autotrade) error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * (Optional) อัปเดตสถานะ AI trade
+ */
+app.patch('/api/admin/ai-trades/:id', verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const id = Number(req.params.id);
+    const { status } = req.body || {};
+    if (!id || !status) return res.status(400).json({ error: 'id & status required' });
+
+    await db.query(`UPDATE trademine.autotrade SET Status = ? WHERE AutoTradeID = ?`, [status, id]);
+    res.json({ message: 'updated', id, status });
+  } catch (err) {
+    console.error('patch ai-trade status error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ===== MARKET TREND =====
+
+/** 1) SYMBOLS by market (dropdown) — EXCLUDE INTUCH */
+app.get("/api/market-trend/symbols", verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const market = (req.query.market || "").trim();
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 500, 1), 2000);
+    if (!market) return res.status(400).json({ error: "market is required" });
+
+    const [rows] = await db.query(`
+      SELECT s.StockSymbol, s.CompanyName, s.Market, MAX(sd.Date) AS newestDate
+      FROM Stock s
+      LEFT JOIN trademine.stockdetail sd ON sd.StockSymbol = s.StockSymbol
+      WHERE s.Market = ?
+        AND s.StockSymbol <> 'INTUCH'
+      GROUP BY s.StockSymbol, s.CompanyName, s.Market
+      ORDER BY s.StockSymbol
+      LIMIT ?
+    `, [market, limit]);
+
+    res.status(200).json({ message: "OK", data: rows });
+  } catch (err) {
+    console.error("symbols error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/** 2) DATA (latest + historical) ของสัญลักษณ์เดียว */
+app.get("/api/market-trend/data", verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const symbol = (req.query.symbol || "").trim().toUpperCase();
+    if (!symbol) return res.status(400).json({ error: "symbol is required" });
+
+    const from = (req.query.from || "").trim();
+    const to   = (req.query.to || "").trim();
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 66, 1), 1000);
+
+    const [latestRows] = await db.query(`
+      SELECT StockDetailID, StockSymbol, Date,
+             OpenPrice, HighPrice, LowPrice, ClosePrice, Volume
+      FROM trademine.stockdetail
+      WHERE StockSymbol = ?
+      ORDER BY Date DESC
+      LIMIT 1
+    `, [symbol]);
+    const latest = latestRows[0] || null;
+
+    let series = [];
+    if (from && to) {
+      const [rows] = await db.query(`
+        SELECT DATE_FORMAT(Date,'%Y-%m-%d') AS date,
+               OpenPrice, HighPrice, LowPrice, ClosePrice, Volume
+        FROM trademine.stockdetail
+        WHERE StockSymbol = ?
+          AND Date BETWEEN ? AND ?
+        ORDER BY Date ASC
+      `, [symbol, from, to]);
+      series = rows;
+    } else {
+      const [rows] = await db.query(`
+        SELECT DATE_FORMAT(s.Date,'%Y-%m-%d') AS date,
+               s.OpenPrice, s.HighPrice, s.LowPrice, s.ClosePrice, s.Volume
+        FROM trademine.stockdetail s
+        JOIN (
+          SELECT d FROM (
+            SELECT DISTINCT Date AS d
+            FROM trademine.stockdetail
+            WHERE StockSymbol = ?
+            ORDER BY Date DESC
+            LIMIT ?
+          ) dd
+        ) lastd ON lastd.d = s.Date
+        WHERE s.StockSymbol = ?
+        ORDER BY s.Date ASC
+      `, [symbol, limit, symbol]);
+      series = rows;
+    }
+
+    if (!latest && series.length === 0) {
+      return res.status(404).json({ error: "No data" });
+    }
+
+    res.status(200).json({ message: "OK", symbol, latest, series });
+  } catch (err) {
+    console.error("data error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * Model Performance (ป้อนช่วงวันที่/สัญลักษณ์)
+ * - /api/model-performance?symbol=...&start=YYYY-MM-DD&end=YYYY-MM-DD
+ */
+app.get("/api/model-performance", verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const { symbol, start, end } = req.query;
+    if (!symbol || !start || !end) {
+      return res.status(400).json({ error: 'symbol, start, end required' });
+    }
+
+    const sql = `
+      SELECT Date, ClosePrice, 
+             PredictionClose_LSTM, PredictionClose_GRU, PredictionClose_Ensemble,
+             PredictionTrend_LSTM, PredictionTrend_GRU, PredictionTrend_Ensemble
+      FROM trademine.stockdetail
+      WHERE StockSymbol = ? AND Date BETWEEN ? AND ?
+      ORDER BY Date
+    `;
+    const [rows] = await db.query(sql, [symbol, start, end]);
+
+    const actual = rows.map(r => Number(r.ClosePrice));
+    const arrL = rows.map(r => Number(r.PredictionClose_LSTM));
+    const arrG = rows.map(r => Number(r.PredictionClose_GRU));
+    const arrE = rows.map(r => Number(r.PredictionClose_Ensemble));
+
+    const calcRMSE = (A, P) => {
+      if (!A.length || A.length !== P.length) return null;
+      const mse = A.reduce((s, v, i) => s + Math.pow(v - P[i], 2), 0) / A.length;
+      return Math.sqrt(mse);
+    };
+    const calcMAPE = (A, P) => {
+      if (!A.length || A.length !== P.length) return null;
+      const mape = A.reduce((s, v, i) => s + Math.abs((v - P[i]) / (v || 1)), 0) / A.length;
+      return mape * 100;
+    };
+    const calcTrendAccuracy = (A, P) => {
+      if (A.length < 2 || P.length < 2) return null;
+      let correct = 0, total = 0;
+      for (let i = 1; i < A.length; i++) {
+        const aUp = A[i] > A[i-1];
+        const pUp = P[i] > P[i-1];
+        if (!Number.isFinite(P[i]) || !Number.isFinite(P[i-1])) continue;
+        if (aUp === pUp) correct++;
+        total++;
+      }
+      return total ? (correct / total) * 100 : null;
+    };
+
+    const performance = {
+      LSTM:    { RMSE: calcRMSE(actual, arrL), MAPE: calcMAPE(actual, arrL), TrendAccuracy: calcTrendAccuracy(actual, arrL) },
+      GRU:     { RMSE: calcRMSE(actual, arrG), MAPE: calcMAPE(actual, arrG), TrendAccuracy: calcTrendAccuracy(actual, arrG) },
+      Ensemble:{ RMSE: calcRMSE(actual, arrE), MAPE: calcMAPE(actual, arrE), TrendAccuracy: calcTrendAccuracy(actual, arrE) }
+    };
+
+    res.json({ data: rows, performance });
+  } catch (err) {
+    console.error('model-performance error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * MARKET MOVERS BY RANGE (เปอร์เซ็นต์เปลี่ยนแปลงตามช่วงเวลา)
+ * - /api/market-movers/range?market=&timeframe=5D|1M|3M|6M|1Y|ALL&from=&to=&limitSymbols=
+ * - EXCLUDE 'INTUCH'
+ */
+app.get("/api/market-movers/range", verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const market = (req.query.market || "").trim();
+    const timeframe = (req.query.timeframe || "").toUpperCase();
+    let from = (req.query.from || "").trim();
+    let to   = (req.query.to || "").trim();
+    const limitSymbols = Math.min(Math.max(parseInt(req.query.limitSymbols) || 1000, 1), 5000);
+
+    if (!market || !["Thailand","America"].includes(market)) {
+      return res.status(400).json({ error: "market is required: Thailand | America" });
+    }
+
+    const TF_LIMIT = { "5D": 5, "1M": 22, "3M": 66, "6M": 132, "1Y": 252, "ALL": null };
+
+    if (!from || !to) {
+      const tf = TF_LIMIT.hasOwnProperty(timeframe) ? timeframe : "1M";
+      if (TF_LIMIT[tf] === null) {
+        const [mm] = await db.query(`
+          SELECT MIN(DATE(sd.Date)) AS minD, MAX(DATE(sd.Date)) AS maxD
+          FROM trademine.stockdetail sd
+          JOIN Stock s ON s.StockSymbol = sd.StockSymbol
+          WHERE s.Market = ? AND sd.Volume > 0
+        `, [market]);
+        from = mm?.[0]?.minD;
+        to   = mm?.[0]?.maxD;
+      } else {
+        const N = TF_LIMIT[tf];
+        const [days] = await db.query(`
+          SELECT d FROM (
+            SELECT DISTINCT DATE(sd.Date) AS d
+            FROM trademine.stockdetail sd
+            JOIN Stock s ON s.StockSymbol = sd.StockSymbol
+            WHERE s.Market = ? AND sd.Volume > 0
+            ORDER BY d DESC
+            LIMIT ?
+          ) t
+          ORDER BY d ASC
+        `, [market, N]);
+        if (!days.length) return res.status(200).json({ message: "no trading days", data: [] });
+        from = days[0].d;
+        to   = days[days.length - 1].d;
+      }
+    }
+
+    if (!from || !to) return res.status(400).json({ error: "unable to resolve date range; please provide from & to" });
+
+    const [rows] = await db.query(`
+      SELECT 
+        s.StockSymbol,
+        (SELECT DATE(sd.Date) FROM trademine.stockdetail sd
+           WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
+             AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date ASC  LIMIT 1) AS firstDate,
+        (SELECT sd.ClosePrice FROM trademine.stockdetail sd
+           WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
+             AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date ASC  LIMIT 1) AS firstClose,
+        (SELECT DATE(sd.Date) FROM trademine.stockdetail sd
+           WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
+             AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date DESC LIMIT 1) AS lastDate,
+        (SELECT sd.ClosePrice FROM trademine.stockdetail sd
+           WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
+             AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date DESC LIMIT 1) AS lastClose
+      FROM Stock s
+      WHERE s.Market = ?
+        AND s.StockSymbol <> 'INTUCH'
+      ORDER BY s.StockSymbol
+      LIMIT ?
+    `, [from, to, from, to, from, to, from, to, market, limitSymbols]);
+
+    const data = rows
+      .filter(r => r.firstClose != null && r.lastClose != null)
+      .map(r => {
+        const first = Number(r.firstClose);
+        const last  = Number(r.lastClose);
+        const changePct = first ? ((last - first) / first) * 100 : null;
+        return { StockSymbol: r.StockSymbol, firstDate: r.firstDate, lastDate: r.lastDate, firstClose: first, lastClose: last, changePct };
+      });
+
+    const topGainers = [...data].sort((a,b)=> (b.changePct ?? -Infinity) - (a.changePct ?? -Infinity));
+    const topLosers  = [...data].sort((a,b)=> (a.changePct ??  Infinity) - (b.changePct ??  Infinity));
+
+    res.status(200).json({
+      message: "OK",
+      market,
+      range: { from, to },
+      count: data.length,
+      data,
+      sorted: { topGainers, topLosers }
+    });
+  } catch (err) {
+    console.error("error /api/market-movers/range:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ========================= Shared helpers =========================
+/**
+ * แปลงเป็นเลขจำนวนเต็ม ป้องกัน NaN
+ */
+function toInt(v, def = 0) {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : def;
+}
+/**
+ * จำกัดค่าให้อยู่ในช่วง
+ */
+function clamp(n, min, max) {
+  return Math.min(Math.max(n, min), max);
+}
+/**
+ * รับ orderBy ที่อนุญาตเท่านั้น (map: {key: "tableAlias.column"})
+ */
+function resolveOrderBy(allowMap, input, fallbackKey) {
+  if (allowMap[input]) return allowMap[input];
+  return allowMap[fallbackKey];
+}
+/**
+ * แปลงค่า order asc/desc
+ */
+function resolveOrder(input) {
+  return String(input || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+}
+
+/**
+ * สร้างเงื่อนไขช่วงวันที่ (DATE(col) ระหว่าง date_from/date_to)
+ * - ถ้าไม่มี -> ไม่เติม where
+ */
+function pushDateRange(where, params, col, date_from, date_to) {
+  if (date_from) { where.push(`DATE(${col}) >= ?`); params.push(date_from); }
+  if (date_to)   { where.push(`DATE(${col}) <= ?`); params.push(date_to); }
+}
+
+/**
+ * สร้างเงื่อนไขตัวเลข min/max
+ */
+function pushRange(where, params, col, minVal, maxVal) {
+  if (minVal != null) { where.push(`${col} >= ?`); params.push(minVal); }
+  if (maxVal != null) { where.push(`${col} <= ?`); params.push(maxVal); }
+}
+
+// ======================================================================
+// 1) AI TRADE MONITOR (ADMIN) — autotrade + join user
+//    GET /api/admin/ai-trades
+//    Query:
+//      page, limit, orderBy, order
+//      userId, symbol, action, status, date_from, date_to
+//      min_price, max_price, min_qty, max_qty
+// ======================================================================
+app.get('/api/admin/ai-trades', verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise();
+  try {
+    // ---------- pagination ----------
+    const page  = clamp(toInt(req.query.page, 1), 1, Number.MAX_SAFE_INTEGER);
+    const limit = clamp(toInt(req.query.limit, 20), 1, 200);
+    const offset = (page - 1) * limit;
+
+    // ---------- filters ----------
+    const {
+      userId,       // number
+      symbol,       // string
+      action,       // 'buy' | 'sell' (ขึ้นกับระบบคุณเก็บเป็นอะไร), case-sensitive ตาม DB
+      status,       // 'PENDING' | 'FILLED' | ... เฉพาะ autotrade
+      date_from,    // 'YYYY-MM-DD'
+      date_to,      // 'YYYY-MM-DD'
+      min_price,    // number
+      max_price,    // number
+      min_qty,      // number
+      max_qty       // number
+    } = req.query;
+
+    // ---------- sorting ----------
+    const ORDERABLE = {
+      AutoTradeID: 'at.AutoTradeID',
+      TradeType: 'at.TradeType',
+      Quantity: 'at.Quantity',
+      Price: 'at.Price',
+      TradeDate: 'at.TradeDate',
+      Username: 'u.Username',
+      StockSymbol: 'at.StockSymbol',
+      Status: 'at.Status'
+    };
+    const orderBy = resolveOrderBy(ORDERABLE, req.query.orderBy, 'TradeDate');
+    const order   = resolveOrder(req.query.order);
+
+    // ---------- WHERE ----------
+    const where = [];
+    const params = [];
+
+    if (userId)  { where.push('at.UserID = ?');      params.push(userId); }
+    if (symbol)  { where.push('at.StockSymbol = ?'); params.push(symbol); }
+    if (action)  { where.push('at.TradeType = ?');   params.push(action); }
+    if (status)  { where.push('at.Status = ?');      params.push(status); }
+
+    pushDateRange(where, params, 'at.TradeDate', date_from, date_to);
+    if (min_price != null || max_price != null) {
+      pushRange(where, params, 'at.Price', min_price, max_price);
+    }
+    if (min_qty != null || max_qty != null) {
+      pushRange(where, params, 'at.Quantity', min_qty, max_qty);
+    }
+
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    // ---------- COUNT ----------
+    const countSql = `
+      SELECT COUNT(*) AS total
+      FROM trademine.autotrade at
+      JOIN trademine.user u ON at.UserID = u.UserID
+      ${whereClause}
+    `;
+    const [countRows] = await db.query(countSql, params);
+    const totalTrades = countRows?.[0]?.total ?? 0;
+
+    // ---------- DATA ----------
+    const dataSql = `
+      SELECT
+        at.AutoTradeID,
+        at.PaperPortfolioID,
+        at.TradeType,
+        at.Quantity,
+        at.Price,
+        at.TradeDate,
+        at.Status,
+        at.StockSymbol,
+        at.UserID,
+        u.Username AS Username
+      FROM trademine.autotrade at
+      JOIN trademine.user u ON at.UserID = u.UserID
       ${whereClause}
       ORDER BY ${orderBy} ${order}
       LIMIT ? OFFSET ?
@@ -3493,280 +4068,178 @@ app.get('/api/admin/ai-trades', verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
-
-// === MARKET TREND (2 ENDPOINTS) ===
-
-// 1) SYMBOLS by market (dropdown) — ตัด INTUCH ออก
-app.get("/api/market-trend/symbols", verifyToken, async (req, res) => {
+// (แถม) รายการเดียวตาม id: GET /api/admin/ai-trades/:id
+app.get('/api/admin/ai-trades/:id', verifyToken, verifyAdmin, async (req, res) => {
   const db = pool.promise();
   try {
-    const market = (req.query.market || "").trim();
-    const limit = Math.min(Math.max(parseInt(req.query.limit) || 500, 1), 2000);
-    if (!market) return res.status(400).json({ error: "market is required" });
+    const id = toInt(req.params.id, 0);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
 
-    const [rows] = await db.query(
-      `
-      SELECT s.StockSymbol, s.CompanyName, s.Market, MAX(sd.Date) AS newestDate
-      FROM Stock s
-      LEFT JOIN trademine.stockdetail sd
-        ON sd.StockSymbol = s.StockSymbol
-      WHERE s.Market = ?
-        AND s.StockSymbol <> 'INTUCH'       -- 👇 EXCLUDE INTUCH
-      GROUP BY s.StockSymbol, s.CompanyName, s.Market
-      ORDER BY s.StockSymbol
-      LIMIT ?
-      `,
-      [market, limit]
-    );
-
-    res.status(200).json({ message: "OK", data: rows });
-  } catch (err) {
-    console.error("symbols error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// 2) DATA (latest + historical)
-// (ไม่ตัด INTUCH เพราะเป็นการระบุ symbol เฉพาะเจาะจง)
-app.get("/api/market-trend/data", verifyToken, async (req, res) => {
-  const db = pool.promise();
-  try {
-    const symbol = (req.query.symbol || "").trim().toUpperCase();
-    if (!symbol) return res.status(400).json({ error: "symbol is required" });
-
-    const from = (req.query.from || "").trim();
-    const to   = (req.query.to || "").trim();
-    const limit = Math.min(Math.max(parseInt(req.query.limit) || 66, 1), 1000);
-
-    const [latestRows] = await db.query(
-      `
-      SELECT 
-        StockDetailID, StockSymbol, Date,
-        OpenPrice, HighPrice, LowPrice, ClosePrice, Volume
-      FROM trademine.stockdetail
-      WHERE StockSymbol = ?
-      ORDER BY Date DESC
+    const sql = `
+      SELECT
+        at.AutoTradeID,
+        at.PaperPortfolioID,
+        at.TradeType,
+        at.Quantity,
+        at.Price,
+        at.TradeDate,
+        at.Status,
+        at.StockSymbol,
+        at.UserID,
+        u.Username AS Username
+      FROM trademine.autotrade at
+      JOIN trademine.user u ON at.UserID = u.UserID
+      WHERE at.AutoTradeID = ?
       LIMIT 1
-      `,
-      [symbol]
-    );
-    const latest = latestRows[0] || null;
-
-    let series = [];
-    if (from && to) {
-      const [rows] = await db.query(
-        `
-        SELECT DATE_FORMAT(Date,'%Y-%m-%d') AS date,
-               OpenPrice, HighPrice, LowPrice, ClosePrice, Volume
-        FROM trademine.stockdetail
-        WHERE StockSymbol = ?
-          AND Date BETWEEN ? AND ?
-        ORDER BY Date ASC
-        `,
-        [symbol, from, to]
-      );
-      series = rows;
-    } else {
-      const [rows] = await db.query(
-        `
-        SELECT 
-          DATE_FORMAT(s.Date,'%Y-%m-%d') AS date,
-          s.OpenPrice, s.HighPrice, s.LowPrice, s.ClosePrice, s.Volume
-        FROM trademine.stockdetail s
-        JOIN (
-          SELECT d FROM (
-            SELECT DISTINCT Date AS d
-            FROM trademine.stockdetail
-            WHERE StockSymbol = ?
-            ORDER BY Date DESC
-            LIMIT ?
-          ) dd
-        ) lastd ON lastd.d = s.Date
-        WHERE s.StockSymbol = ?
-        ORDER BY s.Date ASC
-        `,
-        [symbol, limit, symbol]
-      );
-      series = rows;
-    }
-
-    if (!latest && series.length === 0) {
-      return res.status(404).json({ error: "No data" });
-    }
-
-    res.status(200).json({ message: "OK", symbol, latest, series });
+    `;
+    const [rows] = await db.query(sql, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'not found' });
+    return res.status(200).json({ message: 'OK', data: rows[0] });
   } catch (err) {
-    console.error("data error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    console.error('error /api/admin/ai-trades/:id', err);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.get("/api/model-performance", async (req, res) => {
-  const { symbol, start, end } = req.query;
-  const sql = `
-    SELECT Date, ClosePrice, 
-           PredictionClose_LSTM, PredictionClose_GRU, PredictionClose_Ensemble,
-           PredictionTrend_LSTM, PredictionTrend_GRU, PredictionTrend_Ensemble
-    FROM stockdetail
-    WHERE StockSymbol = ? AND Date BETWEEN ? AND ?
-    ORDER BY Date
-  `;
-  const [rows] = await db.query(sql, [symbol, start, end]);
 
-  const calcRMSE = (actual, predicted) => {
-    let mse = actual.reduce((sum, val, i) => sum + Math.pow(val - predicted[i], 2), 0) / actual.length;
-    return Math.sqrt(mse);
-  };
-  const calcMAPE = (actual, predicted) => {
-    let ape = actual.reduce((sum, val, i) => sum + Math.abs((val - predicted[i]) / val), 0) / actual.length;
-    return ape * 100;
-  };
-  const calcTrendAccuracy = (actual, predicted) => {
-    let correct = actual.reduce((count, val, i, arr) => {
-      if (i === 0) return count;
-      let actualTrend = val > arr[i-1] ? 'UP' : 'DOWN';
-      let predTrend = predicted[i] > predicted[i-1] ? 'UP' : 'DOWN';
-      return count + (actualTrend === predTrend ? 1 : 0);
-    }, 0);
-    return (correct / (actual.length - 1)) * 100;
-  };
-
-  const actual = rows.map(r => r.ClosePrice);
-
-  const performance = {
-    LSTM: {
-      RMSE: calcRMSE(actual, rows.map(r => r.PredictionClose_LSTM)),
-      MAPE: calcMAPE(actual, rows.map(r => r.PredictionClose_LSTM)),
-      TrendAccuracy: calcTrendAccuracy(actual, rows.map(r => r.PredictionClose_LSTM))
-    },
-    GRU: {
-      RMSE: calcRMSE(actual, rows.map(r => r.PredictionClose_GRU)),
-      MAPE: calcMAPE(actual, rows.map(r => r.PredictionClose_GRU)),
-      TrendAccuracy: calcTrendAccuracy(actual, rows.map(r => r.PredictionClose_GRU))
-    },
-    Ensemble: {
-      RMSE: calcRMSE(actual, rows.map(r => r.PredictionClose_Ensemble)),
-      MAPE: calcMAPE(actual, rows.map(r => r.PredictionClose_Ensemble)),
-      TrendAccuracy: calcTrendAccuracy(actual, rows.map(r => r.PredictionClose_Ensemble))
-    }
-  };
-
-  res.json({ data: rows, performance });
-});
-
-
-// ===================================================================================== //
-// API: MARKET MOVERS BY RANGE (เปอร์เซ็นต์เปลี่ยนแปลงตามช่วงเวลา)
-// - ตัด INTUCH ออกจากผลลัพธ์รวม
-// ===================================================================================== //
-app.get("/api/market-movers/range", verifyToken, async (req, res) => {
+// ======================================================================
+// 2) USER TRADE HISTORY (ADMIN) — papertrade + join user
+//    GET /api/admin/user-trades
+//    Query:
+//      page, limit, orderBy, order
+//      userId, symbol, action, date_from, date_to
+//      min_price, max_price, min_qty, max_qty
+// ======================================================================
+app.get('/api/admin/user-trades', verifyToken, verifyAdmin, async (req, res) => {
   const db = pool.promise();
   try {
-    const market = (req.query.market || "").trim();
-    const timeframe = (req.query.timeframe || "").toUpperCase();
-    let from = (req.query.from || "").trim();
-    let to   = (req.query.to || "").trim();
-    const limitSymbols = Math.min(Math.max(parseInt(req.query.limitSymbols) || 1000, 1), 5000);
+    // ---------- pagination ----------
+    const page  = clamp(toInt(req.query.page, 1), 1, Number.MAX_SAFE_INTEGER);
+    const limit = clamp(toInt(req.query.limit, 20), 1, 200);
+    const offset = (page - 1) * limit;
 
-    if (!market || !["Thailand","America"].includes(market)) {
-      return res.status(400).json({ error: "market is required: Thailand | America" });
+    // ---------- filters ----------
+    const {
+      userId,
+      symbol,
+      action,
+      date_from,
+      date_to,
+      min_price,
+      max_price,
+      min_qty,
+      max_qty
+    } = req.query;
+
+    // ---------- sorting ----------
+    const ORDERABLE = {
+      PaperTradeID: 'pt.PaperTradeID',
+      TradeType: 'pt.TradeType',
+      Quantity: 'pt.Quantity',
+      Price: 'pt.Price',
+      TradeDate: 'pt.TradeDate',
+      Username: 'u.Username',
+      StockSymbol: 'pt.StockSymbol'
+    };
+    const orderBy = resolveOrderBy(ORDERABLE, req.query.orderBy, 'TradeDate');
+    const order   = resolveOrder(req.query.order);
+
+    // ---------- WHERE ----------
+    const where = [];
+    const params = [];
+
+    if (userId)  { where.push('pt.UserID = ?');      params.push(userId); }
+    if (symbol)  { where.push('pt.StockSymbol = ?'); params.push(symbol); }
+    if (action)  { where.push('pt.TradeType = ?');   params.push(action); }
+
+    pushDateRange(where, params, 'pt.TradeDate', date_from, date_to);
+    if (min_price != null || max_price != null) {
+      pushRange(where, params, 'pt.Price', min_price, max_price);
+    }
+    if (min_qty != null || max_qty != null) {
+      pushRange(where, params, 'pt.Quantity', min_qty, max_qty);
     }
 
-    const TF_LIMIT = { "5D": 5, "1M": 22, "3M": 66, "6M": 132, "1Y": 252, "ALL": null };
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    if (!from || !to) {
-      const tf = TF_LIMIT.hasOwnProperty(timeframe) ? timeframe : "1M";
-      if (TF_LIMIT[tf] === null) {
-        const [mm] = await db.query(
-          `
-          SELECT MIN(DATE(sd.Date)) AS minD, MAX(DATE(sd.Date)) AS maxD
-          FROM stockdetail sd
-          JOIN stock s ON s.StockSymbol = sd.StockSymbol
-          WHERE s.Market = ? AND sd.Volume > 0
-          `,
-          [market]
-        );
-        from = mm?.[0]?.minD;
-        to   = mm?.[0]?.maxD;
-      } else {
-        const N = TF_LIMIT[tf];
-        const [days] = await db.query(
-          `
-          SELECT d FROM (
-            SELECT DISTINCT DATE(sd.Date) AS d
-            FROM stockdetail sd
-            JOIN stock s ON s.StockSymbol = sd.StockSymbol
-            WHERE s.Market = ? AND sd.Volume > 0
-            ORDER BY d DESC
-            LIMIT ?
-          ) t
-          ORDER BY d ASC
-          `,
-          [market, N]
-        );
-        if (!days.length) return res.status(200).json({ message: "no trading days", data: [] });
-        from = days[0].d;
-        to   = days[days.length - 1].d;
-      }
-    }
+    // ---------- COUNT ----------
+    const countSql = `
+      SELECT COUNT(*) AS total
+      FROM trademine.papertrade pt
+      JOIN trademine.user u ON pt.UserID = u.UserID
+      ${whereClause}
+    `;
+    const [countRows] = await db.query(countSql, params);
+    const totalTrades = countRows?.[0]?.total ?? 0;
 
-    if (!from || !to) {
-      return res.status(400).json({ error: "unable to resolve date range; please provide from & to" });
-    }
-
-    const [rows] = await db.query(
-      `
-      SELECT 
-        s.StockSymbol,
-        (SELECT DATE(sd.Date) FROM stockdetail sd
-          WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
-            AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date ASC  LIMIT 1) AS firstDate,
-        (SELECT sd.ClosePrice FROM stockdetail sd
-          WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
-            AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date ASC  LIMIT 1) AS firstClose,
-        (SELECT DATE(sd.Date) FROM stockdetail sd
-          WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
-            AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date DESC LIMIT 1) AS lastDate,
-        (SELECT sd.ClosePrice FROM stockdetail sd
-          WHERE sd.StockSymbol = s.StockSymbol AND sd.Volume > 0
-            AND DATE(sd.Date) BETWEEN ? AND ? ORDER BY sd.Date DESC LIMIT 1) AS lastClose
-      FROM stock s
-      WHERE s.Market = ?
-        AND s.StockSymbol <> 'INTUCH'     -- 👇 EXCLUDE INTUCH
-      ORDER BY s.StockSymbol
-      LIMIT ?
-      `,
-      [from, to, from, to, from, to, from, to, market, limitSymbols]
-    );
-
-    const data = rows
-      .filter(r => r.firstClose != null && r.lastClose != null)
-      .map(r => {
-        const first = Number(r.firstClose);
-        const last  = Number(r.lastClose);
-        const changePct = first ? ((last - first) / first) * 100 : null;
-        return { StockSymbol: r.StockSymbol, firstDate: r.firstDate, lastDate: r.lastDate, firstClose: first, lastClose: last, changePct };
-      });
-
-    const topGainers = [...data].sort((a,b)=> (b.changePct ?? -Infinity) - (a.changePct ?? -Infinity));
-    const topLosers  = [...data].sort((a,b)=> (a.changePct ??  Infinity) - (b.changePct ??  Infinity));
+    // ---------- DATA ----------
+    const dataSql = `
+      SELECT
+        pt.PaperTradeID,
+        pt.TradeType,
+        pt.Quantity,
+        pt.Price,
+        pt.TradeDate,
+        pt.StockSymbol,
+        pt.UserID,
+        u.Username AS Username
+      FROM trademine.papertrade pt
+      JOIN trademine.user u ON pt.UserID = u.UserID
+      ${whereClause}
+      ORDER BY ${orderBy} ${order}
+      LIMIT ? OFFSET ?
+    `;
+    const [rows] = await db.query(dataSql, [...params, limit, offset]);
 
     return res.status(200).json({
-      message: "OK",
-      market,
-      range: { from, to },
-      count: data.length,
-      data,
-      sorted: { topGainers, topLosers }
+      message: 'OK',
+      data: rows,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(totalTrades / limit),
+        totalTrades,
+        limit
+      }
     });
   } catch (err) {
-    console.error("error /api/market-movers/range:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    console.error('Internal server error /api/admin/user-trades:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// (แถม) รายการเดียวตาม id: GET /api/admin/user-trades/:id
+app.get('/api/admin/user-trades/:id', verifyToken, verifyAdmin, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const id = toInt(req.params.id, 0);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+
+    const sql = `
+      SELECT
+        pt.PaperTradeID,
+        pt.TradeType,
+        pt.Quantity,
+        pt.Price,
+        pt.TradeDate,
+        pt.StockSymbol,
+        pt.UserID,
+        u.Username AS Username
+      FROM trademine.papertrade pt
+      JOIN trademine.user u ON pt.UserID = u.UserID
+      WHERE pt.PaperTradeID = ?
+      LIMIT 1
+    `;
+    const [rows] = await db.query(sql, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'not found' });
+    return res.status(200).json({ message: 'OK', data: rows[0] });
+  } catch (err) {
+    console.error('error /api/admin/user-trades/:id', err);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 
-// Start the server
+// ========== START SERVER ==========
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
