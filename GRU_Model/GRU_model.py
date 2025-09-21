@@ -58,7 +58,7 @@ PRODUCTION_CONFIG_PATH = os.path.join(MODEL_DIR, "production_model_config.json")
 SKIP_TRAIN=True
 SKIP_CALIBRATION=True
 STRICT_LOAD=True
-USE_WFV_MODEL_CLONE    = True
+USE_WFV_MODEL_CLONE    = False
 PERSIST_ONLINE_UPDATES = False
 
 # ---------- Model hyperparams ----------
@@ -244,7 +244,7 @@ T_DIR_BASE_TH = 0.98
 T_DIR_BASE_US = 1.15
 
 # ---------- Hybrid online policy ----------
-ONLINE_WEIGHT_UPDATE = {'US': True, 'TH': False, 'OTHER': False}
+ONLINE_WEIGHT_UPDATE   = {'US': False, 'TH': False, 'OTHER': False}
 Z_GATE_ONLINE_US = 1.05
 UNC_MAX_US       = 0.10
 ONLINE_UPDATE_EVERY_US = 24
