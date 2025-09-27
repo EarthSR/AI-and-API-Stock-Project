@@ -167,41 +167,46 @@ ALPHA_EMA_OVR = {
 }
 
 # ---------- (Base) Precision tune (รายตัว) ----------
-# ==== precision_tune (FINAL, consolidated – no .update calls) ====
-# ==== precision_tune (AGGRESSIVE FINAL – single block, no .update) ====
+# ==== precision_tune (FINAL PUSH) – ดัน R จุดเสี่ยง + กันลามฝั่ง TH ====
+# ==== precision_tune (FINAL-LAST PUSH) ====
 BASE_PRECISION_TUNE = {
-    # ---------- US : เร่ง Recall แบบคุม FP ----------
-    'AAPL':  {'thr_bump': -0.100, 'ema_alpha': 0.46, 'majk': 1, 'hys': 0.0032,
-              'z_gate': 0.95, 'unc_plus': -0.012},
-    'AVGO':  {'thr_bump': -0.100, 'ema_alpha': 0.50, 'majk': 1, 'hys': 0.0034},
+    # ---------- US: คงทรงที่ดี + อัดตัวที่ยังหนืด ----------
+    'AAPL':  {'thr_bump': -0.078, 'ema_alpha': 0.46, 'majk': 1, 'hys': 0.0036,
+              'z_gate': 0.96, 'unc_plus': -0.010},
+    'GOOGL': {'thr_bump': -0.040, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
     'AMZN':  {'thr_bump': -0.085, 'ema_alpha': 0.50, 'majk': 2, 'hys': 0.0040},
-    'GOOGL': {'thr_bump': -0.046, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
-    'META':  {'thr_bump': -0.044, 'ema_alpha': 0.50, 'majk': 2, 'hys': 0.0038},
+    'META':  {'thr_bump': -0.036, 'ema_alpha': 0.50, 'majk': 2, 'hys': 0.0040},
     'TSLA':  {'thr_bump': -0.040, 'ema_alpha': 0.50, 'majk': 2, 'hys': 0.0040},
     'TSM':   {'thr_bump': -0.028, 'ema_alpha': 0.50, 'majk': 3, 'hys': 0.0042},
     'MSFT':  {'thr_bump': -0.006},
-    'AMD':   {'thr_bump': -0.004},
-    'NVDA':  {'thr_bump': -0.004},
 
-    # ---------- TH : ปลดล็อก Recall รอบสุดท้าย (ยังคุม FP) ----------
-    # เป้า: ADVANC R ~0.18–0.22 / PosRate ~12–16%
-    'ADVANC':{'thr_bump': -0.640, 'ema_alpha': 0.16, 'majk': 1, 'hys': 0.0010,
-              'z_gate': 0.66, 'unc_plus': -0.30},
+    # ===== US: FINAL PUSH for Recall =====
+    # เป้า: AMD/NVDA/AVGO ยก R ต่อแบบคุมสั่น (ลด inertia + บาง hysteresis)
+    'AMD':   {'thr_bump': -0.048, 'ema_alpha': 0.48, 'majk': 1, 'hys': 0.0034,
+              'z_gate': 0.96, 'unc_plus': -0.008},
+    'NVDA':  {'thr_bump': -0.052, 'ema_alpha': 0.48, 'majk': 1, 'hys': 0.0034},
+    'AVGO':  {'thr_bump': -0.110, 'ema_alpha': 0.50, 'majk': 1, 'hys': 0.0036},
 
-    # เป้า: TRUE รักษา P สูง ดัน R ไป ~0.22–0.26 / PosRate ~11–13%
-    'TRUE':  {'thr_bump': -0.300, 'ema_alpha': 0.42, 'majk': 1, 'hys': 0.0028,
-              'z_gate': 0.78, 'unc_plus': -0.10},
+    # ---------- TH: คงชุดที่ได้ผล + กู้ตัวที่ดรอป ----------
+    # ปลดล็อกหนักที่ได้ผลแล้ว
+    'ADVANC':{'thr_bump': -0.520, 'ema_alpha': 0.18, 'majk': 1, 'hys': 0.0012,
+              'z_gate': 0.68, 'unc_plus': -0.22},
+    'TRUE':  {'thr_bump': -0.200, 'ema_alpha': 0.46, 'majk': 1, 'hys': 0.0032,
+              'z_gate': 0.80, 'unc_plus': -0.06},
 
-    # ยิงเยอะ → เบรก FP ต่อเนื่อง
-    'INSET': {'thr_bump': +0.012, 'ema_alpha': 0.58, 'majk': 9, 'hys': 0.0065},
+    # เบรก JAS (FP สูง/PosRate ลาม)
+    'JAS':   {'thr_bump': +0.070, 'ema_alpha': 0.60, 'majk': 10, 'hys': 0.0068},
 
-    # ดันที่ยังอั้น (คุมเสถียรภาพระดับกลาง)
-    'JAS':   {'thr_bump': -0.022, 'ema_alpha': 0.54, 'majk': 5, 'hys': 0.0048},
-    'JMART': {'thr_bump': -0.100, 'ema_alpha': 0.50, 'majk': 2, 'hys': 0.0038},
-    'INET':  {'thr_bump': -0.028, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
-    'HUMAN': {'thr_bump': -0.022, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
-    'DITTO': {'thr_bump': -0.060, 'ema_alpha': 0.53, 'majk': 4, 'hys': 0.0043},
-    'DIF':   {'thr_bump': -0.060, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0042},
+    # ===== TH: กู้ R ที่ตกหนัก =====
+    # DITTO/DIF/JMART/INET เร่งเปิดทางยิง (ลด thr/inertia) แต่ยังคุม hys พอดี
+    'DITTO': {'thr_bump': -0.080, 'ema_alpha': 0.52, 'majk': 2, 'hys': 0.0038},
+    'DIF':   {'thr_bump': -0.060, 'ema_alpha': 0.54, 'majk': 3, 'hys': 0.0040},
+    'JMART': {'thr_bump': -0.090, 'ema_alpha': 0.50, 'majk': 2, 'hys': 0.0038},
+    'INET':  {'thr_bump': -0.030, 'ema_alpha': 0.52, 'majk': 4, 'hys': 0.0046},
+
+    # INSET/HUMAN ทรงกำลังดี → คงไว้ (เกลาเบา ๆ เพื่อความนิ่ง)
+    'INSET': {'thr_bump': -0.012, 'ema_alpha': 0.54, 'majk': 6, 'hys': 0.0050},
+    'HUMAN': {'thr_bump': -0.016, 'ema_alpha': 0.54, 'majk': 5, 'hys': 0.0048},
 }
 
 # ---------- Eval ----------

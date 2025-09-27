@@ -1,7 +1,7 @@
 import subprocess
 import os
 
-base = r"C:\Users\Earth\Documents\AI-and-API-Stock-Project"  # ใช้ชื่อโฟลเดอร์จริง
+base = r"C:\Users\EarthSR\AI and API Stock Project"  # ใช้ชื่อโฟลเดอร์จริง
 
 # Run LSTM
 subprocess.run(["python", "LSTM_model.py"], cwd=os.path.join(base, "LSTM_model"))
