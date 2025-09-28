@@ -1,38 +1,10 @@
-# -*- coding: utf-8 -*-
-"""
-Inference ราคาล้วน (ไม่มีทิศทาง) สำหรับ 3 โมเดล: LSTM, GRU, META (XGBoost จาก LSTM+GRU)
-- ใช้ MySQL + dotenv (ไม่ใช้ SQLAlchemy)
-- มีเมนูโหมด 1/2/3:
-  1) nextday  : ทำนายวันทำการถัดไปของทุกตลาด (US+TH)
-  2) backfill : ทำนายย้อนหลังตามช่วงวันที่กำหนด (ถามค่าบนคอนโซล)
-  3) preopen  : ทำนายเฉพาะตลาดที่กำลังจะเปิด "อีก 30 นาที"
-                - ไทย     : 08:30 (เวลา Asia/Bangkok)
-                - อเมริกา : 20:30 (เวลา Asia/Bangkok)
-                ระบบจะดึงข้อมูลและทำนาย "เฉพาะหุ้นของตลาดนั้น" แล้วเขียนลง StockDetail
-
-สิ่งที่ต้องมี:
-- .env (เช่น ../config.env) เก็บ DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT
-- อาร์ติแฟกต์โมเดล:
-    {LSTM_DIR|GRU_DIR}/logs/models/
-        - best_model_static.keras
-        - serving_artifacts.pkl (ต้องมี: ticker_scalers, ticker_encoder, market_encoder, feature_columns)
-        - production_model_config.json (มี seq_length)
-    META_DIR/
-        - xgb_price.json
-        - xgb_price.meta.joblib (มี 'best_k','q_lo','q_hi')
-
-คอลัมน์ที่เขียนคืน StockDetail (เฉพาะราคา):
-    - PredictionClose_LSTM
-    - PredictionClose_GRU
-    - PredictionClose_Ensemble
-"""
-
-import os, sys, math, json, time, warnings
+import os, sys, math, json, time, warnings, io, gc
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='ignore')
+
 from pathlib import Path
-from datetime import datetime, time as dtime
-from pandas.tseries.offsets import BDay
+from datetime import datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -42,30 +14,157 @@ import joblib
 import xgboost as xgb
 import tensorflow as tf
 from tensorflow.keras.models import load_model
+from tensorflow.keras.optimizers import Adam
+
+# register_keras_serializable (fix NameError)
+try:
+    from keras.saving import register_keras_serializable
+except Exception:
+    from tensorflow.keras.utils import register_keras_serializable
+
+# optional psutil for memory-aware MC dropout
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 # --- dotenv + mysql ---
 from dotenv import load_dotenv
 import mysql.connector
-from datetime import timedelta
 
 # ===================== CONFIG =====================
 ROOT = Path(__file__).resolve().parent
 DOTENV_PATH = ('config.env')
-LOCAL_TZ = os.getenv("LOCAL_TZ", "Asia/Bangkok")  # ปรับโซนได้ผ่าน ENV
-# โฟลเดอร์โมเดล (ปรับได้หรือแก้ในเมนู #4 ด้านล่าง)
+load_dotenv(DOTENV_PATH)
+
+LOCAL_TZ = os.getenv("LOCAL_TZ", "Asia/Bangkok")
+
 LSTM_DIR_DEFAULT = os.path.join(ROOT, "..", "LSTM_model")
 GRU_DIR_DEFAULT  = os.path.join(ROOT, "..", "GRU_model")
 META_DIR_DEFAULT = os.path.join(ROOT, "..", "Ensemble_Model")
 
 # Pre-open windows (เวลา Asia/Bangkok)
+from datetime import time as dtime_
 PREOPEN_WINDOWS = {
-    "TH": {"start": dtime(8, 25, 0), "end": dtime(8, 40, 0), "db_market": "Thailand"},
-    "US": {"start": dtime(20, 25, 0), "end": dtime(20, 40, 0), "db_market": "America"},
+    "TH": {"start": dtime_(8, 25, 0),  "end": dtime_(8, 40, 0),  "db_market": "Thailand"},
+    "US": {"start": dtime_(20, 25, 0), "end": dtime_(20, 40, 0), "db_market": "America"},
 }
 
-# ===================== DB (dotenv + mysql.connector) =====================
+# ---------- Online Learning master switches ----------
+ONLINE_LEARNING_ENABLED = os.getenv("ONLINE_LEARNING", "true").lower() in ("1","true","yes","y")
+ONLINE_TRAIN_STEPS_PER_TICKER = int(os.getenv("ONLINE_TRAIN_STEPS_PER_TICKER", "1"))
+
+# ---------- Training-code parity (key hyper/gates) ----------
+# pacing
+ONLINE_UPDATE_EVERY    = int(os.getenv("ONLINE_UPDATE_EVERY", "16"))   # general
+ONLINE_UPDATE_EVERY_US = int(os.getenv("ONLINE_UPDATE_EVERY_US", "24"))# US special
+ONLINE_UPDATE_MAX_PER_RUN     = int(os.getenv("ONLINE_UPDATE_MAX_PER_RUN", "48"))  # per run cap (align "per chunk")
+ONLINE_UPDATE_MAX_PER_RUN_US  = int(os.getenv("ONLINE_UPDATE_MAX_PER_RUN_US", "12"))
+
+# gates
+CONF_GATE = True
+UNC_MAX   = float(os.getenv("UNC_MAX", "0.10"))
+MARGIN    = float(os.getenv("MARGIN", "0.05"))
+Z_GATE_ONLINE    = float(os.getenv("Z_GATE_ONLINE", "1.05"))
+Z_GATE_ONLINE_US = float(os.getenv("Z_GATE_ONLINE_US", "1.05"))
+
+# market policy
+ALLOW_PRICE_ONLINE_MARKET = {'US': True, 'TH': False, 'OTHER': False}
+
+# uncertainty (MC dropout)
+MC_TRIGGER_BAND = 0.12
+MC_DIR_SAMPLES_DEFAULT = 3   # fallback if not provided in artifacts
+MEM_LOW_MB  = 800.0
+MEM_CRIT_MB = 400.0
+
+# price head / inference constants
+EPS_RET = 0.0011
+SIGMA_VOL_SPLIT = 0.013
+
+# EMA smoothing
+USE_EMA_PROB = True
+ALPHA_EMA_LOWVOL = 0.68
+ALPHA_EMA_HIVOL  = 0.62
+
+# PSC (Prior Shift Correction)
+USE_PSC = True
+PRIOR_EMA_ALPHA  = 0.07
+TARGET_EMA_ALPHA = 0.15
+PRIOR_MIN_N      = 40
+ACT_PREV_MIN_N   = 12
+PSC_LOGIT_CAP    = 0.20
+
+# Trend prior
+USE_TREND_PRIOR   = True
+TREND_WIN         = 7
+TREND_KAPPA       = 2.0
+# Trend weights (same policy block as train; light version)
+TREND_W_LOWVOL_TH = 0.08
+TREND_W_HIVOL_TH  = 0.12
+TREND_W_LOWVOL_US = 0.04
+TREND_W_HIVOL_US  = 0.07
+TREND_W_OVR = {'GOOGL':0.04,'NVDA':0.05,'AAPL':0.05,'MSFT':0.05, 'ADVANC':0.14}
+
+# Threshold deltas / market deltas / high-vol shifts
+THRESH_MIN = 0.50
+THR_CLIP_LOW  = 0.44
+THR_CLIP_HIGH = 0.86
+THR_CLIP_LOW_TH = 0.448
+TH_MARKET_DELTA = {'TH': -0.012, 'US': 0.000, 'OTHER': 0.000}
+HIVOL_THR_SHIFT_US = -0.022
+HIVOL_THR_SHIFT_TH = -0.017
+
+# Per-ticker smoothing & threshold overrides (from train)
+ALPHA_EMA_OVR = {
+    'ADVANC':0.62,'DITTO':0.62,'HUMAN':0.62,'INET':0.62,'JAS':0.62,
+    'DIF':0.60,'TRUE':0.60,'INSET':0.62,'JMART':0.60
+}
+THR_DELTA_OVR = {
+    'NVDA': -0.006, 'GOOGL': -0.006, 'AVGO': -0.006, 'AAPL': -0.006, 'MSFT': -0.006,
+    'TSM':  -0.006, 'AMD':  -0.006, 'META': -0.010, 'AMZN': -0.010, 'TSLA': +0.006,
+    'INSET': -0.004, 'JAS': 0.000, 'ADVANC': -0.010, 'DITTO': 0.000, 'DIF': 0.000,
+    'TRUE':  0.000, 'HUMAN': 0.000, 'INET': 0.000, 'JMART': 0.000,
+}
+# precision_tune (only keys used by gates: thr_bump, ema_alpha, z_gate, unc_plus)
+PRECISION_TUNE = {
+    'AAPL':  {'thr_bump': -0.078, 'ema_alpha': 0.46, 'z_gate': 0.96, 'unc_plus': -0.010},
+    'GOOGL': {'thr_bump': -0.040, 'ema_alpha': 0.52},
+    'AMZN':  {'thr_bump': -0.085, 'ema_alpha': 0.50},
+    'META':  {'thr_bump': -0.036, 'ema_alpha': 0.50},
+    'TSLA':  {'thr_bump': -0.040, 'ema_alpha': 0.50},
+    'TSM':   {'thr_bump': -0.028, 'ema_alpha': 0.50},
+    'MSFT':  {'thr_bump': -0.006, 'ema_alpha': 0.50},
+    'AMD':   {'thr_bump': -0.048, 'ema_alpha': 0.48, 'z_gate': 0.96, 'unc_plus': -0.008},
+    'NVDA':  {'thr_bump': -0.052, 'ema_alpha': 0.48},
+    'AVGO':  {'thr_bump': -0.110, 'ema_alpha': 0.50},
+
+    'ADVANC':{'thr_bump': -0.520, 'ema_alpha': 0.18, 'z_gate': 0.68, 'unc_plus': -0.22},
+    'TRUE':  {'thr_bump': -0.200, 'ema_alpha': 0.46},
+    'JAS':   {'thr_bump': +0.070, 'ema_alpha': 0.60},
+    'DITTO': {'thr_bump': -0.080, 'ema_alpha': 0.52},
+    'DIF':   {'thr_bump': -0.060, 'ema_alpha': 0.54},
+    'JMART': {'thr_bump': -0.090, 'ema_alpha': 0.50},
+    'INET':  {'thr_bump': -0.030, 'ema_alpha': 0.52},
+    'INSET': {'thr_bump': -0.012, 'ema_alpha': 0.54},
+    'HUMAN': {'thr_bump': -0.016, 'ema_alpha': 0.54},
+}
+
+# ===================== Custom Loss/Metric =====================
+@register_keras_serializable(package="custom")
+def gaussian_nll(y_true, y_pred):
+    y_true = tf.cast(y_true, tf.float32)
+    mu_s, log_sigma_s = tf.split(y_pred, 2, axis=-1)
+    sigma_s = tf.nn.softplus(log_sigma_s) + 1e-6
+    z = (y_true - mu_s) / sigma_s
+    return tf.reduce_mean(0.5*tf.math.log(2.0*np.pi) + tf.math.log(sigma_s) + 0.5*tf.square(z))
+
+@register_keras_serializable(package="custom")
+def mae_on_mu(y_true, y_pred):
+    mu_s, _ = tf.split(y_pred, 2, axis=-1)
+    return tf.reduce_mean(tf.abs(tf.cast(y_true, tf.float32) - mu_s))
+
+# ===================== DB =====================
 def get_mysql_conn() -> mysql.connector.connection.MySQLConnection:
-    load_dotenv(DOTENV_PATH)
     db_config = {
         "host": os.getenv("DB_HOST"),
         "user": os.getenv("DB_USER"),
@@ -83,7 +182,7 @@ def get_mysql_conn() -> mysql.connector.connection.MySQLConnection:
         print(f"❌ DB connect failed: {e}")
         sys.exit(1)
 
-# ===================== Standardize + TA/features =====================
+# ===================== Columns/Features =====================
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {
         'StockSymbol': 'StockSymbol',
@@ -217,9 +316,6 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ===================== FETCH (MySQL) =====================
 def fetch_latest_data(conn: mysql.connector.connection.MySQLConnection,
                       market_filter: str | None = None) -> pd.DataFrame:
-    """
-    market_filter: None=US+TH, 'Thailand' เฉพาะไทย, 'America' เฉพาะอเมริกา
-    """
     if market_filter is None:
         where_mkt = "s.Market IN ('America','Thailand')"
         params = ()
@@ -269,7 +365,6 @@ def fetch_latest_data(conn: mysql.connector.connection.MySQLConnection,
     raw['Date'] = pd.to_datetime(raw['Date'], errors='coerce', utc=False)
     df = standardize_columns(raw)
 
-    # เติมวัน/ffill ต่อหุ้น
     filled = []
     for sym, g in df.groupby("StockSymbol", sort=False):
         g = g.sort_values("Date").copy()
@@ -305,7 +400,7 @@ def fetch_latest_data(conn: mysql.connector.connection.MySQLConnection,
     df2 = df2.ffill().bfill().fillna(0)
     return df2
 
-# ===================== SAVE ราคาล้วน (MySQL) =====================
+# ===================== SAVE ราคา (MySQL) =====================
 def save_predictions_simple(predictions_df: pd.DataFrame,
                             conn: mysql.connector.connection.MySQLConnection) -> bool:
     if predictions_df is None or predictions_df.empty:
@@ -357,23 +452,417 @@ def save_predictions_simple(predictions_df: pd.DataFrame,
         import traceback; traceback.print_exc()
         return False
 
-# ===================== โหลดโมเดล / infer ราคา =====================
+# ===================== Load artifacts / compile =====================
 def load_base_artifacts(model_root_dir: str):
     MODEL_DIR = os.path.join(model_root_dir, "logs", "models")
     def p(name): return os.path.join(MODEL_DIR, name)
     with open(p("production_model_config.json"), 'r', encoding='utf-8') as f:
         cfg_all = json.load(f)
     seq_len = int(cfg_all.get('model_config', {}).get('seq_length', 10))
+    lr = float(cfg_all.get('model_config', {}).get('learning_rate', 1.6e-4))
+
     model = load_model(p("best_model_static.keras"), compile=False, safe_mode=False)
+    # compile for train_on_batch
+    try:
+        model.compile(optimizer=Adam(learning_rate=lr), loss=gaussian_nll, metrics=[mae_on_mu])
+    except Exception:
+        model.compile(optimizer=Adam(learning_rate=1e-4), loss=gaussian_nll, metrics=[mae_on_mu])
+
     artifacts = joblib.load(p("serving_artifacts.pkl"))
+    mc_samples = int(artifacts.get('mc_dir_samples', MC_DIR_SAMPLES_DEFAULT)) if isinstance(artifacts, dict) else MC_DIR_SAMPLES_DEFAULT
+
     return dict(
+        model_dir=MODEL_DIR,
         seq_len=seq_len,
         model=model,
         ticker_scalers=artifacts['ticker_scalers'],
         ticker_encoder=artifacts['ticker_encoder'],
         market_encoder=artifacts['market_encoder'],
-        feature_columns=artifacts['feature_columns']
+        feature_columns=artifacts['feature_columns'],
+        iso_cals = artifacts.get('iso_cals', {}),
+        meta_lrs = artifacts.get('meta_lrs', {}),
+        thresholds = artifacts.get('thresholds', {}),
+        val_prev_map = artifacts.get('val_prev_map', {}),
+        mc_dir_samples = mc_samples,
+        config=cfg_all
     )
+
+def load_meta_artifacts(meta_dir: str):
+    model_path = os.path.join(meta_dir, "xgb_price.json")
+    meta_path  = os.path.join(meta_dir, "xgb_price.meta.joblib")
+    booster = xgb.Booster(); booster.load_model(model_path)
+    meta = joblib.load(meta_path)
+    best_k = int(meta.get('best_k', 200))
+    q_lo = float(meta.get('q_lo', -0.05)); q_hi = float(meta.get('q_hi', 0.05))
+    return booster, best_k, q_lo, q_hi
+
+# ===================== Online state (JSON) =====================
+class OnlineStateManager:
+    def __init__(self, model_dir: str, tag: str):
+        self.path = os.path.join(model_dir, f"{tag}_online_state.json")
+        self.state = self._load()
+
+    def _default_rec(self) -> dict:
+        return {
+            "step_ctr": 0,
+            "updates_this_run": 0,
+            "ema_state": None,
+            "pi_pred_ema": 0.5,
+            "pi_target_ema": 0.5,
+            "n": 0,
+            "na": 0,
+            "last_online_date": None,
+            "last_updated_at": None
+        }
+
+    def _load(self) -> dict:
+        data = {}
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception as e:
+                print(f"⚠️ online_state: read failed ({e}) → reinit")
+
+        # normalize / migrate legacy
+        if not isinstance(data, dict):
+            data = {}
+        tickers = data.get("tickers")
+        if not isinstance(tickers, dict):
+            tickers = {}
+        last_snapshot = data.get("last_snapshot", None)
+        return {"last_snapshot": last_snapshot, "tickers": tickers}
+
+    def get_t(self, ticker: str) -> dict:
+        tk_map = self.state.setdefault("tickers", {})
+        rec = tk_map.get(ticker)
+        if not isinstance(rec, dict):
+            rec = self._default_rec()
+            tk_map[ticker] = rec
+        return rec
+
+    def set_t(self, ticker: str, rec: dict):
+        self.state.setdefault("tickers", {})[ticker] = rec
+
+    def bump_snapshot(self):
+        self.state["last_snapshot"] = datetime.now(ZoneInfo(LOCAL_TZ)).isoformat()
+
+    def save(self):
+        self.bump_snapshot()
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(self.state, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.path)
+        print(f"💾 wrote {self.path}")
+# ===================== Prob & gates helpers =====================
+def _encode_market(menc, mk_name: str) -> int:
+    try:
+        return int(menc.transform([mk_name])[0])
+    except Exception:
+        return 0
+
+def _norm_cdf(x): return 0.5*(1.0 + math.erf(x / math.sqrt(2.0)))
+def _softplus(x): return math.log1p(math.exp(x))
+
+def _free_ram_mb():
+    try:
+        if psutil is None:
+            return float('inf')
+        return float(psutil.virtual_memory().available) / 1e6
+    except Exception:
+        return float('inf')
+
+def _trend_weight(ticker: str, sigma_raw: float, market_name: str) -> float:
+    if ticker in TREND_W_OVR:
+        return TREND_W_OVR[ticker]
+    if market_name == 'US':
+        return TREND_W_LOWVOL_US if sigma_raw < SIGMA_VOL_SPLIT else TREND_W_HIVOL_US
+    else:
+        return TREND_W_LOWVOL_TH if sigma_raw < SIGMA_VOL_SPLIT else TREND_W_HIVOL_TH
+
+def _alpha_for(ticker: str, sigma_raw: float) -> float:
+    base = ALPHA_EMA_LOWVOL if sigma_raw < SIGMA_VOL_SPLIT else ALPHA_EMA_HIVOL
+    return float(ALPHA_EMA_OVR.get(ticker, base))
+
+def _thr_base_for(tid, tname, thresholds: dict, market_name: str) -> float:
+    thr = thresholds.get(str(tid), thresholds.get(tid, 0.5)) if thresholds else 0.5
+    thr = float(thr)
+    if tname in THR_DELTA_OVR:
+        thr = thr + THR_DELTA_OVR[tname]
+    thr = thr + TH_MARKET_DELTA.get(market_name, 0.0)
+    return float(np.clip(thr, THR_CLIP_LOW, THR_CLIP_HIGH))
+
+def _mc_samples(base, need_mc: bool) -> int:
+    if not need_mc:
+        return 0
+    free = _free_ram_mb()
+    if free < MEM_CRIT_MB: return 0
+    if free < MEM_LOW_MB:  return 1
+    return int(max(1, base['mc_dir_samples']))
+
+def compute_price_stats(base, hist_df: pd.DataFrame, ticker: str):
+    """Return dict with mu_raw, sigma_raw, last_close, market_name, tid, mid, X tensors."""
+    m = base['model']; seq_len = base['seq_len']; feats = base['feature_columns']
+    tenc = base['ticker_encoder']; menc = base['market_encoder']; scalers = base['ticker_scalers']
+    tid = int(tenc.transform([ticker])[0])
+    if tid not in scalers: return None
+    fs = scalers[tid]['feature_scaler']; ps = scalers[tid]['price_scaler']
+    mk_name = str(hist_df['Market'].iloc[-1]) if 'Market' in hist_df.columns else 'OTHER'
+    mid = _encode_market(menc, mk_name)
+    Xf = fs.transform(hist_df[feats].values.astype(np.float32)).reshape(1, seq_len, -1)
+    Xt = np.full((1, seq_len), tid, np.int32)
+    Xm = np.full((1, seq_len), mid, np.int32)
+    y = m([Xf, Xt, Xm], training=False)
+    y = y.numpy() if hasattr(y, "numpy") else np.asarray(y)
+    if y.ndim == 1: y = y.reshape(1, 2)
+    mu_s, log_sigma_s = float(y[0,0]), float(y[0,1])
+    scale  = getattr(ps, 'scale_',  np.array([1.0], dtype=np.float32))[0]
+    center = getattr(ps, 'center_', np.array([0.0], dtype=np.float32))[0]
+    sigma_s = max(_softplus(log_sigma_s) + 1e-6, 1e-6)
+    mu_raw = mu_s * scale + center
+    sigma_raw = sigma_s * scale
+    last_close = float(hist_df['Close'].iloc[-1])
+    return dict(mu_raw=mu_raw, sigma_raw=sigma_raw, last_close=last_close,
+                market_name=('US' if mk_name=='US' else ('TH' if mk_name=='TH' else 'OTHER')),
+                tid=tid, mid=mid, Xf=Xf, Xt=Xt, Xm=Xm)
+
+def compute_prob_meta(base, stats, ticker: str, ema_prev: float | None, prior_rec: dict,
+                      hist_closes: np.ndarray | None = None):
+    """Compute p_use (EMA), p_unc, thr_eff, z, with PSC & trend prior & precision tune."""
+    mu_raw, sigma_raw = stats['mu_raw'], stats['sigma_raw']
+    market_name = stats['market_name']; tid = stats['tid']
+    Xf, Xt, Xm = stats['Xf'], stats['Xt'], stats['Xm']
+
+    # raw p_up and z
+    if sigma_raw <= 1e-9:
+        p_up = 1.0 if (mu_raw - EPS_RET) > 0 else 0.0
+        z = 0.0
+    else:
+        z = (mu_raw - EPS_RET) / max(1e-9, sigma_raw)
+        p_up = _norm_cdf(z)
+
+    # MC uncertainty (when needed)
+    need_mc = (abs(p_up - 0.5) <= MC_TRIGGER_BAND)
+    local_mc = _mc_samples(base, need_mc)
+    p_unc = 0.0
+    if local_mc > 0:
+        pups = []
+        for _ in range(local_mc):
+            y2 = base['model']([Xf, Xt, Xm], training=True)
+            y2 = y2.numpy() if hasattr(y2, "numpy") else np.asarray(y2)
+            if y2.ndim == 1: y2 = y2.reshape(1, 2)
+            mu_s2, log_sigma_s2 = float(y2[0, 0]), float(y2[0, 1])
+            sigma_s2 = max(_softplus(log_sigma_s2) + 1e-6, 1e-6)
+            # scale/center from price scaler:
+            t_scaler = base['ticker_scalers'][tid]['price_scaler']
+            scale  = getattr(t_scaler, 'scale_',  np.array([1.0], dtype=np.float32))[0]
+            center = getattr(t_scaler, 'center_', np.array([0.0], dtype=np.float32))[0]
+            mu_raw2 = mu_s2 * scale + center
+            pups.append(_norm_cdf((mu_raw2 - EPS_RET) / (sigma_s2 * scale)))
+        p_unc = float(np.std(np.asarray(pups, np.float32), ddof=0))
+
+    # calibration (iso, meta-lr if available)
+    iso = base.get('iso_cals', {}).get(int(tid))
+    p_iso = float(iso.transform([p_up])[0]) if iso is not None else float(p_up)
+    lr  = base.get('meta_lrs', {}).get(int(tid))
+    if lr is not None:
+        want = getattr(lr, 'n_features_in_', 5)
+        # build X_meta
+        if want >= 7:
+            X_meta = np.array([[p_iso, z, sigma_raw, mu_raw, p_iso, p_unc, p_unc]], np.float32)
+        else:
+            X_meta = np.array([[p_iso, z, sigma_raw, mu_raw, p_unc]], np.float32)
+        p_meta = float(lr.predict_proba(X_meta)[0, 1])
+    else:
+        p_meta = p_iso
+
+    # PSC
+    pi_train = float(base.get('val_prev_map', {}).get(int(tid), 0.5))
+    if USE_PSC and prior_rec['n'] >= PRIOR_MIN_N and prior_rec['na'] >= ACT_PREV_MIN_N:
+        def _logit(x, eps=1e-6):
+            x = float(np.clip(x, eps, 1 - eps)); return math.log(x / (1 - x))
+        delta = _logit(prior_rec['pi_target_ema']) - _logit(pi_train)
+        delta = float(np.clip(delta, -PSC_LOGIT_CAP, PSC_LOGIT_CAP))
+        logit_p = math.log(p_meta / (1 - p_meta))
+        p_meta = 1.0 / (1.0 + math.exp(-(logit_p + delta)))
+
+    # Trend prior (use closes if provided; fallback to z-proxy)
+    if USE_TREND_PRIOR:
+        if hist_closes is not None and len(hist_closes) >= 2:
+            logret = np.diff(np.log(hist_closes))[-TREND_WIN:]
+            if logret.size > 0:
+                p_trend = _norm_cdf(TREND_KAPPA * (logret.mean() / (logret.std() + 1e-8)))
+            else:
+                p_trend = 0.5
+        else:
+            p_trend = _norm_cdf(TREND_KAPPA * z)
+        w = _trend_weight(ticker, sigma_raw, market_name)
+        p_meta = (1 - w) * p_meta + w * p_trend
+
+    # EMA smoothing
+    base_alpha = _alpha_for(ticker, sigma_raw)
+    tune = PRECISION_TUNE.get(ticker, {})
+    alpha = float(tune.get('ema_alpha', base_alpha))
+    ema_state = p_meta if (ema_prev is None or not USE_EMA_PROB) else (alpha * ema_prev + (1 - alpha) * p_meta)
+    p_use = float(np.clip(ema_state, 1e-4, 1 - 1e-4))
+
+    # effective threshold
+    thr_base = _thr_base_for(tid, ticker, base.get('thresholds', {}), market_name)
+    thr_base = float(np.clip(thr_base + float(tune.get('thr_bump', 0.0)), THR_CLIP_LOW, THR_CLIP_HIGH))
+    hivol_shift = HIVOL_THR_SHIFT_TH if market_name == 'TH' else HIVOL_THR_SHIFT_US
+    thr_eff = float(np.clip(
+        thr_base + (hivol_shift if sigma_raw >= SIGMA_VOL_SPLIT else 0.0),
+        (THR_CLIP_LOW_TH if market_name == 'TH' else THR_CLIP_LOW),
+        THR_CLIP_HIGH
+    ))
+
+    # dynamic z_gate / unc relief from precision_tune
+    eff_unc_max = max(0.0, float(UNC_MAX - float(tune.get('unc_plus', 0.0))))
+    eff_z_gate  = float(tune.get('z_gate', Z_GATE_ONLINE))
+
+    return dict(p_use=p_use, p_unc=p_unc, thr_eff=thr_eff, z=z,
+                ema_state=float(ema_state), eff_unc_max=eff_unc_max, eff_z_gate=eff_z_gate)
+
+def maybe_online_update_once_strict(base, state_mgr: OnlineStateManager,
+                                    g_for_ticker: pd.DataFrame, ticker: str,
+                                    us_mode: bool) -> bool:
+    """
+    Strict online update with training-like gates.
+    Uses the last known (seq_len) as features and last row as target.
+    """
+    if not ONLINE_LEARNING_ENABLED:
+        return False
+
+    seq_len = base['seq_len']
+    if len(g_for_ticker) < seq_len + 1:
+        return False
+
+    # states
+    rec = state_mgr.get_t(ticker)
+    step_ctr = int(rec.get("step_ctr", 0))
+    updates_this_run = int(rec.get("updates_this_run", 0))
+    ema_prev = rec.get("ema_state", None)
+    prior_rec = {
+        'pi_pred_ema': float(rec.get('pi_pred_ema', 0.5)),
+        'pi_target_ema': float(rec.get('pi_target_ema', 0.5)),
+        'n': int(rec.get('n', 0)),
+        'na': int(rec.get('na', 0))
+    }
+
+    # pacing check
+    step_ctr += 1
+    every = ONLINE_UPDATE_EVERY_US if us_mode else ONLINE_UPDATE_EVERY
+    max_per_run = ONLINE_UPDATE_MAX_PER_RUN_US if us_mode else ONLINE_UPDATE_MAX_PER_RUN
+    do_pace = (step_ctr % every == 0) and (updates_this_run < max_per_run)
+    if not do_pace:
+        # persist counter even if no update
+        rec['step_ctr'] = step_ctr
+        state_mgr.set_t(ticker, rec)
+        return False
+
+    # market policy
+    market_name_last = str(g_for_ticker['Market'].iloc[-1]) if 'Market' in g_for_ticker.columns else 'OTHER'
+    if not ALLOW_PRICE_ONLINE_MARKET.get(market_name_last, False):
+        rec['step_ctr'] = step_ctr
+        state_mgr.set_t(ticker, rec)
+        return False
+
+    # build hist/target
+    hist = g_for_ticker.iloc[-(seq_len+1):-1].copy()
+    target_row = g_for_ticker.iloc[-1]
+    stats = compute_price_stats(base, hist, ticker)
+    if stats is None:
+        rec['step_ctr'] = step_ctr
+        state_mgr.set_t(ticker, rec)
+        return False
+
+    # prob, thresholds, gates
+    meta = compute_prob_meta(base, stats, ticker, ema_prev, prior_rec,hist_closes=hist['Close'].values.astype(np.float32))
+
+    pass_gate = True
+    if CONF_GATE:
+        conf = abs(meta['p_use'] - meta['thr_eff'])
+        zgate = (Z_GATE_ONLINE_US if us_mode else meta['eff_z_gate'])
+        pass_gate = (conf >= MARGIN) and (meta['p_unc'] <= meta['eff_unc_max']) and (abs(meta['z']) >= zgate)
+
+    if not pass_gate:
+        # update PSC predicted prevalence counters (n)
+        prior_rec['pi_pred_ema'] = (1 - PRIOR_EMA_ALPHA) * prior_rec['pi_pred_ema'] + PRIOR_EMA_ALPHA * meta['p_use']
+        prior_rec['n'] += 1
+        rec.update({
+            'step_ctr': step_ctr,
+            'ema_state': meta['ema_state'],
+            'pi_pred_ema': prior_rec['pi_pred_ema'],
+            'pi_target_ema': prior_rec['pi_target_ema'],
+            'n': prior_rec['n'],
+            'na': prior_rec['na']
+        })
+        state_mgr.set_t(ticker, rec)
+        return False
+
+    # train_on_batch with true label
+    last_close = float(hist['Close'].iloc[-1])
+    actual_next = float(target_row['Close'])
+    true_logret = float(np.clip(math.log(actual_next / max(1e-9, last_close)), -0.25, 0.25))
+
+    tid = stats['tid']
+    ps = base['ticker_scalers'][tid]['price_scaler']
+    y_true_scaled = ps.transform(np.array([[true_logret]], np.float32))
+
+    # do small updates
+    try:
+        for _ in range(max(1, ONLINE_TRAIN_STEPS_PER_TICKER)):
+            base['model'].train_on_batch([stats['Xf'], stats['Xt'], stats['Xm']], y_true_scaled)
+    except Exception as e:
+        print(f"⚠️ online update failed for {ticker}: {e}")
+        # still persist counters
+        prior_rec['pi_pred_ema'] = (1 - PRIOR_EMA_ALPHA) * prior_rec['pi_pred_ema'] + PRIOR_EMA_ALPHA * meta['p_use']
+        prior_rec['n'] += 1
+        rec.update({
+            'step_ctr': step_ctr,
+            'ema_state': meta['ema_state'],
+            'pi_pred_ema': prior_rec['pi_pred_ema'],
+            'pi_target_ema': prior_rec['pi_target_ema'],
+            'n': prior_rec['n'],
+            'na': prior_rec['na']
+        })
+        state_mgr.set_t(ticker, rec)
+        return False
+
+    # update PSC target prevalence (we observed actual_dir)
+    actual_dir = int(actual_next > last_close)
+    prior_rec['pi_target_ema'] = (1 - TARGET_EMA_ALPHA) * prior_rec['pi_target_ema'] + TARGET_EMA_ALPHA * float(actual_dir)
+    prior_rec['na'] += 1
+    prior_rec['pi_pred_ema'] = (1 - PRIOR_EMA_ALPHA) * prior_rec['pi_pred_ema'] + PRIOR_EMA_ALPHA * meta['p_use']
+    prior_rec['n'] += 1
+
+    updates_this_run += 1
+    rec.update({
+        'step_ctr': step_ctr,
+        'updates_this_run': updates_this_run,
+        'ema_state': meta['ema_state'],
+        'pi_pred_ema': prior_rec['pi_pred_ema'],
+        'pi_target_ema': prior_rec['pi_target_ema'],
+        'n': prior_rec['n'],
+        'na': prior_rec['na'],
+        'last_online_date': str(pd.to_datetime(target_row['Date']).date()),
+        'last_updated_at': datetime.now(ZoneInfo(LOCAL_TZ)).isoformat()
+    })
+    state_mgr.set_t(ticker, rec)
+    return True
+
+# ===================== Price prediction helpers =====================
+def ensure_feature_columns(df: pd.DataFrame, feature_columns: list) -> pd.DataFrame:
+    out = df.copy()
+    for c in feature_columns:
+        if c not in out.columns:
+            out[c] = 0.0
+    out[feature_columns] = (out.groupby('Ticker')[feature_columns]
+                              .apply(lambda g: g.fillna(method='ffill'))
+                              .reset_index(level=0, drop=True))
+    out[feature_columns] = out[feature_columns].fillna(0.0)
+    return out
 
 def base_predict_price_once(base, hist_df: pd.DataFrame, ticker: str) -> float | None:
     m = base['model']; seq_len = base['seq_len']; feats = base['feature_columns']
@@ -381,15 +870,10 @@ def base_predict_price_once(base, hist_df: pd.DataFrame, ticker: str) -> float |
 
     tid = int(tenc.transform([ticker])[0])
     if tid not in scalers: return None
-    fs = scalers[tid]['feature_scaler']
-    ps = scalers[tid]['price_scaler']
+    fs = scalers[tid]['feature_scaler']; ps = scalers[tid]['price_scaler']
 
-    if 'Market' in hist_df.columns:
-        mk_name = str(hist_df['Market'].iloc[-1])
-        try: mid = int(menc.transform([mk_name])[0])
-        except: mid = 0
-    else:
-        mid = 0
+    mk_name = str(hist_df['Market'].iloc[-1]) if 'Market' in hist_df.columns else 'OTHER'
+    mid = _encode_market(menc, mk_name)
 
     Xf = fs.transform(hist_df[feats].values.astype(np.float32)).reshape(1, seq_len, -1)
     Xt = np.full((1, seq_len), tid, np.int32)
@@ -402,20 +886,10 @@ def base_predict_price_once(base, hist_df: pd.DataFrame, ticker: str) -> float |
 
     scale  = getattr(ps, 'scale_', [1.0])[0]
     center = getattr(ps, 'center_', [0.0])[0]
-
     mu_raw = mu_s * scale + center
     last_close = float(hist_df['Close'].iloc[-1])
     pred_price = float(last_close * math.exp(mu_raw))
     return pred_price
-
-def load_meta_artifacts(meta_dir: str):
-    model_path = os.path.join(meta_dir, "xgb_price.json")
-    meta_path  = os.path.join(meta_dir, "xgb_price.meta.joblib")
-    booster = xgb.Booster(); booster.load_model(model_path)
-    meta = joblib.load(meta_path)
-    best_k = int(meta.get('best_k', 200))
-    q_lo = float(meta.get('q_lo', -0.05)); q_hi = float(meta.get('q_hi', 0.05))
-    return booster, best_k, q_lo, q_hi
 
 def meta_price_from_bases(booster, best_k: int, last_close: float,
                           lstm_price: float, gru_price: float, ref_date: pd.Timestamp) -> float:
@@ -433,28 +907,12 @@ def meta_price_from_bases(booster, best_k: int, last_close: float,
     ret_hat = float(booster.predict(dmat, iteration_range=(0, best_k))[0])
     return float(last_close * math.exp(ret_hat))
 
-def ensure_feature_columns(df: pd.DataFrame, feature_columns: list) -> pd.DataFrame:
-    out = df.copy()
-    for c in feature_columns:
-        if c not in out.columns:
-            out[c] = 0.0
-    out[feature_columns] = (out.groupby('Ticker')[feature_columns]
-                              .apply(lambda g: g.fillna(method='ffill'))
-                              .reset_index(level=0, drop=True))
-    out[feature_columns] = out[feature_columns].fillna(0.0)
-    return out
-
-# ===================== โหมดทำงาน =====================
+# ===================== MODES =====================
 def run_nextday(conn, lstm_dir: str, gru_dir: str, meta_dir: str, market_filter: str | None):
-    """
-    market_filter: None=US+TH, 'Thailand' เฉพาะไทย, 'America' เฉพาะเมกา
-    ทำนาย 'วันปฏิทินถัดไป' (+1 day) ของแต่ละหุ้น ตามความต้องการให้ไม่ข้ามเสาร์-อาทิตย์
-    """
     df_raw = fetch_latest_data(conn, market_filter=market_filter)
     if df_raw.empty:
         print("⚠️ ไม่มีข้อมูลจาก DB")
         return
-
     df_raw['Ticker'] = df_raw['StockSymbol'].astype(str)
 
     base_lstm = load_base_artifacts(lstm_dir)
@@ -465,19 +923,39 @@ def run_nextday(conn, lstm_dir: str, gru_dir: str, meta_dir: str, market_filter:
         meta_booster = None
         meta_bestk   = None
 
+    state_lstm = OnlineStateManager(base_lstm['model_dir'], "LSTM")
+    state_gru  = OnlineStateManager(base_gru['model_dir'],  "GRU")
+
+    # reset per-run counters
+    for st in (state_lstm, state_gru):
+        for t in list(st.state.get("tickers", {}).keys()):
+            rec = st.state["tickers"][t]
+            rec["updates_this_run"] = 0
+            st.state["tickers"][t] = rec
+
     df_all = ensure_feature_columns(df_raw, base_lstm['feature_columns'])
 
-    agg = {}  # key=(ticker,pred_date) -> row
+    did_update_lstm = did_update_gru = False
+    agg = {}
     for tkr, g in df_all.groupby('Ticker'):
         g = g.sort_values('Date').reset_index(drop=True)
+        # strict online update once per ticker using last sequence
+        us_mode = (str(g['Market'].iloc[-1]) == 'US') if 'Market' in g.columns else False
+        if len(g) >= max(base_lstm['seq_len'], base_gru['seq_len']) + 1:
+            if maybe_online_update_once_strict(base_lstm, state_lstm, g, tkr, us_mode):
+                print(f"🧠 online-updated (LSTM): {tkr}")
+                did_update_lstm = True
+            if maybe_online_update_once_strict(base_gru, state_gru, g, tkr, us_mode):
+                print(f"🧠 online-updated (GRU): {tkr}")
+                did_update_gru = True
+
+        # predict next calendar day
         if len(g) < max(base_lstm['seq_len'], base_gru['seq_len']):
             continue
-
         hist_lstm = g.iloc[-base_lstm['seq_len']:]
         hist_gru  = g.iloc[-base_gru['seq_len']:]
         last_close= float(g['Close'].iloc[-1])
         last_date = pd.to_datetime(g['Date'].iloc[-1])
-        # ใช้ "วันปฏิทิน" ถัดไป ไม่ใช่ business day
         pred_date = (last_date + timedelta(days=1)).date()
 
         p_lstm = base_predict_price_once(base_lstm, hist_lstm, tkr)
@@ -495,19 +973,25 @@ def run_nextday(conn, lstm_dir: str, gru_dir: str, meta_dir: str, market_filter:
             'Ensemble_Price': float(p_meta or 0.0),
         }
 
+    # persist online states + optional model weights
+    if did_update_lstm:
+        base_lstm['model'].save(os.path.join(base_lstm['model_dir'], "best_model_online.keras"))
+        print(f"💾 saved weights -> {os.path.join(base_lstm['model_dir'], 'best_model_online.keras')}")
+    if did_update_gru:
+        base_gru['model'].save(os.path.join(base_gru['model_dir'], "best_model_online.keras"))
+        print(f"💾 saved weights -> {os.path.join(base_gru['model_dir'], 'best_model_online.keras')}")
+
+    state_lstm.save()
+    state_gru.save()
+
     if agg:
         print(f"💾 บันทึกผลลัพธ์ {len(agg)} รายการลง DB ...")
         save_predictions_simple(pd.DataFrame(agg.values()), conn)
     else:
         print("⚠️ nextday: ไม่มีข้อมูลที่จะบันทึก")
 
-
 def run_backfill(conn, lstm_dir: str, gru_dir: str, meta_dir: str,
                  start: str | None, end: str | None, tickers_csv: str | None, market_filter: str | None):
-    """
-    ทำนายย้อนหลังโดยผูกวันที่ทำนาย = วันที่แถวถัดไปใน DB ของ ticker เดียวกัน (ไม่ข้ามวัน)
-    start/end คือช่วงของ 'วันที่ทำนาย' (pred_date) สำหรับการกรอง
-    """
     df_raw = fetch_latest_data(conn, market_filter=market_filter)
     if df_raw.empty:
         print("⚠️ ไม่มีข้อมูลจาก DB")
@@ -516,7 +1000,6 @@ def run_backfill(conn, lstm_dir: str, gru_dir: str, meta_dir: str,
     if tickers_csv:
         keep = {t.strip().upper() for t in tickers_csv.split(",") if t.strip()}
         df_raw = df_raw[df_raw['StockSymbol'].str.upper().isin(keep)]
-
     df_raw['Ticker'] = df_raw['StockSymbol'].astype(str)
 
     base_lstm = load_base_artifacts(lstm_dir)
@@ -527,56 +1010,72 @@ def run_backfill(conn, lstm_dir: str, gru_dir: str, meta_dir: str,
         meta_booster = None
         meta_bestk   = None
 
+    state_lstm = OnlineStateManager(base_lstm['model_dir'], "LSTM")
+    state_gru  = OnlineStateManager(base_gru['model_dir'],  "GRU")
+    for st in (state_lstm, state_gru):
+        for t in list(st.state.get("tickers", {}).keys()):
+            rec = st.state["tickers"][t]
+            rec["updates_this_run"] = 0
+            st.state["tickers"][t] = rec
+
     df_all = ensure_feature_columns(df_raw, base_lstm['feature_columns'])
     start_d = pd.to_datetime(start).date() if start else None
     end_d   = pd.to_datetime(end).date()   if end   else None
 
-    agg = {}  # key=(ticker,pred_date) -> row
+    did_update_lstm = did_update_gru = False
+    agg = {}
     max_seq = max(base_lstm['seq_len'], base_gru['seq_len'])
 
     for tkr, g in df_all.groupby('Ticker'):
         g = g.sort_values('Date').reset_index(drop=True)
         if len(g) <= max_seq:
             continue
-
-        # เดินจาก index i (วันอ้างอิง) → ทำนายวันถัดไปใน DB คือ i+1
         for i in range(max_seq, len(g) - 1):
             hist_lstm = g.iloc[i - base_lstm['seq_len']: i]
             hist_gru  = g.iloc[i - base_gru['seq_len'] : i]
 
-            ref_date   = pd.to_datetime(g['Date'].iloc[i])      # วันอ้างอิง
-            pred_date  = pd.to_datetime(g['Date'].iloc[i + 1]).date()  # วันถัดไป "ตาม DB"
+            ref_date   = pd.to_datetime(g['Date'].iloc[i])
+            pred_date  = pd.to_datetime(g['Date'].iloc[i + 1]).date()
             if (start_d and pred_date < start_d) or (end_d and pred_date > end_d):
                 continue
-
             last_close = float(g['Close'].iloc[i])
+
+            # strict online (walk-forward step i -> i+1)
+            g_tmp = g.iloc[:i+1]  # up to ref i (has actual Close at i)
+            us_mode = (str(g_tmp['Market'].iloc[-1]) == 'US') if 'Market' in g_tmp.columns else False
+            if maybe_online_update_once_strict(base_lstm, state_lstm, g_tmp, tkr, us_mode):
+                did_update_lstm = True
+            if maybe_online_update_once_strict(base_gru,  state_gru,  g_tmp, tkr, us_mode):
+                did_update_gru = True
 
             p_lstm = base_predict_price_once(base_lstm, hist_lstm, tkr)
             p_gru  = base_predict_price_once(base_gru,  hist_gru,  tkr)
-
             p_meta = None
             if (p_lstm is not None) and (p_gru is not None) and (meta_booster is not None):
                 p_meta = meta_price_from_bases(meta_booster, meta_bestk, last_close, p_lstm, p_gru, ref_date)
 
             key = (tkr, pred_date)
-            row = agg.get(key)
-            if row is None:
-                row = {
-                    'StockSymbol': tkr,
-                    'Date': pred_date.strftime('%Y-%m-%d'),
-                    'LSTM_Price': 0.0,
-                    'GRU_Price': 0.0,
-                    'Ensemble_Price': 0.0,
-                }
-
-            if p_lstm is not None:
-                row['LSTM_Price'] = float(p_lstm)
-            if p_gru is not None:
-                row['GRU_Price']  = float(p_gru)
-            if p_meta is not None:
-                row['Ensemble_Price'] = float(p_meta)
-
+            row = agg.get(key, {
+                'StockSymbol': tkr,
+                'Date': pred_date.strftime('%Y-%m-%d'),
+                'LSTM_Price': 0.0,
+                'GRU_Price': 0.0,
+                'Ensemble_Price': 0.0,
+            })
+            if p_lstm is not None: row['LSTM_Price'] = float(p_lstm)
+            if p_gru  is not None: row['GRU_Price']  = float(p_gru)
+            if p_meta is not None: row['Ensemble_Price'] = float(p_meta)
             agg[key] = row
+
+    if did_update_lstm:
+        base_lstm['model'].save(os.path.join(base_lstm['model_dir'], "best_model_online.keras"))
+        print(f"💾 saved weights -> {os.path.join(base_lstm['model_dir'], 'best_model_online.keras')}")
+    if did_update_gru:
+        base_gru['model'].save(os.path.join(base_gru['model_dir'], "best_model_online.keras"))
+        print(f"💾 saved weights -> {os.path.join(base_gru['model_dir'], 'best_model_online.keras')}")
+
+    state_lstm.save()
+    state_gru.save()
 
     if agg:
         print(f"💾 บันทึกผลลัพธ์ {len(agg)} รายการลง DB ...")
@@ -584,16 +1083,8 @@ def run_backfill(conn, lstm_dir: str, gru_dir: str, meta_dir: str,
     else:
         print("⚠️ backfill: ไม่มีข้อมูลที่จะบันทึก")
 
-
 def run_preopen(conn, lstm_dir: str, gru_dir: str, meta_dir: str, strict_window: bool = True):
-    """
-    ตรวจเวลาปัจจุบัน (Asia/Bangkok โดยค่าเริ่มต้น) แล้วเลือกตลาด:
-        - TH: 08:25–08:40 → ใช้ market_filter='Thailand'
-        - US: 20:25–20:40 → ใช้ market_filter='America'
-    ถ้า strict_window=True และอยู่นอกหน้าต่างเวลาดังกล่าว จะไม่รัน
-    """
     now = datetime.now(ZoneInfo(LOCAL_TZ)).time()
-
     def in_window(win):
         s, e = win["start"], win["end"]
         return (now >= s) and (now <= e)
@@ -609,22 +1100,20 @@ def run_preopen(conn, lstm_dir: str, gru_dir: str, meta_dir: str, strict_window:
         if strict_window:
             print("⏱️ ตอนนี้อยู่นอกช่วงเวลา PRE-OPEN (TH 08:25–08:40 / US 20:25–20:40) → ไม่รัน")
             return
-        # ถ้าไม่ strict ให้เลือกตลาดถัดไปแบบ heuristic
         market_filter = "Thailand" if now < dtime(12,0,0) else "America"
         print(f"⚠️ นอกช่วง PRE-OPEN → เลือกตลาดโดยประมาณ: {market_filter}")
 
     run_nextday(conn, lstm_dir, gru_dir, meta_dir, market_filter=market_filter)
 
-# ===================== MENU (1 / 2 / 3) =====================
+# ===================== MENU =====================
 def main():
-    print("\n=== PRICE-ONLY INFERENCE (MySQL + dotenv) ===")
-    print("  1) nextday  : ทำนายวันทำการถัดไป (ทุกตลาด)")
+    print("\n=== PRICE-ONLY INFERENCE (MySQL + dotenv + Online Learning: training-parity) ===")
+    print("  1) nextday  : ทำนายวันปฏิทินถัดไป (ทุกตลาด)")
     print("  2) backfill : ทำนายย้อนหลัง (กรอกช่วงวันที่)")
     print("  3) preopen  : ทำนายเฉพาะตลาดที่กำลังจะเปิดอีก 30 นาที (TH 08:30 / US 20:30)")
     print("  4) ตั้งค่า path โมเดล (ปัจจุบันใช้ค่าเริ่มต้น)")
-    choice = input("เลือกโหมด (1/2/3/4): ").strip()
+    choice = input("เลือกโหมด (1/2/3/4) [ว่าง=preopen]: ").strip()
 
-    # paths
     lstm_dir = LSTM_DIR_DEFAULT
     gru_dir  = GRU_DIR_DEFAULT
     meta_dir = META_DIR_DEFAULT
@@ -634,12 +1123,14 @@ def main():
         gru_dir  = input(f"ใส่ GRU  dir [{GRU_DIR_DEFAULT}]: ").strip() or GRU_DIR_DEFAULT
         meta_dir = input(f"ใส่ META dir [{META_DIR_DEFAULT}]: ").strip() or META_DIR_DEFAULT
         print("\nตั้งค่าเสร็จ ✓\n")
-        choice = input("เลือกโหมด (1/2/3): ").strip()
+        choice = input("เลือกโหมด (1/2/3) [ว่าง=preopen]: ").strip()
+
+    if choice == "":
+        choice = "3"
 
     conn = get_mysql_conn()
     try:
         if choice == "1":
-            # ทุกตลาด
             run_nextday(conn, lstm_dir, gru_dir, meta_dir, market_filter=None)
         elif choice == "2":
             start = input("เริ่ม (YYYY-MM-DD) [ว่าง=ทั้งหมด]: ").strip() or None
@@ -654,7 +1145,8 @@ def main():
             strict = input("บังคับให้อยู่ในหน้าต่างเวลาเป๊ะ? (y/N): ").strip().lower() == "y"
             run_preopen(conn, lstm_dir, gru_dir, meta_dir, strict_window=strict)
         else:
-            print("❌ ไม่พบโหมดที่เลือก")
+            print("⚠️ ไม่พบโหมดที่เลือก → รัน preopen ให้เลย")
+            run_preopen(conn, lstm_dir, gru_dir, meta_dir, strict_window=False)
     finally:
         try: conn.close()
         except: pass
