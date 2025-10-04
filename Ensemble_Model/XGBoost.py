@@ -1,5 +1,16 @@
-# XGB_PriceMeta.py  (Meta-regressor สำหรับ "ราคา" + ทิศทางคำนวนจากราคา + รายงานแยกหุ้น)
+# XGB_PriceMeta.py  (Meta-regressor สำหรับ "ราคา" + คำนวนทิศทางจากราคา + รายงานแยกหุ้น)
 # -*- coding: utf-8 -*-
+"""
+สิ่งที่ปรับปรุงจากเวอร์ชันก่อนหน้า (backward-compatible):
+1) Feature Engineering เพิ่มเติมแบบไม่เกิด leakage:
+   - prev_ret_1d (log-return ของวันก่อนหน้า), vol_ema (EMA ของ |prev_ret_1d| ต่อ Ticker)
+   - sign_agree (LSTM/GRU เห็นทิศทางตรงกันไหม), mag_mean, ret_pred_ratio, rel_conf_* (อัตราส่วนความมั่นใจเทียบ EMA error)
+2) Isotonic Calibration ของ P(up) จาก predicted return บน validation (หรือ CV) → ได้คอลัมน์ Meta_Prob_Up
+3) Neutral Zone จาก conformal residual (gamma = max(|q_lo|,|q_hi|)) → คอลัมน์ Meta_Pred_Dir_Th (tri-state: {-1,0,1})
+4) รายงานสรุปเพิ่ม AUC/Brier (ถ้ามี val) และคอลัมน์ *_META_TH ใน overall summaries
+5) ความทนทาน: winsorize ฟีเจอร์แบบ return เพิ่ม, ใส่ n_jobs=-1 ให้ XGBRegressor
+"""
+
 import os, joblib, warnings
 import numpy as np
 import pandas as pd
@@ -7,8 +18,10 @@ import xgboost as xgb
 from xgboost import XGBRegressor
 from sklearn.metrics import (
     mean_absolute_error, mean_squared_error, r2_score,
-    accuracy_score, f1_score, precision_score, recall_score, matthews_corrcoef
+    accuracy_score, f1_score, precision_score, recall_score, matthews_corrcoef,
+    roc_auc_score, brier_score_loss
 )
+from sklearn.isotonic import IsotonicRegression
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -23,11 +36,11 @@ DAILY_FILE = 'daily_all_predictions.csv'   # ใช้ไฟล์นี้ท�
 OUT_MODEL_PATH   = 'xgb_price.json'
 OUT_MODEL_META   = 'xgb_price.meta.joblib'
 OUT_PRED_CSV     = 'meta_price_predictions.csv'
-OUT_VAL_SUMMARY  = 'meta_price_val_summary.csv'
+OUT_VAL_SUMMARY  = 'meta_price_val_summary.csv'  # (ยังคงไว้ เผื่อขยายในอนาคต)
 OUT_VAL_BY_TKR   = 'meta_price_val_metrics_per_ticker.csv'
 OUT_FEAT_GAIN    = 'xgb_price_feature_gain.csv'
-OUT_DIR_BY_TKR_ALL = 'meta_price_dir_metrics_per_ticker_all.csv'         # ใหม่ (All rows)
-OUT_DIR_SUMMARY_OVERALL = 'meta_price_dir_summary_overall.csv'           # ใหม่ (สรุปรวม)
+OUT_DIR_BY_TKR_ALL = 'meta_price_dir_metrics_per_ticker_all.csv'         # All rows
+OUT_DIR_SUMMARY_OVERALL = 'meta_price_dir_summary_overall.csv'           # สรุปรวม
 
 # Validation split (จะ auto-adjust ถ้าข้อมูลน้อย)
 VAL_RATIO_DEFAULT    = 0.12
@@ -43,6 +56,7 @@ MIN_TREES = 50
 STEP      = 10
 N_ESTIMATORS = 800
 RANDOM_STATE = 42
+OBJECTIVE = 'reg:squarederror'  # 'reg:squarederror' หรือ 'reg:absoluteerror'
 
 # เกณฑ์ขั้นต่ำใน time-split
 MIN_TRAIN_WANTED = 50
@@ -53,8 +67,13 @@ MIN_VAL_WANTED   = 15
 # =======================
 REQ_MIN_COLS = {'Ticker','Date','Chunk_Index','Step','Predicted_Price','Actual_Price'}
 
+np.seterr(all='ignore')
+EPS = 1e-12
+
+
 def rmse_np(y_true, y_pred):
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
 
 def load_daily(model_dir, daily_file):
     path = os.path.join(model_dir, daily_file)
@@ -79,6 +98,7 @@ def load_daily(model_dir, daily_file):
     out = out.groupby(['Ticker','Date'], as_index=False).tail(1).reset_index(drop=True)
     return out
 
+
 def winsorize_by_ticker(feat_df, tickers, cols, k=WINSOR_K):
     feat_df = feat_df.copy()
     for c in cols:
@@ -88,13 +108,16 @@ def winsorize_by_ticker(feat_df, tickers, cols, k=WINSOR_K):
         feat_df[c] = np.clip(feat_df[c], mu - k*sd, mu + k*sd)
     return feat_df
 
+
 def _coalesce(a, b):
     return np.where(np.isfinite(a), a, b)
+
 
 def _time_decay_weights(dates: pd.Series):
     t = dates.values.astype('datetime64[ns]').astype('int64')
     t = (t - t.min()) / max(1, (t.max() - t.min()))
     return np.exp(t * TIME_DECAY_STRENGTH)
+
 
 def _map_gain_to_names(booster, feat_cols):
     gain = booster.get_score(importance_type='gain')  # keys: f0,f1,...
@@ -102,8 +125,10 @@ def _map_gain_to_names(booster, feat_cols):
     mapped = {fmap.get(k, k): v for k, v in gain.items()}
     return mapped
 
+
 def _price_from_ret(prev, ret):
     return prev * np.exp(ret)
+
 
 def dir_metrics_basic(y_true, y_pred):
     return {
@@ -113,6 +138,7 @@ def dir_metrics_basic(y_true, y_pred):
         'REC':  recall_score(y_true, y_pred, zero_division=0),
         'MCC':  matthews_corrcoef(y_true, y_pred) if len(np.unique(y_pred))>1 else 0.0
     }
+
 
 def dir_report(y_true, y_pred, ignore_val=-1):
     """คำนวณเมตริก + confusion counts โดย 'กรอง' ค่าที่ y_pred==ignore_val ออก"""
@@ -166,8 +192,8 @@ pred_lstm = df.get('pred_price_lstm').values if 'pred_price_lstm' in df else np.
 pred_gru  = df.get('pred_price_gru' ).values if 'pred_price_gru'  in df else np.full(len(df), np.nan)
 
 # returns เทียบ prev_actual
-ret_pred_lstm = np.where(np.isfinite(pred_lstm), np.log(pred_lstm/df['prev_actual'].values), np.nan)
-ret_pred_gru  = np.where(np.isfinite(pred_gru ), np.log(pred_gru /df['prev_actual'].values), np.nan)
+ret_pred_lstm = np.where(np.isfinite(pred_lstm), np.log((pred_lstm+EPS)/df['prev_actual'].values), np.nan)
+ret_pred_gru  = np.where(np.isfinite(pred_gru ), np.log((pred_gru +EPS)/df['prev_actual'].values), np.nan)
 
 ret_pred_mean = np.where(
     np.isfinite(ret_pred_lstm) & np.isfinite(ret_pred_gru),
@@ -180,12 +206,7 @@ ret_pred_diff = np.where(
     0.0
 )
 
-df['ret_pred_lstm'] = ret_pred_lstm
-df['ret_pred_gru']  = ret_pred_gru
-df['ret_pred_mean'] = ret_pred_mean
-df['ret_pred_diff'] = ret_pred_diff
-
-# proxy คุณภาพฐาน (EMA ของ |pred - prev_actual| ต่อ ticker)
+# ฟีเจอร์คุณภาพฐาน (EMA ของ |pred - prev_actual| ต่อ ticker)
 for src, arr in [('lstm', pred_lstm), ('gru', pred_gru)]:
     diff = np.abs(arr - df['prev_actual'].values)
     s = pd.Series(diff, index=df.index, name='diff')
@@ -202,28 +223,74 @@ for src, arr in [('lstm', pred_lstm), ('gru', pred_gru)]:
 
     df[f'ema_mae_{src}'] = s.groupby(df['Ticker']).transform(_ema_fill)
 
+# target: actual return (y)
+df['ret_actual'] = np.log((df['actual_price']+EPS) / (df['prev_actual']+EPS))
+
+# === NEW: non-leaky lag features ===
+# prev_ret_1d = ret_actual ของวันก่อนหน้า (safe: shift 1)
+df['prev_ret_1d'] = df.groupby('Ticker')['ret_actual'].shift(1)
+# vol_ema = EMA ของ |prev_ret_1d|
+_df_abs_prev = df['prev_ret_1d'].abs().rename('abs_prev')
+df['vol_ema'] = _df_abs_prev.groupby(df['Ticker']).transform(
+    lambda s: s.fillna(s.median()).ewm(alpha=EWM_ALPHA, adjust=False).mean()
+)
+
+# ความเห็นตรงกันของ LSTM/GRU และความแรงของสัญญาณ
+sgn_l = np.sign(ret_pred_lstm)
+sgn_g = np.sign(ret_pred_gru)
+sign_agree = (sgn_l == sgn_g).astype(float)
+mag_mean = np.abs(ret_pred_mean)
+ret_pred_ratio = np.where(
+    np.isfinite(ret_pred_lstm) & np.isfinite(ret_pred_gru),
+    ret_pred_diff / (np.abs(ret_pred_lstm) + np.abs(ret_pred_gru) + EPS),
+    0.0
+)
+# แปลง EMA error (หน่วยราคา) → หน่วย return โดยหารด้วย prev_actual
+ema_mae_lstm_ret = df['ema_mae_lstm'] / (df['prev_actual'] + EPS)
+ema_mae_gru_ret  = df['ema_mae_gru'] / (df['prev_actual'] + EPS)
+rel_conf_lstm = np.abs(ret_pred_lstm) / (ema_mae_lstm_ret + EPS)
+rel_conf_gru  = np.abs(ret_pred_gru ) / (ema_mae_gru_ret  + EPS)
+
 # time features
 df['dow'] = pd.to_datetime(df['Date']).dt.weekday.astype(int)
 df['dom'] = pd.to_datetime(df['Date']).dt.day.astype(int)
 
-# target: actual return
-df['ret_actual'] = np.log(df['actual_price'] / df['prev_actual'])
-
+# รวมฟีเจอร์
 feat_cols = [
+    # base returns
     'ret_pred_lstm','ret_pred_gru','ret_pred_mean','ret_pred_diff',
-    'ema_mae_lstm','ema_mae_gru',
+    # NEW confidence & structure
+    'prev_ret_1d','vol_ema','sign_agree','mag_mean','ret_pred_ratio','rel_conf_lstm','rel_conf_gru',
+    # time
     'dow','dom'
 ]
-feat = df[feat_cols].copy()
 
-# winsorize returns by ticker
-feat = winsorize_by_ticker(
-    feat.assign(Ticker=df['Ticker']),
+# สร้างตารางฟีเจอร์
+_feat = pd.DataFrame({
+    'ret_pred_lstm': ret_pred_lstm,
+    'ret_pred_gru':  ret_pred_gru,
+    'ret_pred_mean': ret_pred_mean,
+    'ret_pred_diff': ret_pred_diff,
+    'prev_ret_1d':   df['prev_ret_1d'].values,
+    'vol_ema':       df['vol_ema'].values,
+    'sign_agree':    sign_agree,
+    'mag_mean':      mag_mean,
+    'ret_pred_ratio':ret_pred_ratio,
+    'rel_conf_lstm': rel_conf_lstm,
+    'rel_conf_gru':  rel_conf_gru,
+    'dow':           df['dow'].values,
+    'dom':           df['dom'].values,
+})
+
+# winsorize returns-like features by ticker
+_feat = winsorize_by_ticker(
+    _feat.assign(Ticker=df['Ticker']),
     tickers='Ticker',
-    cols=['ret_pred_lstm','ret_pred_gru','ret_pred_mean','ret_pred_diff'],
+    cols=['ret_pred_lstm','ret_pred_gru','ret_pred_mean','ret_pred_diff','prev_ret_1d'],
     k=WINSOR_K
 ).drop(columns=['Ticker'])
 
+feat = _feat.copy()
 y = df['ret_actual'].values
 
 # =======================
@@ -280,10 +347,12 @@ xgb_reg = XGBRegressor(
     colsample_bytree=0.8,
     reg_lambda=1.0,
     reg_alpha=0.0,
-    objective='reg:squarederror',
+    objective=OBJECTIVE,
     tree_method='hist',
-    random_state=RANDOM_STATE
+    random_state=RANDOM_STATE,
+    n_jobs=-1
 )
+
 
 def _fit_with_decay(X, y, dates):
     if USE_TIME_DECAY:
@@ -291,6 +360,7 @@ def _fit_with_decay(X, y, dates):
         xgb_reg.fit(X, y, sample_weight=w)
     else:
         xgb_reg.fit(X, y)
+
 
 def _scan_best_k(booster, X_val, y_val):
     dval = xgb.DMatrix(X_val, label=y_val)
@@ -304,6 +374,9 @@ def _scan_best_k(booster, X_val, y_val):
     return best_k, best_rmse
 
 residuals_for_conformal = []
+iso_cal = None  # Isotonic calibrator (P(up) | pred_ret)
+auc_val = np.nan
+brier_val = np.nan
 
 if split_mode == 'time_split':
     X_train, y_train = feat.loc[train_idx].values, y[train_idx]
@@ -318,9 +391,23 @@ if split_mode == 'time_split':
     val_preds_ret = booster.predict(dval, iteration_range=(0, final_best_k))
     residuals_for_conformal.extend(list(y_val - val_preds_ret))
 
+    # === NEW: calibrate P(up) ด้วย isotonic ===
+    actual_dir_val = (df.loc[val_idx, 'actual_price'].values > df.loc[val_idx, 'prev_actual'].values).astype(int)
+    try:
+        iso_cal = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds='clip')
+        iso_cal.fit(val_preds_ret, actual_dir_val)
+        prob_val = iso_cal.predict(val_preds_ret)
+        if len(np.unique(actual_dir_val)) > 1:
+            auc_val = float(roc_auc_score(actual_dir_val, prob_val))
+        brier_val = float(brier_score_loss(actual_dir_val, prob_val))
+    except Exception as e:
+        print(f"[WARN] Isotonic calibration failed: {e}")
+        iso_cal = None
+
     val_mask = val_idx.values if isinstance(val_idx, pd.Series) else val_idx
 
 else:
+    # CV แบบกลุ่มวัน (เรียงตามเวลา)
     dates = dates_sorted
     n_dates = len(dates)
     n_folds = min(5, max(2, n_dates // 4))
@@ -329,6 +416,8 @@ else:
 
     best_k_list, rmse_list = [], []
     all_val_idx = np.zeros(len(df), dtype=bool)
+
+    val_pred_buf = []  # เก็บ (pred_ret, actual_dir) จากทุก fold เพื่อใช้ calibrate
 
     for i in range(n_folds):
         val_start, val_end = bounds[i], bounds[i+1]
@@ -357,6 +446,10 @@ else:
         residuals_for_conformal.extend(list(y_vl - preds_vl))
         all_val_idx = all_val_idx | vl_idx.values
 
+        # buffer สำหรับ calibration
+        actual_dir_vl = (df.loc[vl_idx, 'actual_price'].values > df.loc[vl_idx, 'prev_actual'].values).astype(int)
+        val_pred_buf.append((preds_vl, actual_dir_vl))
+
     if not best_k_list:
         final_best_k = min(max(MIN_TREES, int(N_ESTIMATORS * 0.35)), N_ESTIMATORS)
         print(f"[WARN] CV fold เล็กเกินไป → small mode best_k={final_best_k}")
@@ -372,6 +465,21 @@ else:
         _fit_with_decay(feat.values, y, df['Date'])
         booster = xgb_reg.get_booster()
         val_mask = all_val_idx
+
+        # isotonic จากทุก fold (stacked) ถ้า class มีทั้ง 0/1
+        try:
+            if val_pred_buf:
+                preds_all = np.concatenate([p for (p, a) in val_pred_buf])
+                actual_all = np.concatenate([a for (p, a) in val_pred_buf])
+                if len(np.unique(actual_all)) > 1:
+                    iso_cal = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds='clip')
+                    iso_cal.fit(preds_all, actual_all)
+                    prob_all = iso_cal.predict(preds_all)
+                    auc_val = float(roc_auc_score(actual_all, prob_all))
+                    brier_val = float(brier_score_loss(actual_all, prob_all))
+        except Exception as e:
+            print(f"[WARN] Isotonic calibration (CV) failed: {e}")
+            iso_cal = None
 
 # =======================
 # Validation metrics (ราคา)
@@ -396,6 +504,9 @@ print(f"Best #Trees : {final_best_k}")
 print(f"MAE         : {val_mae:.6f}" if np.isfinite(val_mae) else "MAE         : N/A")
 print(f"RMSE        : {val_rmse:.6f}" if np.isfinite(val_rmse) else "RMSE        : N/A")
 print(f"R2          : {val_r2:.6f}"   if np.isfinite(val_r2)   else "R2          : N/A")
+if np.isfinite(auc_val) or np.isfinite(brier_val):
+    print(f"AUC(VAL)    : {auc_val:.6f}" if np.isfinite(auc_val) else "AUC(VAL)    : N/A")
+    print(f"Brier(VAL)  : {brier_val:.6f}" if np.isfinite(brier_val) else "Brier(VAL)  : N/A")
 
 # =======================
 # Conformal intervals (return residuals)
@@ -407,9 +518,25 @@ else:
     q_lo, q_hi = -0.02, 0.02
 print(f"Conformal residual quantiles (return): lo={q_lo:.6f}, hi={q_hi:.6f}")
 
+# Neutral zone margin (บนสเกล return) สำหรับจัด -1
+gamma_margin = float(max(abs(q_lo), abs(q_hi)))
+
 # Save model & meta
+meta_blob = {
+    'best_k': int(final_best_k),
+    'q_lo': float(q_lo),
+    'q_hi': float(q_hi),
+    'gamma_margin': gamma_margin,
+    'feat_cols': feat_cols,
+    'objective': OBJECTIVE
+}
+if iso_cal is not None:
+    meta_blob['iso_cal'] = iso_cal  # picklable
+    meta_blob['auc_val'] = float(auc_val) if np.isfinite(auc_val) else None
+    meta_blob['brier_val'] = float(brier_val) if np.isfinite(brier_val) else None
+
 xgb_reg.save_model(OUT_MODEL_PATH)
-joblib.dump({'best_k': int(final_best_k), 'q_lo': float(q_lo), 'q_hi': float(q_hi)}, OUT_MODEL_META)
+joblib.dump(meta_blob, OUT_MODEL_META)
 print(f"Saved model: {OUT_MODEL_PATH} / meta: {OUT_MODEL_META}")
 
 # =======================
@@ -432,6 +559,15 @@ lstm_dir = np.where(np.isfinite(pred_lstm), (pred_lstm > prev_act).astype(int), 
 gru_dir  = np.where(np.isfinite(pred_gru ), (pred_gru  > prev_act).astype(int), -1)
 meta_dir = (meta_price > prev_act).astype(int)
 
+# === NEW: calibrated prob + neutral zone ===
+if iso_cal is not None:
+    meta_prob_up = iso_cal.predict(all_ret)
+else:
+    meta_prob_up = np.full_like(all_ret, np.nan, dtype=float)
+
+# Neutral zone บนสเกล return
+meta_dir_th = np.where(np.abs(all_ret) < gamma_margin, -1, (all_ret > 0).astype(int))
+
 # correctness flags เพื่อเขียนลง CSV (แถวไหนที่ LSTM/GRU ไม่มีพยากรณ์จะให้เป็น NaN)
 meta_dir_correct = (meta_dir == actual_dir).astype(int)
 lstm_dir_correct = np.where(lstm_dir!=-1, (lstm_dir==actual_dir).astype(int), np.nan)
@@ -446,6 +582,8 @@ out = pd.DataFrame({
     'Meta_Price_Lo95': price_lo,
     'Meta_Price_Hi95': price_hi,
     'Meta_Pred_Dir': meta_dir,
+    'Meta_Pred_Dir_Th': meta_dir_th,                # NEW tri-state (-1,0,1)
+    'Meta_Prob_Up': meta_prob_up,                   # NEW calibrated probability (ถ้ามี)
 
     'LSTM_Predicted_Price': pred_lstm,
     'GRU_Predicted_Price':  pred_gru,
@@ -455,11 +593,12 @@ out = pd.DataFrame({
     'Actual_Price': df['actual_price'].values,
     'Actual_Dir':   actual_dir,
 
-    # ใหม่: ธงบอก “ถูกทิศไหม”
+    # ธงบอก “ถูกทิศไหม”
     'Meta_Dir_Correct': meta_dir_correct,
     'LSTM_Dir_Correct': lstm_dir_correct,
     'GRU_Dir_Correct':  gru_dir_correct,
 }).sort_values(['Ticker','Date'])
+
 out.to_csv(OUT_PRED_CSV, index=False)
 print(f"Saved predictions: {OUT_PRED_CSV}")
 
@@ -471,6 +610,7 @@ if val_mask.sum() > 0:
         'Ticker': df.loc[val_mask, 'Ticker'].values,
         'y_true_dir': actual_dir[val_mask],
         'meta_dir':   meta_dir[val_mask],
+        'meta_dir_th':meta_dir_th[val_mask],  # NEW
         'lstm_dir':   lstm_dir[val_mask],
         'gru_dir':    gru_dir[val_mask],
         'y_true_price': df.loc[val_mask, 'actual_price'].values,
@@ -488,6 +628,7 @@ if val_mask.sum() > 0:
             price_mae = price_rmse = price_r2 = np.nan
 
         rep_meta = dir_report(g['y_true_dir'].to_numpy(), g['meta_dir'].to_numpy(), ignore_val=-1)
+        rep_meta_th = dir_report(g['y_true_dir'].to_numpy(), g['meta_dir_th'].to_numpy(), ignore_val=-1)  # NEW
         rep_lstm = dir_report(g['y_true_dir'].to_numpy(), g['lstm_dir'].to_numpy(), ignore_val=-1)
         rep_gru  = dir_report(g['y_true_dir'].to_numpy(), g['gru_dir'].to_numpy(),  ignore_val=-1)
 
@@ -505,6 +646,14 @@ if val_mask.sum() > 0:
             'DirPREC_META': rep_meta['PREC'], 'DirREC_META': rep_meta['REC'],
             'DirMCC_META': rep_meta['MCC'], 'Pred_Pos_Count_META': rep_meta['Pred_Pos_Count'],
             'Pred_Pos_Rate_META': rep_meta['Pred_Pos_Rate'],
+
+            # NEW: META_TH (neutral zone)
+            'Support_META_TH': rep_meta_th['Support'], 'TP_META_TH': rep_meta_th['TP'], 'FP_META_TH': rep_meta_th['FP'],
+            'TN_META_TH': rep_meta_th['TN'], 'FN_META_TH': rep_meta_th['FN'],
+            'DirACC_META_TH': rep_meta_th['ACC'], 'DirF1_META_TH': rep_meta_th['F1'],
+            'DirPREC_META_TH': rep_meta_th['PREC'], 'DirREC_META_TH': rep_meta_th['REC'],
+            'DirMCC_META_TH': rep_meta_th['MCC'], 'Pred_Pos_Count_META_TH': rep_meta_th['Pred_Pos_Count'],
+            'Pred_Pos_Rate_META_TH': rep_meta_th['Pred_Pos_Rate'],
 
             # LSTM dir
             'Support_LSTM': rep_lstm['Support'], 'TP_LSTM': rep_lstm['TP'], 'FP_LSTM': rep_lstm['FP'],
@@ -524,20 +673,24 @@ if val_mask.sum() > 0:
         })
 
     pd.DataFrame(rows).sort_values(['Ticker']).to_csv(OUT_VAL_BY_TKR, index=False)
-    print(f"Saved validation per-ticker (with dir metrics): {OUT_VAL_BY_TKR}")
+    print(f"Saved validation per-ticker (with dir metrics + TH): {OUT_VAL_BY_TKR}")
 
 # =======================
 # Direction metrics — All rows (per-ticker)
 # =======================
-full_rows = []
-for tkr, g in pd.DataFrame({
+base_df_all = pd.DataFrame({
     'Ticker': df['Ticker'],
     'y_true_dir': actual_dir,
     'meta_dir':   meta_dir,
+    'meta_dir_th':meta_dir_th,
     'lstm_dir':   lstm_dir,
     'gru_dir':    gru_dir
-}).groupby('Ticker'):
+})
+
+full_rows = []
+for tkr, g in base_df_all.groupby('Ticker'):
     rep_meta = dir_report(g['y_true_dir'].to_numpy(), g['meta_dir'].to_numpy(), ignore_val=-1)
+    rep_meta_th = dir_report(g['y_true_dir'].to_numpy(), g['meta_dir_th'].to_numpy(), ignore_val=-1)
     rep_lstm = dir_report(g['y_true_dir'].to_numpy(), g['lstm_dir'].to_numpy(), ignore_val=-1)
     rep_gru  = dir_report(g['y_true_dir'].to_numpy(), g['gru_dir'].to_numpy(),  ignore_val=-1)
 
@@ -547,20 +700,23 @@ for tkr, g in pd.DataFrame({
         'Support_META': rep_meta['Support'], 'TP_META': rep_meta['TP'], 'FP_META': rep_meta['FP'],
         'TN_META': rep_meta['TN'], 'FN_META': rep_meta['FN'],
         'DirACC_META': rep_meta['ACC'], 'DirF1_META': rep_meta['F1'],
-        'DirPREC_META': rep_meta['PREC'], 'DirREC_META': rep_meta['REC'],
-        'DirMCC_META': rep_meta['MCC'],
+        'DirPREC_META': rep_meta['PREC'], 'DirREC_META': rep_meta['REC'], 'DirMCC_META': rep_meta['MCC'],
+
+        # NEW: META_TH
+        'Support_META_TH': rep_meta_th['Support'], 'TP_META_TH': rep_meta_th['TP'], 'FP_META_TH': rep_meta_th['FP'],
+        'TN_META_TH': rep_meta_th['TN'], 'FN_META_TH': rep_meta_th['FN'],
+        'DirACC_META_TH': rep_meta_th['ACC'], 'DirF1_META_TH': rep_meta_th['F1'],
+        'DirPREC_META_TH': rep_meta_th['PREC'], 'DirREC_META_TH': rep_meta_th['REC'], 'DirMCC_META_TH': rep_meta_th['MCC'],
 
         'Support_LSTM': rep_lstm['Support'], 'TP_LSTM': rep_lstm['TP'], 'FP_LSTM': rep_lstm['FP'],
         'TN_LSTM': rep_lstm['TN'], 'FN_LSTM': rep_lstm['FN'],
         'DirACC_LSTM': rep_lstm['ACC'], 'DirF1_LSTM': rep_lstm['F1'],
-        'DirPREC_LSTM': rep_lstm['PREC'], 'DirREC_LSTM': rep_lstm['REC'],
-        'DirMCC_LSTM': rep_lstm['MCC'],
+        'DirPREC_LSTM': rep_lstm['PREC'], 'DirREC_LSTM': rep_lstm['REC'], 'DirMCC_LSTM': rep_lstm['MCC'],
 
         'Support_GRU': rep_gru['Support'], 'TP_GRU': rep_gru['TP'], 'FP_GRU': rep_gru['FP'],
         'TN_GRU': rep_gru['TN'], 'FN_GRU': rep_gru['FN'],
         'DirACC_GRU': rep_gru['ACC'], 'DirF1_GRU': rep_gru['F1'],
-        'DirPREC_GRU': rep_gru['PREC'], 'DirREC_GRU': rep_gru['REC'],
-        'DirMCC_GRU': rep_gru['MCC'],
+        'DirPREC_GRU': rep_gru['PREC'], 'DirREC_GRU': rep_gru['REC'], 'DirMCC_GRU': rep_gru['MCC'],
     })
 
 pd.DataFrame(full_rows).sort_values(['Ticker']).to_csv(OUT_DIR_BY_TKR_ALL, index=False)
@@ -573,49 +729,66 @@ overall_rows = []
 
 # Val-only (ถ้ามี)
 if val_mask.sum() > 0:
-    rep_meta_v = dir_report(actual_dir[val_mask], meta_dir[val_mask], ignore_val=-1)
-    rep_lstm_v = dir_report(actual_dir[val_mask], lstm_dir[val_mask], ignore_val=-1)
-    rep_gru_v  = dir_report(actual_dir[val_mask], gru_dir[val_mask],  ignore_val=-1)
-    overall_rows.append({
+    rep_meta_v   = dir_report(actual_dir[val_mask], meta_dir[val_mask], ignore_val=-1)
+    rep_meta_th_v= dir_report(actual_dir[val_mask], meta_dir_th[val_mask], ignore_val=-1)
+    rep_lstm_v   = dir_report(actual_dir[val_mask], lstm_dir[val_mask], ignore_val=-1)
+    rep_gru_v    = dir_report(actual_dir[val_mask], gru_dir[val_mask],  ignore_val=-1)
+    row_val = {
         'Scope': 'VAL_ONLY',
+        # META
         'DirACC_META': rep_meta_v['ACC'], 'DirF1_META': rep_meta_v['F1'],
         'DirPREC_META': rep_meta_v['PREC'], 'DirREC_META': rep_meta_v['REC'], 'DirMCC_META': rep_meta_v['MCC'],
         'Support_META': rep_meta_v['Support'],
-
+        # META_TH
+        'DirACC_META_TH': rep_meta_th_v['ACC'], 'DirF1_META_TH': rep_meta_th_v['F1'],
+        'DirPREC_META_TH': rep_meta_th_v['PREC'], 'DirREC_META_TH': rep_meta_th_v['REC'], 'DirMCC_META_TH': rep_meta_th_v['MCC'],
+        'Support_META_TH': rep_meta_th_v['Support'],
+        # LSTM
         'DirACC_LSTM': rep_lstm_v['ACC'], 'DirF1_LSTM': rep_lstm_v['F1'],
         'DirPREC_LSTM': rep_lstm_v['PREC'], 'DirREC_LSTM': rep_lstm_v['REC'], 'DirMCC_LSTM': rep_lstm_v['MCC'],
         'Support_LSTM': rep_lstm_v['Support'],
-
+        # GRU
         'DirACC_GRU': rep_gru_v['ACC'], 'DirF1_GRU': rep_gru_v['F1'],
         'DirPREC_GRU': rep_gru_v['PREC'], 'DirREC_GRU': rep_gru_v['REC'], 'DirMCC_GRU': rep_gru_v['MCC'],
         'Support_GRU': rep_gru_v['Support'],
-
+        # Price
         'MAE': float(val_mae) if np.isfinite(val_mae) else np.nan,
         'RMSE': float(val_rmse) if np.isfinite(val_rmse) else np.nan,
         'R2': float(val_r2) if np.isfinite(val_r2) else np.nan,
         'BestTrees': int(final_best_k),
-    })
+    }
+    if np.isfinite(auc_val) or np.isfinite(brier_val):
+        row_val['AUC_META'] = float(auc_val) if np.isfinite(auc_val) else np.nan
+        row_val['Brier_META'] = float(brier_val) if np.isfinite(brier_val) else np.nan
+    overall_rows.append(row_val)
 
 # All-rows
-rep_meta_a = dir_report(actual_dir, meta_dir, ignore_val=-1)
-rep_lstm_a = dir_report(actual_dir, lstm_dir, ignore_val=-1)
-rep_gru_a  = dir_report(actual_dir, gru_dir,  ignore_val=-1)
-overall_rows.append({
+rep_meta_a    = dir_report(actual_dir, meta_dir, ignore_val=-1)
+rep_meta_th_a = dir_report(actual_dir, meta_dir_th, ignore_val=-1)
+rep_lstm_a    = dir_report(actual_dir, lstm_dir, ignore_val=-1)
+rep_gru_a     = dir_report(actual_dir, gru_dir,  ignore_val=-1)
+row_all = {
     'Scope': 'ALL_ROWS',
+    # META
     'DirACC_META': rep_meta_a['ACC'], 'DirF1_META': rep_meta_a['F1'],
     'DirPREC_META': rep_meta_a['PREC'], 'DirREC_META': rep_meta_a['REC'], 'DirMCC_META': rep_meta_a['MCC'],
     'Support_META': rep_meta_a['Support'],
-
+    # META_TH
+    'DirACC_META_TH': rep_meta_th_a['ACC'], 'DirF1_META_TH': rep_meta_th_a['F1'],
+    'DirPREC_META_TH': rep_meta_th_a['PREC'], 'DirREC_META_TH': rep_meta_th_a['REC'], 'DirMCC_META_TH': rep_meta_th_a['MCC'],
+    'Support_META_TH': rep_meta_th_a['Support'],
+    # LSTM
     'DirACC_LSTM': rep_lstm_a['ACC'], 'DirF1_LSTM': rep_lstm_a['F1'],
     'DirPREC_LSTM': rep_lstm_a['PREC'], 'DirREC_LSTM': rep_lstm_a['REC'], 'DirMCC_LSTM': rep_lstm_a['MCC'],
     'Support_LSTM': rep_lstm_a['Support'],
-
+    # GRU
     'DirACC_GRU': rep_gru_a['ACC'], 'DirF1_GRU': rep_gru_a['F1'],
     'DirPREC_GRU': rep_gru_a['PREC'], 'DirREC_GRU': rep_gru_a['REC'], 'DirMCC_GRU': rep_gru_a['MCC'],
     'Support_GRU': rep_gru_a['Support'],
-
     'BestTrees': int(final_best_k),
-})
+}
+overall_rows.append(row_all)
+
 pd.DataFrame(overall_rows).to_csv(OUT_DIR_SUMMARY_OVERALL, index=False)
 print(f"Saved overall dir summaries: {OUT_DIR_SUMMARY_OVERALL}")
 
