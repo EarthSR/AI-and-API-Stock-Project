@@ -18,6 +18,86 @@ const app = express();
 const { PythonShell } = require('python-shell');
 const serviceAccount = require("./config/trademine-a3921-firebase-adminsdk-fbsvc-ff0de5bd4d.json");
 
+// ======= CSV adapter bootstrap (A): PATH + helpers =======
+const { parse } = require('csv-parse/sync'); // ติดตั้งก่อน: npm i csv-parse
+
+// โฟลเดอร์ไฟล์ CSV (รองรับทั้ง server/data และ data)
+const CSV_CANDIDATES = [
+  path.join(__dirname, 'server', 'data'),
+  path.join(__dirname, 'data'),
+];
+const CSV_DIR = CSV_CANDIDATES.find(p => fs.existsSync(p)) || CSV_CANDIDATES[0];
+
+const CSV_PATHS = {
+  Thailand: path.join(CSV_DIR, 'Financial_Thai_Quarter.csv'),
+  America:  path.join(CSV_DIR, 'Financial_America_Quarter.csv'),
+};
+
+// แปลงตัวเลขจากสตริง/มีคอมมา -> Number | null
+function toNumber(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(String(v).replace(/,/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+// ดึงค่าตามคีย์ (รองรับตัวใหญ่/เล็ก)
+const get = (row, ...keys) => {
+  for (const k of keys) {
+    if (row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== '') return row[k];
+  }
+  return null;
+};
+
+// map 1 แถวจากไฟล์ให้เป็นคีย์มาตรฐาน
+function normalizeRow(row) {
+  return {
+    stockSymbol: get(row, 'Stock','Symbol','Ticker','stock','symbol'),
+    quarter:     get(row, 'Quarter','quarter'),
+
+    totalRevenue:       toNumber(get(row, 'Total Revenue')),
+    netProfit:          toNumber(get(row, 'Net Profit')),
+    eps:                toNumber(get(row, 'Earnings Per Share (EPS)')),
+    netProfitMarginPct: toNumber(get(row, 'Net Profit Margin (%)')),
+    pe:                 toNumber(get(row, 'P/E Ratio (x)')),
+    pbv:                toNumber(get(row, 'P/BV Ratio (x)')),
+    evEbitda:           toNumber(get(row, 'EV / EBITDA')),
+    dividendYieldPct:   toNumber(get(row, 'Dividend Yield (%)')),
+    debtToEquity:       toNumber(get(row, 'Debt to Equity (x)')),
+    cashCycleDays:      toNumber(get(row, 'Cash Cycle (Days)')),
+  };
+}
+
+// '4Q2024' -> วันสิ้นไตรมาส (Date)
+function parseQuarterToDate(qstr) {
+  const m = /(\d)Q(\d{4})/i.exec(qstr || '');
+  if (!m) return null;
+  const q = Number(m[1]);
+  const y = Number(m[2]);
+  return new Date(y, q * 3, 0);
+}
+function sortByQuarterAsc(a,b){
+  const da = parseQuarterToDate(a.quarter);
+  const db = parseQuarterToDate(b.quarter);
+  return (da - db) || a.stockSymbol.localeCompare(b.stockSymbol);
+}
+
+// cache ไฟล์
+const csvCache = { Thailand:{mtime:0,rows:[]}, America:{mtime:0,rows:[]} };
+
+function loadCsv(market) {
+  const p = CSV_PATHS[market];
+  if (!p) throw new Error(`CSV not configured for market=${market}`);
+  const st = fs.statSync(p);
+  if (csvCache[market].mtime === st.mtimeMs && csvCache[market].rows.length) {
+    return csvCache[market].rows;
+  }
+  const raw = fs.readFileSync(p, 'utf8');
+  const rec = parse(raw, { columns: true, skip_empty_lines: true, trim: true });
+  const mapped = rec.map(normalizeRow).filter(r => r.stockSymbol && r.quarter).sort(sortByQuarterAsc);
+  csvCache[market] = { mtime: st.mtimeMs, rows: mapped };
+  return mapped;
+}
+// ======= /CSV adapter bootstrap (A) =======
 
 
 
@@ -3959,10 +4039,10 @@ app.post('/api/admin/ai-trades/auto-run', verifyToken, verifyAdmin, async (req, 
   }
 });
 
-// ---------------------------------------------------------------
+// ======================================================================
+// (คงของเดิมไว้ได้เลย) -----------------------------------------------
 // 9) ADMIN: User Trades (from papertrade) + filters/sort/pagination
-// GET /api/admin/user-trades
-// ---------------------------------------------------------------
+// ======================================================================
 app.get('/api/admin/user-trades', verifyToken, verifyAdmin, async (req, res) => {
   const db = pool.promise();
   try {
@@ -4047,7 +4127,6 @@ app.get('/api/admin/user-trades', verifyToken, verifyAdmin, async (req, res) => 
   }
 });
 
-// รายการเดียว
 app.get('/api/admin/user-trades/:id', verifyToken, verifyAdmin, async (req, res) => {
   const db = pool.promise();
   try {
@@ -4079,6 +4158,419 @@ app.get('/api/admin/user-trades/:id', verifyToken, verifyAdmin, async (req, res)
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// ======================================================================
+// CSV tester (optional) -------------------------------------------------
+// ======================================================================
+app.get('/api/_csv/ping', (req,res)=>{
+  res.json({
+    CSV_DIR,
+    hasThai: fs.existsSync(CSV_PATHS.Thailand),
+    hasUS:   fs.existsSync(CSV_PATHS.America),
+  });
+});
+
+// ======================================================================
+// งบจากไฟล์ CSV (Quarterly / Derived / Price vs EPS TTM) ---------------
+// ======================================================================
+
+// 1) งบรายไตรมาสจากไฟล์ CSV
+// GET /api/fundamentals/quarterly-file?market=America|Thailand&symbol=XXX&limitQuarters=12
+app.get('/api/fundamentals/quarterly-file', verifyToken, async (req, res) => {
+  try {
+    const market = (req.query.market || '').trim();
+    const symbol = (req.query.symbol || '').trim().toUpperCase();
+    const limit  = Math.max(1, Math.min(parseInt(req.query.limitQuarters || '12', 10), 40));
+    if (!['Thailand','America'].includes(market) || !symbol) {
+      return res.status(400).json({ error: 'market (Thailand|America) & symbol required' });
+    }
+    const rows = loadCsv(market)
+      .filter(r => r.stockSymbol?.toUpperCase() === symbol)
+      .sort(sortByQuarterAsc)
+      .slice(-limit);
+    res.json({ message: 'OK', market, symbol, data: rows });
+  } catch (e) {
+    console.error('quarterly-file error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 2) ค่าคำนวณจากไฟล์ (TTM/YoY/MarginTrend)
+// GET /api/fundamentals/derived-file?market=&symbol=&limitQuarters=12
+app.get('/api/fundamentals/derived-file', verifyToken, async (req, res) => {
+  try {
+    const market = (req.query.market || '').trim();
+    const symbol = (req.query.symbol || '').trim().toUpperCase();
+    const limit  = Math.max(4, Math.min(parseInt(req.query.limitQuarters || '12', 10), 40));
+    if (!['Thailand','America'].includes(market) || !symbol) {
+      return res.status(400).json({ error: 'market & symbol required' });
+    }
+
+    const rows = loadCsv(market)
+      .filter(r => r.stockSymbol?.toUpperCase() === symbol)
+      .sort(sortByQuarterAsc)
+      .slice(-limit);
+
+    const rolling4 = (arr, i, key) =>
+      (i >= 3) ? (Number(arr[i-3][key]||0)+Number(arr[i-2][key]||0)+Number(arr[i-1][key]||0)+Number(arr[i][key]||0)) : null;
+
+    const derived = rows.map((r, i, arr) => {
+      const epsTtm       = rolling4(arr, i, 'eps');
+      const revenueTtm   = rolling4(arr, i, 'totalRevenue');
+      const netProfitTtm = rolling4(arr, i, 'netProfit');
+      let revenueYoyPct = null, netProfitYoyPct = null;
+      if (i >= 4) {
+        const r0 = arr[i-4].totalRevenue, r1 = r.totalRevenue;
+        const n0 = arr[i-4].netProfit,   n1 = r.netProfit;
+        if (r0 && r0 !== 0 && r1 != null) revenueYoyPct   = ((r1 - r0) / Math.abs(r0)) * 100;
+        if (n0 && n0 !== 0 && n1 != null) netProfitYoyPct = ((n1 - n0) / Math.abs(n0)) * 100;
+      }
+      return { ...r, epsTtm, revenueTtm, netProfitTtm, revenueYoyPct, netProfitYoyPct };
+    });
+
+    // marginTrend (สโลปจาก 4–6 จุดท้ายของ Net Profit Margin)
+    const lastN = derived.slice(-6);
+    const margins = lastN.map(x => Number(x.netProfitMarginPct)).filter(Number.isFinite);
+    let marginTrend = null;
+    if (margins.length >= 4) {
+      const xs = margins.map((_, i) => i);
+      const xbar = xs.reduce((a,b)=>a+b,0)/xs.length;
+      const ybar = margins.reduce((a,b)=>a+b,0)/margins.length;
+      const num = xs.reduce((s, x, i) => s + (x-xbar)*(margins[i]-ybar), 0);
+      const den = xs.reduce((s, x) => s + (x-xbar)**2, 0);
+      marginTrend = den ? num/den : 0;
+    }
+
+    const latest = derived[derived.length - 1] || null;
+    res.json({
+      message: 'OK',
+      market, symbol,
+      latestDerived: latest ? {
+        epsTtm: latest.epsTtm,
+        revenueTtm: latest.revenueTtm,
+        netProfitTtm: latest.netProfitTtm,
+        revenueYoyPct: latest.revenueYoyPct,
+        netProfitYoyPct: latest.netProfitYoyPct,
+        marginTrend,
+      } : null,
+      data: derived.map(d => ({ ...d, marginTrend })),
+    });
+  } catch (e) {
+    console.error('derived-file error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 3) Price(DB) vs EPS TTM(CSV)
+// GET /api/fundamentals/price-vs-eps-ttm-file?market=&symbol=&limitQuarters=16
+app.get('/api/fundamentals/price-vs-eps-ttm-file', verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const market = (req.query.market || '').trim();
+    const symbol = (req.query.symbol || '').trim().toUpperCase();
+    const limitQuarters = Math.max(4, Math.min(parseInt(req.query.limitQuarters || '16', 10), 40));
+    if (!['Thailand','America'].includes(market) || !symbol) {
+      return res.status(400).json({ error: 'market & symbol required' });
+    }
+
+    const csv = loadCsv(market)
+      .filter(r => r.stockSymbol?.toUpperCase() === symbol)
+      .sort(sortByQuarterAsc)
+      .slice(-limitQuarters);
+
+    const series = csv.map((r, i, arr) => {
+      const epsTtm = (i >= 3)
+        ? Number(arr[i-3].eps||0)+Number(arr[i-2].eps||0)+Number(arr[i-1].eps||0)+Number(arr[i].eps||0)
+        : null;
+      const d = parseQuarterToDate(r.quarter);
+      return { quarter: r.quarter, quarterEnd: d ? d.toISOString().slice(0,10) : null, epsTtm };
+    });
+
+    async function pxAtOrBefore(iso) {
+      const [rr] = await db.query(
+        `SELECT DATE(\`Date\`) AS d, ClosePrice
+         FROM trademine.stockdetail
+         WHERE StockSymbol = ? AND Volume > 0 AND DATE(\`Date\`) <= ?
+         ORDER BY \`Date\` DESC LIMIT 1`,
+        [symbol, iso]
+      );
+      return rr?.[0] ? { date: rr[0].d, close: Number(rr[0].ClosePrice) } : { date: null, close: null };
+    }
+
+    const out = [];
+    for (const s of series) {
+      if (!s.quarterEnd) { out.push({ quarter: s.quarter, priceIndex: null, epsTtm: s.epsTtm }); continue; }
+      // eslint-disable-next-line no-await-in-loop
+      const px = await pxAtOrBefore(s.quarterEnd);
+      out.push({ quarter: s.quarter, date: px.date, close: px.close, epsTtm: s.epsTtm });
+    }
+
+    let base = null;
+    const data = out.map(r => {
+      if (base == null && Number.isFinite(r.close) && r.close !== 0) base = r.close;
+      return { ...r, priceIndex: base && Number.isFinite(r.close) ? (r.close / base) * 100 : null };
+    });
+
+    res.json({ message: 'OK', market, symbol, data });
+  } catch (e) {
+    console.error('price-vs-eps-ttm-file error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ======================================================================
+// กลุ่ม/เซกเตอร์ & Group Composite (จาก stock/stockdetail) -------------
+// ======================================================================
+
+// รายการกลุ่มจากตาราง stock (นับจำนวนต่อกลุ่ม)
+// GET /api/meta/groups?market=Thailand|America&groupBy=sector|industry
+app.get('/api/meta/groups', verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const market = (req.query.market || '').trim();
+    const groupBy = String(req.query.groupBy || 'sector').toLowerCase(); // 'sector'|'industry'
+    if (!['Thailand','America'].includes(market)) return res.status(400).json({ error: 'market must be Thailand|America' });
+    if (!['sector','industry'].includes(groupBy)) return res.status(400).json({ error: 'groupBy must be sector|industry' });
+
+    const col = groupBy === 'sector' ? 'Sector' : 'Industry';
+    const [rows] = await db.query(
+      `
+      SELECT ${col} AS \`key\`, COUNT(*) AS cnt
+      FROM trademine.stock
+      WHERE Market = ? AND ${col} IS NOT NULL AND ${col} <> ''
+      GROUP BY ${col}
+      ORDER BY cnt DESC, \`key\` ASC
+      `,
+      [market]
+    );
+    res.json({ message: 'OK', market, groupBy, data: rows });
+  } catch (e) {
+    console.error('meta/groups error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ดัชนีกลุ่ม (เทียบฐาน 100) จาก stockdetail
+// GET /api/benchmarks/group-composite
+//   ?market=Thailand|America
+//   &groupBy=sector|industry
+//   &key=<ชื่อกลุ่มใน stock เช่น Technology>
+//   &timeframe=5D|1M|3M|6M|1Y|ALL  (หรือใช้ from&to)
+//   [&method=equal|cap]  [&limitSymbols=500]
+app.get('/api/benchmarks/group-composite', verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const market = (req.query.market || '').trim();
+    const groupBy = String(req.query.groupBy || 'sector').toLowerCase();
+    const key = (req.query.key || '').trim();
+    const timeframe = (req.query.timeframe || '1Y').toUpperCase();
+    const method = String(req.query.method || 'equal').toLowerCase() === 'cap' ? 'cap' : 'equal';
+    const limitSymbols = Math.max(5, Math.min(parseInt(req.query.limitSymbols || '500', 10), 2000));
+
+    if (!['Thailand','America'].includes(market)) return res.status(400).json({ error: 'market invalid' });
+    if (!['sector','industry'].includes(groupBy)) return res.status(400).json({ error: 'groupBy invalid' });
+    if (!key) return res.status(400).json({ error: 'key required (value of Sector/Industry)' });
+
+    const TF_LIMIT = { "5D": 5, "1M": 22, "3M": 66, "6M": 132, "1Y": 252, "ALL": null };
+    let { from = '', to = '' } = req.query;
+
+    const col = groupBy === 'sector' ? 'Sector' : 'Industry';
+    const [symRows] = await db.query(
+      `
+      SELECT StockSymbol
+      FROM trademine.stock
+      WHERE Market = ? AND ${col} = ?
+      ORDER BY StockSymbol
+      LIMIT ?
+      `,
+      [market, key, limitSymbols]
+    );
+    const symbols = symRows.map(r => r.StockSymbol);
+    if (!symbols.length) return res.json({ message: 'no symbols in group', data: [] });
+
+    // resolve date range
+    async function resolveRange() {
+      if (from && to) return { from, to };
+      const tf = Object.prototype.hasOwnProperty.call(TF_LIMIT, timeframe) ? timeframe : '1Y';
+      if (TF_LIMIT[tf] === null) {
+        const [mm] = await db.query(
+          `
+          SELECT MIN(DATE(sd.Date)) AS minD, MAX(DATE(sd.Date)) AS maxD
+          FROM trademine.stockdetail sd
+          WHERE sd.StockSymbol IN (${symbols.map(()=>'?').join(',')}) AND sd.Volume > 0
+          `,
+          symbols
+        );
+        return { from: mm?.[0]?.minD, to: mm?.[0]?.maxD };
+      } else {
+        const N = TF_LIMIT[tf];
+        const [days] = await db.query(
+          `
+          SELECT d FROM (
+            SELECT DISTINCT DATE(sd.Date) AS d
+            FROM trademine.stockdetail sd
+            WHERE sd.StockSymbol IN (${symbols.map(()=>'?').join(',')}) AND sd.Volume > 0
+            ORDER BY d DESC
+            LIMIT ?
+          ) t
+          ORDER BY d ASC
+          `,
+          [...symbols, N]
+        );
+        if (!days.length) return { from: null, to: null };
+        return { from: days[0].d, to: days[days.length - 1].d };
+      }
+    }
+
+    const range = await resolveRange();
+    from = range.from; to = range.to;
+    if (!from || !to) return res.json({ message: 'no trading days', data: [] });
+
+    const [rows] = await db.query(
+      `
+      SELECT sd.StockSymbol, DATE(sd.Date) AS d, sd.ClosePrice, sd.MarketCap
+      FROM trademine.stockdetail sd
+      WHERE sd.StockSymbol IN (${symbols.map(()=>'?').join(',')})
+        AND sd.Volume > 0
+        AND DATE(sd.Date) BETWEEN ? AND ?
+      ORDER BY sd.StockSymbol, sd.Date ASC
+      `,
+      [...symbols, from, to]
+    );
+
+    // คำนวณคอมโพสิต
+    const baseMap = new Map(); // sym -> base close
+    const capMap  = new Map(); // sym -> last marketcap
+    const agg = new Map();     // date -> {sum, wsum}
+
+    for (const r of rows) {
+      const sym = r.StockSymbol;
+      const d = r.d;
+      const close = Number(r.ClosePrice);
+      const mcap = r.MarketCap == null ? null : Number(r.MarketCap);
+
+      if (!baseMap.has(sym) && Number.isFinite(close) && close !== 0) baseMap.set(sym, close);
+      if (Number.isFinite(mcap)) capMap.set(sym, mcap);
+
+      const base = baseMap.get(sym);
+      if (!Number.isFinite(base) || !Number.isFinite(close) || base === 0) continue;
+
+      const norm = (close / base) * 100; // ดัชนีฐาน 100
+      const w = (method === 'cap') ? (Number.isFinite(capMap.get(sym)) ? capMap.get(sym) : 0) : 1;
+
+      if (!agg.has(d)) agg.set(d, { sum: 0, wsum: 0 });
+      const a = agg.get(d);
+      a.sum  += norm * w;
+      a.wsum += w;
+    }
+
+    const data = Array.from(agg.entries())
+      .sort((a,b) => new Date(a[0]) - new Date(b[0]))
+      .map(([d, a]) => ({ date: d, index: a.wsum ? (a.sum / a.wsum) : null }));
+
+    res.json({
+      message: 'OK',
+      market, groupBy, key, method,
+      range: { from, to },
+      countSymbols: symbols.length,
+      data
+    });
+  } catch (e) {
+    console.error('group-composite error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ======================================================================
+// ข่าว/เซนติเมนต์ -------------------------------------------------------
+// ======================================================================
+
+// นับข่าวบวก/ลบ/กลาง ต่อวัน
+// GET /api/news/sentiment-daily?symbol=XXXX&days=90
+//   หรือ &start=YYYY-MM-DD&end=YYYY-MM-DD
+app.get('/api/news/sentiment-daily', verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const symbol = (req.query.symbol || '').trim().toUpperCase();
+    let { start = '', end = '' } = req.query;
+    const days = Math.max(1, Math.min(parseInt(req.query.days || '90', 10), 365));
+    if (!symbol) return res.status(400).json({ error: 'symbol required' });
+
+    if (!start || !end) {
+      const [mm] = await db.query(
+        `SELECT DATE_SUB(CURDATE(), INTERVAL ? DAY) AS s, CURDATE() AS e`,
+        [days - 1]
+      );
+      start = mm?.[0]?.s; end = mm?.[0]?.e;
+    }
+
+    const [rows] = await db.query(
+      `
+      SELECT DATE(n.PublishedDate) AS d,
+             SUM(CASE WHEN LOWER(n.Sentiment) IN ('positive','pos','1','bullish') THEN 1 ELSE 0 END) AS pos,
+             SUM(CASE WHEN LOWER(n.Sentiment) IN ('negative','neg','-1','bearish') THEN 1 ELSE 0 END) AS neg,
+             SUM(CASE WHEN LOWER(n.Sentiment) IN ('neutral','neu','0') THEN 1 ELSE 0 END) AS neu
+      FROM trademine.news n
+      JOIN trademine.newsstock ns ON ns.NewsID = n.NewsID
+      WHERE ns.StockSymbol = ?
+        AND DATE(n.PublishedDate) BETWEEN ? AND ?
+      GROUP BY DATE(n.PublishedDate)
+      ORDER BY d ASC
+      `,
+      [symbol, start, end]
+    );
+
+    // เติมวันให้ครบช่วง
+    const out = [];
+    const s = new Date(start), e = new Date(end);
+    const index = new Map(rows.map(r => [String(r.d), r]));
+    for (let d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) {
+      const key = d.toISOString().slice(0,10);
+      const r = index.get(key) || { d: key, pos: 0, neg: 0, neu: 0 };
+      const total = Number(r.pos) + Number(r.neg) + Number(r.neu);
+      const score = total ? (Number(r.pos) - Number(r.neg)) / total : 0;
+      out.push({ date: key, pos: Number(r.pos), neg: Number(r.neg), neu: Number(r.neu), score });
+    }
+
+    res.json({ message: 'OK', symbol, range: { start, end }, data: out });
+  } catch (e) {
+    console.error('news/sentiment-daily error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// รายการข่าวช่วงเวลาที่เลือก (ใช้ทำ modal/tooltip)
+// GET /api/news/list?symbol=XXXX&start=YYYY-MM-DD&end=YYYY-MM-DD&limit=50
+app.get('/api/news/list', verifyToken, async (req, res) => {
+  const db = pool.promise();
+  try {
+    const symbol = (req.query.symbol || '').trim().toUpperCase();
+    const start = (req.query.start || '').slice(0,10);
+    const end   = (req.query.end   || '').slice(0,10);
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit || '50', 10), 200));
+    if (!symbol || !start || !end) return res.status(400).json({ error: 'symbol,start,end required' });
+
+    const [rows] = await db.query(
+      `
+      SELECT n.NewsID, n.Title, n.Source, n.Sentiment, n.ConfidenceScore,
+             n.PublishedDate, n.URL, n.Img
+      FROM trademine.news n
+      JOIN trademine.newsstock ns ON ns.NewsID = n.NewsID
+      WHERE ns.StockSymbol = ?
+        AND DATE(n.PublishedDate) BETWEEN ? AND ?
+      ORDER BY n.PublishedDate DESC
+      LIMIT ?
+      `,
+      [symbol, start, end, limit]
+    );
+
+    res.json({ message: 'OK', symbol, range: { start, end }, data: rows });
+  } catch (e) {
+    console.error('news/list error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 
 // ========== START SERVER ==========
 const PORT = process.env.PORT || 3000;
