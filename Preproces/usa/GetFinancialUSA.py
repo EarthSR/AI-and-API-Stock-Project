@@ -12,12 +12,12 @@ import re
 import sys
 import os
 import io
-
+from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # ✅ ตรวจสอบระดับของโฟลเดอร์ (ปรับ `..` ตามตำแหน่งของไฟล์)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
+DASH_DIR = Path(__file__).resolve().parent
 # 🔹 ตั้งค่า Chrome options
 options = Options()
 options.add_argument('--headless')  # ทำงานแบบไม่มี UI
@@ -205,8 +205,11 @@ final_df = pd.concat(all_dfs, ignore_index=True)
 
 # ✅ บันทึกข้อมูลลง CSV
 output_path = os.path.join(SCRIPT_DIR, "Stock", "Financial_America_Quarter.csv")
+output_path_dashboard = os.path.join(DASH_DIR, "..","..","API_Mobile_Web", "data","Financial_America_Quarter.csv")
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
 final_df.to_csv(output_path, index=False)
+final_df.to_csv(output_path_dashboard, index=False)
+print(f"✅ บันทึกข้อมูลลง '{os.path.basename(output_path_dashboard)}' สำเร็จ!")
 print(f"✅ บันทึกข้อมูลลง '{os.path.basename(output_path)}' สำเร็จ!")
 
 # ✅ ปิด WebDriver

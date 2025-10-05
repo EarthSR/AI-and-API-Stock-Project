@@ -4572,6 +4572,276 @@ app.get('/api/news/list', verifyToken, async (req, res) => {
 });
 
 
+
+// 1) พาธไฟล์แบบ "ตรงๆ" (relative จาก process.cwd())
+const FILE_BY_MARKET = {
+  Thailand: './data/Financial_Thai_Quarter.csv',
+  America:  './data/Financial_America_Quarter.csv',
+};
+
+// 2) helpers
+function num(v) {
+  if (v == null) return null;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  let s = String(v).trim();
+  if (!s) return null;
+  const neg = /^\(.*\)$/.test(s);
+  s = s.replace(/[\u200B-\u200D\uFEFF]/g, '');
+  s = s.replace(/(THB|USD|,|%|\s)/gi, '');
+  s = s.replace(/[()]/g, '');
+  const n = Number(s);
+  return Number.isFinite(n) ? (neg ? -n : n) : null;
+}
+
+function parseQuarterLabel(q) {
+  if (!q) return null;
+  const s = String(q).trim().toUpperCase().replace(/FY|FQ|\'/g, '');
+
+  let m, year, qq;
+
+  // 2024Q1, 2024 Q1, 2024-Q1
+  m = s.match(/(\d{4})\s*[-/]?\s*Q\s*([1-4])/);
+  if (m) { year = Number(m[1]); qq = Number(m[2]); }
+
+  // Q1 2024
+  if (!m) {
+    m = s.match(/Q\s*([1-4])\s*[-/]?\s*(\d{4})/);
+    if (m) { qq = Number(m[1]); year = Number(m[2]); }
+  }
+
+  // 1Q24, 1Q2024
+  if (!m) {
+    m = s.match(/([1-4])\s*Q\s*(\d{2,4})/);
+    if (m) {
+      qq = Number(m[1]);
+      year = Number(m[2]);
+      if (year < 100) year = 2000 + year; // 1Q24 -> 2024
+    }
+  }
+
+  // 2024-1Q
+  if (!m) {
+    m = s.match(/(\d{4})\s*[-/]?\s*([1-4])\s*Q/);
+    if (m) { year = Number(m[1]); qq = Number(m[2]); }
+  }
+
+  if (year == null || qq == null) return null;
+  // ถ้าเป็น พ.ศ. (เช่น 2567) ให้ลบ 543
+  if (year > 2200) year -= 543;
+
+  return { year, q: qq, index: year * 4 + (qq - 1) };
+}
+
+// ===== helper: แปลงจาก Report/Period End date เป็น qIndex =====
+function quarterInfoFromDateStr(s) {
+  if (!s) return null;
+  const d = new Date(String(s));
+  if (isNaN(d)) return null;
+  const year = d.getFullYear();
+  const q = Math.floor(d.getMonth() / 3) + 1;
+  return { year, q, index: year * 4 + (q - 1) };
+}
+
+// ===== loadQuarterRows: เติม quarterLabel/qIndex จากหลายคอลัมน์ =====
+function loadQuarterRows(market) {
+  const file = FILE_BY_MARKET[market];
+  if (!file) throw new Error(`Unsupported market: ${market}`);
+  const csvText = fs.readFileSync(file, 'utf8');
+  const rows = parse(csvText, { columns: true, skip_empty_lines: true, trim: true });
+
+  return rows.map(r => {
+    const o = {};
+    for (const [k, v] of Object.entries(r)) {
+      const kk = String(k).replace(/^\uFEFF/, '').trim();
+      o[kk] = v;
+    }
+
+    const stock = (o.StockSymbol || o.stockSymbol || o.Stock || '').toString().toUpperCase();
+
+    // พยายามทุกทางเพื่อหาไตรมาส
+    const qRaw =
+      o.Quarter || o.quarter || o['Fiscal Quarter'] || o['fiscalQuarter'] || null;
+
+    const dateRaw =
+      o['Report Date'] || o.ReportDate || o['Period End'] || o.PeriodEnd ||
+      o.endDate || o['End Date'] || null;
+
+    let qInfo = parseQuarterLabel(qRaw) || quarterInfoFromDateStr(dateRaw);
+
+    // ถ้าจับไม่ได้จริงๆ ให้ทิ้ง qIndex ไว้ null (จะไม่ได้ YoY/QoQ แต่ยังโชว์ metrics ล่าสุดได้)
+    const quarterLabel = qInfo ? `${qInfo.year}Q${qInfo.q}` : (qRaw || null);
+
+    return {
+      raw: o,
+      stockSymbol: stock,
+      quarterLabel,
+      qIndex: qInfo ? qInfo.index : null,
+
+      revenue:        num(o['Total Revenue'] ?? o.TotalRevenue ?? o.Revenue),
+      netIncome:      num(o['Net Profit'] ?? o.NetProfit ?? o.NetIncome),
+      eps:            num(o['Earnings Per Share (EPS)'] ?? o['EPS (THB)'] ?? o.EPS),
+      ocf:            num(o['Operating Cash Flow'] ?? o['Net Cash from Operating Activities'] ?? o.CFO),
+
+      grossMarginPct: num(o['Gross Margin (%)']),
+      netMarginPct:   num(o['Net Profit Margin (%)']),
+      roePct:         num(o['ROE (%)']),
+      d2e:            num(o['Debt to Equity (x)']),
+    };
+  });
+}
+
+function buildDrivers(rowsSymbolSorted) {
+  const byIdx = new Map();
+  rowsSymbolSorted.forEach(r => { if (r.qIndex != null) byIdx.set(r.qIndex, r); });
+
+  const pct = (cur, prev) => (cur == null || prev == null || prev === 0) ? null
+    : ((cur - prev) / Math.abs(prev)) * 100;
+  const pp  = (cur, prev) => (cur == null || prev == null) ? null : (cur - prev); // จุดเปอร์เซ็นต์
+  const d2eScaled = (cur, prev) => (cur == null || prev == null) ? null : (cur - prev) * 100;
+
+  const mkDelta = (cur, prev) => ({
+    revenue:        pct(cur.revenue, prev?.revenue),
+    eps:            pct(cur.eps, prev?.eps),
+    ocf:            pct(cur.ocf, prev?.ocf),
+    grossMarginPct: pp(cur.grossMarginPct, prev?.grossMarginPct),
+    netMarginPct:   pp(cur.netMarginPct,   prev?.netMarginPct),
+    roePct:         pp(cur.roePct,         prev?.roePct),
+    d2e:            d2eScaled(cur.d2e,     prev?.d2e),
+  });
+
+  const timeline = rowsSymbolSorted.map(r => {
+    const prevQ = r.qIndex != null ? byIdx.get(r.qIndex - 1) : null;
+    const prevY = r.qIndex != null ? byIdx.get(r.qIndex - 4) : null;
+    return {
+      symbol: r.stockSymbol,
+      quarterLabel: r.quarterLabel || '—',
+      reportDate: null, // ไฟล์ไม่มี
+      metrics: {
+        revenue: r.revenue,
+        eps: r.eps,
+        ocf: r.ocf,
+        grossMarginPct: r.grossMarginPct,
+        netMarginPct: r.netMarginPct,
+        roePct: r.roePct,
+        d2e: r.d2e,
+      },
+      qoq: prevQ ? mkDelta(r, prevQ) : null,
+      yoy: prevY ? mkDelta(r, prevY) : null,
+    };
+  });
+
+  const latest = timeline[timeline.length - 1];
+  const delta  = latest.yoy || latest.qoq || {};
+  const base   = latest.yoy ? 'YoY' : (latest.qoq ? 'QoQ' : null);
+
+  const weights = {
+    eps:            0.35,
+    revenue:        0.20,
+    grossMarginPct: 0.15,
+    netMarginPct:   0.15,
+    roePct:         0.10,
+    ocf:            0.05,
+    d2e:           -0.10, // เพิ่มหนี้/ทุน = แย่
+  };
+
+  const score = Object.entries(weights).reduce((s, [k, w]) => {
+    const v = delta?.[k];
+    return (v == null) ? s : s + v * w;
+  }, 0);
+
+  const positives = [];
+  const negatives = [];
+  const pushWhy = (label, v, upIsGood = true, unit = '%') => {
+    if (v == null) return;
+    const txt = `${label} ${v >= 0 ? '+' : ''}${v.toFixed(2)}${unit}`;
+    ((v >= 0) === upIsGood ? positives : negatives).push(txt);
+  };
+
+  if (base) {
+    pushWhy('EPS',                  delta.eps,            true,  '%');
+    pushWhy('Revenue',              delta.revenue,        true,  '%');
+    pushWhy('Gross Margin',         delta.grossMarginPct, true,  'pp');
+    pushWhy('Net Margin',           delta.netMarginPct,   true,  'pp');
+    pushWhy('ROE',                  delta.roePct,         true,  'pp');
+    pushWhy('Operating CF',         delta.ocf,            true,  '%');
+    pushWhy('Debt/Equity (Δ×100)',  delta.d2e,            false, '');
+  }
+
+  return {
+    data: timeline,
+    summary: base ? {
+      base, score, positives, negatives,
+      latestQuarter: latest.quarterLabel,
+      reportDate: latest.reportDate,
+    } : null
+  };
+}
+
+// 3) routes
+app.get('/api/fundamentals/drivers', verifyToken, async (req, res) => {
+  try {
+    const market = (req.query.market || '').trim();
+    const symbol = (req.query.symbol || '').trim().toUpperCase();
+    const limit  = Math.max(1, Math.min(parseInt(req.query.limitQuarters || '8', 10), 20));
+    if (!['Thailand','America'].includes(market) || !symbol) {
+      return res.status(400).json({ error: 'market (Thailand|America) & symbol required' });
+    }
+
+    const all = loadQuarterRows(market).filter(r => r.stockSymbol === symbol);
+    const sorted = all
+      .sort((a,b) => (a.qIndex != null && b.qIndex != null) ? a.qIndex - b.qIndex
+                                                            : String(a.quarterLabel||'').localeCompare(String(b.quarterLabel||'')))
+      .slice(-limit);
+
+    if (!sorted.length) {
+      return res.json({ message: 'OK', market, symbol, data: [], summary: null });
+    }
+
+    const drivers = buildDrivers(sorted);
+    return res.json({ message: 'OK', market, symbol, data: drivers.data, summary: drivers.summary });
+  } catch (e) {
+    console.error('fundamentals/drivers error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/fundamentals/overview', verifyToken, async (req, res) => {
+  try {
+    const market = (req.query.market || '').trim();
+    const symbol = (req.query.symbol || '').trim().toUpperCase();
+    const limit  = Math.max(1, Math.min(parseInt(req.query.limitQuarters || '8', 10), 40));
+    if (!['Thailand','America'].includes(market) || !symbol) {
+      return res.status(400).json({ error: 'market (Thailand|America) & symbol required' });
+    }
+
+    const all = loadQuarterRows(market).filter(r => r.stockSymbol === symbol);
+    const sorted = all
+      .sort((a,b) => (a.qIndex != null && b.qIndex != null) ? a.qIndex - b.qIndex
+                                                            : String(a.quarterLabel||'').localeCompare(String(b.quarterLabel||'')))
+      .slice(-limit);
+
+    if (!sorted.length) {
+      return res.json({ message: 'OK', market, symbol, raw: { rows: [], count: 0 }, drivers: { data: [], summary: null } });
+    }
+
+    const drivers = buildDrivers(sorted);
+    const rawRows = sorted.map(r => r.raw);
+
+    return res.json({
+      message: 'OK',
+      market, symbol,
+      raw: { rows: rawRows, count: rawRows.length },
+      drivers
+    });
+  } catch (e) {
+    console.error('fundamentals/overview error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+
+
 // ========== START SERVER ==========
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
