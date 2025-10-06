@@ -149,5 +149,7 @@ uploads/
 *.sh
 
 CLAUDE.md
-
+*.sql
 trademine-a3921-firebase-adminsdk-fbsvc-ff0de5bd4d.json
+*.joblib
+*.json

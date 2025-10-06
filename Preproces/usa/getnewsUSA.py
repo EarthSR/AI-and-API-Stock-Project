@@ -1,55 +1,36 @@
-import sys
-import selenium
+# -*- coding: utf-8 -*-
+import sys, os, time, random, threading, platform, shutil, tarfile, zipfile
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='ignore')
+
+import pandas as pd
+import requests
+import mysql.connector
+from dotenv import load_dotenv
+
+from bs4 import BeautifulSoup
+import concurrent.futures
+
 from selenium import webdriver
 from selenium.webdriver.firefox.service import Service
-from selenium.webdriver.firefox.options import Options as FirefoxOptions  # ใช้ FirefoxOptions
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
-from bs4 import BeautifulSoup
-import pandas as pd
-import concurrent.futures
-import threading
-import os
-import gc
-from datetime import datetime, timedelta
-import mysql.connector
-from dotenv import load_dotenv
-from pathlib import Path
-import time
-import random
-from webdriver_manager.firefox import GeckoDriverManager
 
-# ✅ ป้องกัน UnicodeEncodeError
-sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+# ===================== CONFIG PATHS =====================
+ROOT = Path(__file__).resolve().parent
+USA_DIR = (ROOT / '..' / 'usa').resolve()
+NEWS_DIR = USA_DIR / 'News'
+NEWS_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_CSV = NEWS_DIR / 'USA_News.csv'
 
-# ✅ ตรวจสอบเวอร์ชัน Selenium
-print(f"Selenium version: {selenium.__version__}")
-
-# ✅ ใช้โฟลเดอร์ปัจจุบัน
-path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'usa')
-News_FOLDER = os.path.join(path, "News")
-os.makedirs(News_FOLDER, exist_ok=True)
-
-# ✅ กำหนด path ของไฟล์ CSV
-output_filename = os.path.join(News_FOLDER, "USA_News.csv")
-print(f"บันทึกไฟล์ CSV ที่: {output_filename}")
-
-# ✅ URL ของข่าว
-base_url = "https://www.investing.com/news/stock-market-news"
-
-# ✅ Lock สำหรับการใช้ Firefox instance
-driver_lock = threading.Lock()
-
-# รายการ User-Agent สำหรับสุ่ม
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:127.0) Gecko/20100101 Firefox/127.0"
-]
-
-# โหลด environment variables
-dotenv_path = Path(__file__).resolve().parents[1] / "config.env"
+# ===================== ENV / DB =========================
+dotenv_path = (ROOT / '..' / 'config.env').resolve()
 load_dotenv(dotenv_path)
 
 db_config = {
@@ -57,250 +38,402 @@ db_config = {
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME"),
-    "port": os.getenv("DB_PORT")
+    "port": os.getenv("DB_PORT"),
+    "autocommit": True
 }
-
 try:
     conn = mysql.connector.connect(**db_config)
     cursor = conn.cursor()
+    print("✅ DB connected")
 except mysql.connector.Error as e:
-    print(f"❌ ไม่สามารถเชื่อมต่อฐานข้อมูล: {e}")
+    print(f"❌ DB connect failed: {e}")
     sys.exit(1)
 
-def get_latest_news_date_from_database():
-    """ดึงวันที่ล่าสุดของข่าวจากฐานข้อมูล"""
-    try:
-        cursor.execute("SELECT MAX(PublishedDate) FROM News WHERE Source = 'investing'")
-        latest_date = cursor.fetchone()[0]
-        if latest_date:
-            if isinstance(latest_date, datetime):
-                latest_date = latest_date.date()
-            else:
-                latest_date = datetime.strptime(latest_date, "%Y-%m-%d %H:%M:%S").date()
-            print(f"🗓️ ข่าวล่าสุดคือวันที่: {latest_date}")
-            return latest_date
-        else:
-            print("⚠️ ไม่มีข่าวในฐานข้อมูล เริ่มดึงข่าวตั้งแต่ 7 วันก่อน")
-            return (datetime.now() - timedelta(days=7)).date()
-    except mysql.connector.Error as e:
-        print(f"❌ ข้อผิดพลาดในการดึงวันที่จากฐานข้อมูล: {e}")
-        return (datetime.now() - timedelta(days=7)).date()
+# ===================== SCRAPER TARGET ===================
+base_url = "https://www.investing.com/news/stock-market-news"
 
+# ===================== UA & LOCK ========================
+driver_lock = threading.Lock()
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0"
+]
+
+# =======================================================
+#           GECKODRIVER RESOLUTION (No API limit)
+# =======================================================
+def _gecko_direct_url(version="v0.34.0"):
+    sysname = platform.system().lower()
+    arch = platform.machine().lower()
+    if "linux" in sysname:
+        fname = f"geckodriver-{version}-linux64.tar.gz"
+    elif "windows" in sysname:
+        fname = f"geckodriver-{version}-win64.zip"
+    elif "darwin" in sysname and arch in ("arm64", "aarch64"):
+        fname = f"geckodriver-{version}-macos-aarch64.tar.gz"
+    else:
+        fname = f"geckodriver-{version}-macos.tar.gz"
+    return f"https://github.com/mozilla/geckodriver/releases/download/{version}/{fname}"
+
+def _extract_driver(archive_path, dest_dir):
+    os.makedirs(dest_dir, exist_ok=True)
+    if archive_path.endswith(".zip"):
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            zf.extractall(dest_dir)
+    else:
+        with tarfile.open(archive_path, "r:gz") as tf:
+            tf.extractall(dest_dir)
+    exe = "geckodriver.exe" if platform.system().lower().startswith("win") else "geckodriver"
+    driver_path = os.path.join(dest_dir, exe)
+    if not os.path.isfile(driver_path):
+        for root, _, files in os.walk(dest_dir):
+            if exe in files:
+                driver_path = os.path.join(root, exe)
+                break
+    try:
+        if not platform.system().lower().startswith("win"):
+            os.chmod(driver_path, 0o755)
+    except Exception:
+        pass
+    return driver_path
+
+def _download_direct(version, target_dir):
+    url = _gecko_direct_url(version)
+    os.makedirs(target_dir, exist_ok=True)
+    tmp_path = os.path.join(target_dir, f"geckodriver-{version}.tmp")
+    print(f"⬇️ Downloading geckodriver direct: {url}")
+    with requests.get(url, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        with open(tmp_path, "wb") as f:
+            for chunk in r.iter_content(8192):
+                if chunk:
+                    f.write(chunk)
+    driver_path = _extract_driver(tmp_path, target_dir)
+    try:
+        os.remove(tmp_path)
+    except Exception:
+        pass
+    return driver_path
+
+def resolve_geckodriver_path():
+    # 1) Env path
+    env_path = os.getenv("GECKODRIVER_PATH")
+    if env_path and os.path.isfile(env_path):
+        print(f"🔧 Using GECKODRIVER_PATH: {env_path}")
+        return env_path
+    # 2) PATH
+    found = shutil.which("geckodriver")
+    if found:
+        print(f"🔎 Found geckodriver in PATH: {found}")
+        return found
+    # 3) Cache
+    cache_dir = os.path.join(Path.home(), ".cache", "geckodriver")
+    os.makedirs(cache_dir, exist_ok=True)
+    exe = "geckodriver.exe" if platform.system().lower().startswith("win") else "geckodriver"
+    cached = os.path.join(cache_dir, exe)
+    if os.path.isfile(cached):
+        print(f"💾 Using cached geckodriver: {cached}")
+        return cached
+    # 4) Direct download fallback
+    version = os.getenv("GECKODRIVER_VERSION", "v0.34.0")
+    path = _download_direct(version, cache_dir)
+    print(f"✅ Installed geckodriver direct: {path}")
+    return path
+
+try:
+    GECKO_PATH = resolve_geckodriver_path()
+except Exception as e:
+    print("❌ geckodriver setup failed:", e)
+    sys.exit(1)
+
+# =======================================================
+#                HELPERS: DRIVER & NAVIGATION
+# =======================================================
 def init_driver():
-    """สร้าง Firefox driver instance แบบปลอดภัย"""
+    """Headless Firefox, ไม่ปิดรูป (เพื่อเอารูปข่าวได้) + ไม่รอโหลดทั้งหน้า"""
     with driver_lock:
         options = FirefoxOptions()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-extensions")
-        options.add_argument("--headless")  # ใช้ headless mode ถ้าต้องการ
+        options.add_argument("--headless")
         options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
-        # ถ้ามี proxy ใช้งาน ให้ uncomment
-        # options.add_argument("--proxy-server=http://your_proxy:port")
+
+        # ไม่รอ page load จนจบ เพื่อกัน timeout
+        options.page_load_strategy = "none"
+
+        service = Service(executable_path=GECKO_PATH)
         try:
-            service = Service(GeckoDriverManager().install())
             driver = webdriver.Firefox(service=service, options=options)
-            driver.set_page_load_timeout(30)
-            time.sleep(2)
-            print(f"Firefox version: {driver.capabilities['browserVersion']}")
+            driver.set_page_load_timeout(12)   # เราจะ stop เอง
+            driver.set_script_timeout(20)
+            time.sleep(0.8)
+            print(f"Firefox version: {driver.capabilities.get('browserVersion')}")
             return driver
         except Exception as e:
             print(f"❌ ไม่สามารถเริ่ม GeckoDriver: {e}")
             return None
 
-def close_popup(driver):
-    """ปิด popup ถ้ามี"""
+def smart_get(driver, url, hard_timeout=12, wait_selector=(By.TAG_NAME, "article"), wait_timeout=20):
+    """
+    เข้า URL แบบไม่รอโหลดทั้งหน้า:
+    1) ให้เวลาสั้น ๆ กับ driver.get()
+    2) ครบแล้วสั่ง window.stop() เพื่อตัดสคริปต์/แอด
+    3) รอ element เป้าหมายโผล่
+    """
     try:
-        close_button = WebDriverWait(driver, 3).until(
+        driver.set_page_load_timeout(hard_timeout)
+        try:
+            driver.get(url)
+        except TimeoutException:
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+
+        WebDriverWait(driver, wait_timeout).until(EC.presence_of_element_located(wait_selector))
+        return True
+    except Exception as e:
+        print(f"⚠️ smart_get fail: {e}")
+        return False
+
+def smooth_scroll_to_bottom(driver, step=200, delay=0.03, max_time=10):
+    try:
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        pos, start = 0, time.time()
+        while pos < last_height and (time.time() - start) < max_time:
+            driver.execute_script(f"window.scrollTo(0, {pos});")
+            time.sleep(delay)
+            pos += step
+            new_h = driver.execute_script("return document.body.scrollHeight")
+            if new_h > last_height:
+                last_height = new_h
+        time.sleep(0.2)
+    except Exception as e:
+        print(f"⚠️ scroll issue: {e}")
+
+def close_popup(driver):
+    try:
+        btn = WebDriverWait(driver, 3).until(
             EC.element_to_be_clickable((By.XPATH, "//svg[@data-test='sign-up-dialog-close-button']"))
         )
-        close_button.click()
-        print("✅ Popup ปิดเรียบร้อย")
+        btn.click()
+        print("✅ Popup closed")
     except Exception:
         pass
 
-def smooth_scroll_to_bottom(driver, step=200, delay=0.03):
-    """เลื่อนหน้าจอลงอย่างช้าๆ จนสุดหน้า"""
+# =======================================================
+#                   SCRAPERS (USA)
+# =======================================================
+def get_latest_news_date_from_database():
     try:
-        last_height = driver.execute_script("return document.body.scrollHeight")
-        current_position = 0
-        max_scroll_time = 10
-        start_time = time.time()
-        while current_position < last_height and (time.time() - start_time) < max_scroll_time:
-            driver.execute_script(f"window.scrollTo(0, {current_position});")
-            time.sleep(delay)
-            current_position += step
-            new_height = driver.execute_script("return document.body.scrollHeight")
-            if new_height > last_height:
-                last_height = new_height
-        time.sleep(0.2)
-    except Exception as e:
-        print(f"⚠️ ปัญหาการเลื่อนหน้า: {e}")
+        cursor.execute("SELECT MAX(PublishedDate) FROM News WHERE Source = 'investing'")
+        latest = cursor.fetchone()[0]
+        if latest:
+            if isinstance(latest, datetime):
+                return latest.date()
+            return datetime.strptime(latest, "%Y-%m-%d %H:%M:%S").date()
+        else:
+            print("⚠️ ไม่มีข่าวในฐานข้อมูล เริ่ม 7 วันก่อน")
+            return (datetime.now() - timedelta(days=7)).date()
+    except mysql.connector.Error as e:
+        print(f"❌ DB query error: {e}")
+        return (datetime.now() - timedelta(days=7)).date()
 
 def scrape_news(driver):
-    """ดึงข่าวจากหน้าเว็บ"""
+    """ดึงข้อมูลข่าวจากหน้า list (มีรูป/คำอธิบาย/เวลา)"""
     try:
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         articles = soup.find_all('article', {'data-test': 'article-item'})
-        news_list = []
-        for article in articles:
-            title_tag = article.find('a', {'data-test': 'article-title-link'})
+        out = []
+        for a in articles:
+            title_tag = a.find('a', {'data-test': 'article-title-link'})
             title = title_tag.get_text(strip=True) if title_tag else 'No Title'
-            link = title_tag.get("href", "No Link")
-            img_tag = article.find('img', {'data-test': 'item-image'})
-            img = img_tag.get('src', 'No Image') if img_tag else 'No Image'
-            description_tag = article.find('p', {'data-test': 'article-description'})
-            description = description_tag.get_text(strip=True) if description_tag else 'No Description'
-            date_tag = article.find('time', {'data-test': 'article-publish-date'})
+            link = title_tag.get("href", "No Link") if title_tag else "No Link"
+
+            img_tag = a.find('img', {'data-test': 'item-image'})
+            img = img_tag.get('src') if img_tag and img_tag.get('src') else 'No Image'
+
+            desc_tag = a.find('p', {'data-test': 'article-description'})
+            desc = desc_tag.get_text(strip=True) if desc_tag else 'No Description'
+
+            date_tag = a.find('time', {'data-test': 'article-publish-date'})
             date_str = date_tag.get("datetime", None) if date_tag else None
             if date_str:
                 try:
                     datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
                 except ValueError:
                     date_str = None
-            news_list.append({'title': title, 'link': link, 'description': description, 'date': date_str, 'image': img})
-        return news_list
+
+            out.append({
+                "title": title, "link": link, "description": desc, "date": date_str, "image": img
+            })
+        return out
     except Exception as e:
-        print(f"❌ ปัญหาการสแครปข่าว: {e}")
+        print(f"❌ parse error: {e}")
         return []
 
 def safe_quit(driver):
-    """ปิด WebDriver อย่างปลอดภัย"""
     if driver:
         try:
             driver.quit()
-            if driver.service:
+            if getattr(driver, "service", None):
                 driver.service.stop()
             del driver
-            gc.collect()
-            print("✅ WebDriver ปิดเรียบร้อย")
-        except Exception as e:
-            print(f"⚠️ Warning: WebDriver ปิดไม่สมบูรณ์: {e}")
+        except Exception:
+            pass
+        print("✅ WebDriver ปิดเรียบร้อย")
 
 scraped_pages = set()
 
-def scrape_page(page, max_retries=3):
-    """Scrape ข่าวจากหน้าเว็บด้วยการ retry"""
-    global scraped_pages
+def scrape_page(page, max_retries=3, latest_date=None):
     if page in scraped_pages:
         print(f"⚠️ หน้าที่ {page} ถูกดึงไปแล้ว ข้าม...")
         return []
+
+    url = f"{base_url}/{page}" if page > 1 else base_url
     driver = None
+
     for attempt in range(1, max_retries + 1):
         try:
             print(f"เริ่มดึงหน้า {page} (ครั้งที่ {attempt})")
             driver = init_driver()
             if not driver:
-                raise WebDriverException("ไม่สามารถเริ่ม WebDriver ได้")
-            driver.get(f"{base_url}/{page}" if page > 1 else base_url)
-            try:
-                status_code = driver.execute_script("return window.performance.getEntriesByType('navigation')[0].responseStatus")
-                if status_code != 200:
-                    print(f"❌ หน้า {page} คืนสถานะ HTTP {status_code}")
-                    return []
-            except Exception:
-                print(f"⚠️ ไม่สามารถตรวจสอบ HTTP status สำหรับหน้า {page}")
-            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "article")))
+                raise WebDriverException("start WebDriver failed")
+
+            ok = smart_get(driver, url, hard_timeout=12, wait_selector=(By.TAG_NAME, "article"), wait_timeout=20)
+            if not ok:
+                raise TimeoutException("smart_get timed out")
+
             smooth_scroll_to_bottom(driver)
             close_popup(driver)
+
             news = scrape_news(driver)
-            print(f"✅ ดึงข่าวจากหน้า {page} ได้ {len(news)} ข่าว")
-            scraped_pages.add(page)
-            time.sleep(5)
-            return news
+            if news:
+                print(f"✅ ดึงข่าวจากหน้า {page} ได้ {len(news)} ข่าว")
+                scraped_pages.add(page)
+                time.sleep(2.0)
+                return news
+            else:
+                raise WebDriverException("no articles found")
+
         except (TimeoutException, WebDriverException) as e:
-            print(f"❌ Error ในหน้า {page} (ครั้งที่ {attempt}): {e}")
+            # Fallback: หยุดโหลดแล้วเก็บที่มี
+            try:
+                if driver:
+                    driver.execute_script("window.stop();")
+                    news = scrape_news(driver)
+                    if news:
+                        print(f"✅ เก็บได้ {len(news)} ข่าวแม้จะ timeout")
+                        scraped_pages.add(page)
+                        time.sleep(1.5)
+                        return news
+            except Exception:
+                pass
+
+            print(f"❌ Error หน้า {page} (ครั้งที่ {attempt}): {e}")
             if attempt == max_retries:
                 print(f"⏳ ล้มเหลวหลังจากลอง {max_retries} ครั้งในหน้า {page}")
                 return []
-            time.sleep(15 * attempt)
+            time.sleep(10 * attempt)
+
         except Exception as e:
-            print(f"❌ Error ไม่คาดคิดในหน้า {page} (ครั้งที่ {attempt}): {e}")
+            print(f"❌ Unexpected error หน้า {page} (ครั้งที่ {attempt}): {e}")
             return []
+
         finally:
             if driver:
                 safe_quit(driver)
+
     return []
 
 def save_to_csv(data, filename, write_header=False):
-    """บันทึกข้อมูลลง CSV โดยป้องกันข่าวซ้ำ"""
     if not data:
         print("⚠️ ไม่มีข่าวใหม่ ไม่บันทึกไฟล์ CSV")
         return
-    try:
-        df_new = pd.DataFrame(data)
-        existing_links = set()
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-        if os.path.exists(filename):
-            try:
-                df_existing = pd.read_csv(filename, encoding='utf-8')
-                if 'link' in df_existing.columns:
-                    existing_links = set(df_existing['link'].astype(str))
-                    df_new = df_new[~df_new['link'].astype(str).isin(existing_links)]
-                print(f"🛑 พบข่าวซ้ำ {len(existing_links)} ข่าว")
-            except Exception as e:
-                print(f"❌ ไม่สามารถอ่านไฟล์ CSV เดิมได้: {e}")
-                return
-        else:
-            print(f"📄 ไฟล์ CSV '{filename}' ยังไม่มี จะสร้างใหม่")
-        if not df_new.empty:
-            mode = 'w' if write_header else 'a'
-            header = True if write_header else False
-            try:
-                df_new.to_csv(filename, index=False, encoding='utf-8', mode=mode, header=header)
-                print(f"💾 บันทึกข่าว {len(df_new)} ข่าวลง CSV '{filename}' (mode={mode})")
-            except Exception as e:
-                print(f"❌ ไม่สามารถบันทึกไฟล์ CSV ได้: {e}")
-        else:
-            print("✅ ไม่มีข่าวใหม่ให้บันทึก")
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดใน save_to_csv: {e}")
+    df_new = pd.DataFrame(data)
+    existing_links = set()
+    os.makedirs(os.path.dirname(str(filename)), exist_ok=True)
+
+    if os.path.exists(filename):
+        try:
+            df_existing = pd.read_csv(filename, encoding='utf-8')
+            if 'link' in df_existing.columns:
+                existing_links = set(df_existing['link'].astype(str))
+                before = len(df_new)
+                df_new = df_new[~df_new['link'].astype(str).isin(existing_links)]
+                print(f"🛑 พบข่าวซ้ำ {len(existing_links)} ลิงก์ | คัดออก {before - len(df_new)} แถว")
+        except Exception as e:
+            print(f"❌ อ่าน CSV เดิมไม่ได้: {e}")
+            return
+    else:
+        print(f"📄 ไฟล์ใหม่: {filename}")
+
+    if not df_new.empty:
+        mode = 'w' if write_header else 'a'
+        header = True if write_header else False
+        try:
+            df_new.to_csv(filename, index=False, encoding='utf-8', mode=mode, header=header)
+            print(f"💾 บันทึกข่าว {len(df_new)} ข่าวลง CSV '{filename}' (mode={mode})")
+        except Exception as e:
+            print(f"❌ บันทึก CSV ล้มเหลว: {e}")
+    else:
+        print("✅ ไม่มีข่าวใหม่ให้บันทึกหลังคัดซ้ำ")
 
 def main():
-    """ฟังก์ชันหลักที่ดึงข่าวตั้งแต่วันที่ล่าสุด"""
     latest_date = get_latest_news_date_from_database()
-    batch_size = 4
-    max_pages = 200  
+    batch_size = 2          # ลด parallel เพื่อกันล้ม / กันโดน block
+    max_pages = 200
     all_news = []
     is_first_save = True
     stop_scraping = False
     total_articles = 0
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
         futures = []
         for page in range(1, max_pages + 1):
             if stop_scraping:
                 break
-            futures.append(executor.submit(scrape_page, page))
+            futures.append(executor.submit(scrape_page, page, 3, latest_date))
+
             if len(futures) == batch_size or page == max_pages:
+                time.sleep(1.0)  # เว้นจังหวะลดโหลด
                 for future in concurrent.futures.as_completed(futures):
                     result = future.result()
                     all_news.extend(result)
+
+                    # ตรวจวันที่เจอข่าวเก่า → หยุด
                     for item in result:
                         try:
                             if item['date']:
-                                news_date = datetime.strptime(item['date'], "%Y-%m-%d %H:%M:%S").date()
+                                nd = datetime.strptime(item['date'], "%Y-%m-%d %H:%M:%S").date()
                             else:
-                                news_date = None
+                                nd = None
                         except (ValueError, TypeError):
-                            news_date = None
-                        if news_date and news_date <= latest_date:
+                            nd = None
+                        if nd and nd <= latest_date:
                             print(f"⏹️ พบข่าวที่มีอยู่แล้ว ({latest_date}), หยุดดึงข่าวทันที")
-                            save_to_csv(all_news, output_filename, write_header=is_first_save)              
+                            save_to_csv(all_news, str(OUTPUT_CSV), write_header=is_first_save)
                             stop_scraping = True
                             break
-                save_to_csv(all_news, output_filename, write_header=is_first_save)
+
+                save_to_csv(all_news, str(OUTPUT_CSV), write_header=is_first_save)
                 total_articles += len(all_news)
-                print(f"📊 ดึงข่าวทั้งหมด {total_articles} ข่าว")
+                print(f"📊 สรุปรอบนี้: {len(all_news)} ข่าว | สะสม: {total_articles}")
                 is_first_save = False
                 all_news = []
                 futures = []
+
     try:
         cursor.close()
         conn.close()
         print("✅ ปิดการเชื่อมต่อฐานข้อมูลเรียบร้อย")
     except mysql.connector.Error as e:
-        print(f"❌ ข้อผิดพลาดในการปิดฐานข้อมูล: {e}")
+        print(f"❌ ปิดฐานข้อมูลล้มเหลว: {e}")
 
 if __name__ == "__main__":
+    print("Selenium version:", webdriver.__version__ if hasattr(webdriver, "__version__") else "N/A")
+    print(f"บันทึกไฟล์ CSV ที่: {OUTPUT_CSV}")
     main()

@@ -1,541 +1,800 @@
-import pandas as pd
+# XGB_PriceMeta.py  (Meta-regressor สำหรับ "ราคา" + คำนวนทิศทางจากราคา + รายงานแยกหุ้น)
+# -*- coding: utf-8 -*-
+"""
+สิ่งที่ปรับปรุงจากเวอร์ชันก่อนหน้า (backward-compatible):
+1) Feature Engineering เพิ่มเติมแบบไม่เกิด leakage:
+   - prev_ret_1d (log-return ของวันก่อนหน้า), vol_ema (EMA ของ |prev_ret_1d| ต่อ Ticker)
+   - sign_agree (LSTM/GRU เห็นทิศทางตรงกันไหม), mag_mean, ret_pred_ratio, rel_conf_* (อัตราส่วนความมั่นใจเทียบ EMA error)
+2) Isotonic Calibration ของ P(up) จาก predicted return บน validation (หรือ CV) → ได้คอลัมน์ Meta_Prob_Up
+3) Neutral Zone จาก conformal residual (gamma = max(|q_lo|,|q_hi|)) → คอลัมน์ Meta_Pred_Dir_Th (tri-state: {-1,0,1})
+4) รายงานสรุปเพิ่ม AUC/Brier (ถ้ามี val) และคอลัมน์ *_META_TH ใน overall summaries
+5) ความทนทาน: winsorize ฟีเจอร์แบบ return เพิ่ม, ใส่ n_jobs=-1 ให้ XGBRegressor
+"""
+
+import os, joblib, warnings
 import numpy as np
+import pandas as pd
 import xgboost as xgb
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.preprocessing import StandardScaler, RobustScaler
-from sklearn.metrics import accuracy_score, mean_squared_error, r2_score, classification_report
-from sklearn.base import BaseEstimator, RegressorMixin
-import joblib
-import logging
-import warnings
-import os
-from datetime import datetime, timedelta
+from xgboost import XGBRegressor
+from sklearn.metrics import (
+    mean_absolute_error, mean_squared_error, r2_score,
+    accuracy_score, f1_score, precision_score, recall_score, matthews_corrcoef,
+    roc_auc_score, brier_score_loss
+)
+from sklearn.isotonic import IsotonicRegression
 
-warnings.filterwarnings("ignore", category=UserWarning)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
-class FixedUnifiedTradingSystem:
-    """
-    Fixed Trading System - แก้ไขปัญหาพื้นฐาน
-    """
-    
-    def __init__(self, price_threshold=0.5):  # เปลี่ยนจาก 0.0 เป็น 0.5%
-        self.price_threshold = price_threshold
-        self.model = None
-        self.feature_names = None
-        self.training_stats = {}
-        self.data_stats = {}
-        self.scaler = None
-    
-    def validate_input_data(self, df):
-        """ตรวจสอบข้อมูลที่เข้ามา"""
-        logger.info("🔍 Validating input data...")
-        
-        required_columns = ['Ticker', 'Date', 'Actual_Price', 'Predicted_Price_LSTM', 
-                           'Predicted_Price_GRU', 'Predicted_Dir_LSTM', 'Predicted_Dir_GRU']
-        
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
-            raise ValueError(f"Missing required columns: {missing_columns}")
-        
-        # ตรวจสอบข้อมูลที่ผิดปกติ
-        issues = []
-        
-        # 1. ราคาที่เป็น 0 หรือติดลบ
-        invalid_prices = (df['Actual_Price'] <= 0).sum()
-        if invalid_prices > 0:
-            issues.append(f"Invalid prices: {invalid_prices} rows")
-        
-        # 2. Missing values
-        missing_data = df[required_columns].isnull().sum().sum()
-        if missing_data > 0:
-            issues.append(f"Missing values: {missing_data} cells")
-        
-        # 3. Direction ที่อยู่นอกช่วง 0-1
-        invalid_dirs_lstm = ((df['Predicted_Dir_LSTM'] < 0) | (df['Predicted_Dir_LSTM'] > 1)).sum()
-        invalid_dirs_gru = ((df['Predicted_Dir_GRU'] < 0) | (df['Predicted_Dir_GRU'] > 1)).sum()
-        if invalid_dirs_lstm + invalid_dirs_gru > 0:
-            issues.append(f"Invalid directions: LSTM={invalid_dirs_lstm}, GRU={invalid_dirs_gru}")
-        
-        # 4. ราคาที่แตกต่างกันมากเกินไป
-        price_diff_lstm = abs(df['Predicted_Price_LSTM'] - df['Actual_Price']) / df['Actual_Price']
-        price_diff_gru = abs(df['Predicted_Price_GRU'] - df['Actual_Price']) / df['Actual_Price']
-        
-        extreme_diff_lstm = (price_diff_lstm > 0.5).sum()  # มากกว่า 50%
-        extreme_diff_gru = (price_diff_gru > 0.5).sum()
-        
-        if extreme_diff_lstm + extreme_diff_gru > 0:
-            issues.append(f"Extreme price differences: LSTM={extreme_diff_lstm}, GRU={extreme_diff_gru}")
-        
-        if issues:
-            logger.warning("Data issues found:")
-            for issue in issues:
-                logger.warning(f"  - {issue}")
-        else:
-            logger.info("✅ Data validation passed")
-        
-        return len(issues) == 0
-    
-    def create_simple_features(self, df, is_training=True):
-        """สร้าง features แบบง่าย ๆ ที่เข้าใจได้"""
-        logger.info("🔧 Creating simple features...")
-        
-        df_clean = df.sort_values(['Ticker', 'Date']).reset_index(drop=True)
-        
-        if is_training:
-            # สำหรับ training: ใช้ Actual_Price เป็น current price และ target
-            df_clean['Current_Price'] = df_clean['Actual_Price']
-            # สร้าง future price โดยการ shift กลับ (ปลอดภัยกว่า)
-            df_clean['Future_Price'] = df_clean.groupby('Ticker')['Actual_Price'].shift(-1)
-            
-            # คำนวณ return และ direction
-            df_clean['Target_Return_Pct'] = (
-                (df_clean['Future_Price'] - df_clean['Current_Price']) / 
-                df_clean['Current_Price'] * 100
-            )
-            df_clean['Target_Direction'] = (
-                df_clean['Target_Return_Pct'] > self.price_threshold
-            ).astype(int)
-            
-            # เอาแถวสุดท้ายของแต่ละ ticker ออก (ไม่มี future price)
-            df_clean = df_clean.groupby('Ticker').apply(lambda x: x.iloc[:-1]).reset_index(drop=True)
-            
-        else:
-            # สำหรับ prediction: ใช้ราคาปัจจุบันที่ส่งมา
-            if 'Current_Price' not in df_clean.columns:
-                df_clean['Current_Price'] = df_clean['Actual_Price']
-        
-        # 1. ความแตกต่างของการทำนายราคา
-        df_clean['Price_Diff_Pct'] = abs(
-            df_clean['Predicted_Price_LSTM'] - df_clean['Predicted_Price_GRU']
-        ) / df_clean['Current_Price'] * 100
-        
-        # 2. ราคาเฉลี่ย
-        df_clean['Price_Avg'] = (
-            df_clean['Predicted_Price_LSTM'] + df_clean['Predicted_Price_GRU']
-        ) / 2
-        
-        # 3. การเปลี่ยนแปลงราคาจากปัจจุบัน
-        df_clean['LSTM_Price_Change_Pct'] = (
-            (df_clean['Predicted_Price_LSTM'] - df_clean['Current_Price']) / 
-            df_clean['Current_Price'] * 100
-        )
-        df_clean['GRU_Price_Change_Pct'] = (
-            (df_clean['Predicted_Price_GRU'] - df_clean['Current_Price']) / 
-            df_clean['Current_Price'] * 100
-        )
-        df_clean['Avg_Price_Change_Pct'] = (
-            df_clean['LSTM_Price_Change_Pct'] + df_clean['GRU_Price_Change_Pct']
-        ) / 2
-        
-        # 4. Direction features
-        df_clean['LSTM_Dir_Binary'] = (df_clean['Predicted_Dir_LSTM'] > 0.5).astype(int)
-        df_clean['GRU_Dir_Binary'] = (df_clean['Predicted_Dir_GRU'] > 0.5).astype(int)
-        df_clean['Dir_Agreement'] = (
-            df_clean['LSTM_Dir_Binary'] == df_clean['GRU_Dir_Binary']
-        ).astype(int)
-        
-        # 5. Direction confidence
-        df_clean['LSTM_Dir_Confidence'] = abs(df_clean['Predicted_Dir_LSTM'] - 0.5) * 2
-        df_clean['GRU_Dir_Confidence'] = abs(df_clean['Predicted_Dir_GRU'] - 0.5) * 2
-        df_clean['Avg_Dir_Confidence'] = (
-            df_clean['LSTM_Dir_Confidence'] + df_clean['GRU_Dir_Confidence']
-        ) / 2
-        
-        # 6. Consistency check (สำคัญมาก!)
-        lstm_price_direction = (df_clean['LSTM_Price_Change_Pct'] > self.price_threshold).astype(int)
-        gru_price_direction = (df_clean['GRU_Price_Change_Pct'] > self.price_threshold).astype(int)
-        
-        df_clean['LSTM_Consistency'] = (
-            lstm_price_direction == df_clean['LSTM_Dir_Binary']
-        ).astype(int)
-        df_clean['GRU_Consistency'] = (
-            gru_price_direction == df_clean['GRU_Dir_Binary']
-        ).astype(int)
-        df_clean['Overall_Consistency'] = (
-            df_clean['LSTM_Consistency'] + df_clean['GRU_Consistency']
-        ) / 2
-        
-        # 7. Market context
-        thai_stocks = ['ADVANC', 'DIF', 'DITTO', 'HUMAN', 'INET', 'INSET', 'JAS', 'JMART', 'TRUE']
-        df_clean['Is_Thai'] = df_clean['Ticker'].isin(thai_stocks).astype(int)
-        
-        # 8. Price level categories
-        def categorize_price(row):
-            price = row['Current_Price']
-            if row['Is_Thai']:
-                if price < 10: return 0      # Low
-                elif price < 50: return 1   # Medium  
-                else: return 2              # High
-            else:  # US stocks
-                if price < 100: return 0    # Low
-                elif price < 300: return 1  # Medium
-                else: return 2              # High
-        
-        df_clean['Price_Category'] = df_clean.apply(categorize_price, axis=1)
-        
-        # 9. Simple interaction features
-        df_clean['Agreement_Confidence'] = df_clean['Dir_Agreement'] * df_clean['Avg_Dir_Confidence']
-        df_clean['Consistency_Score'] = df_clean['Overall_Consistency'] * df_clean['Avg_Dir_Confidence']
-        
-        logger.info(f"   Created {len([c for c in df_clean.columns if c not in df.columns])} features")
-        
-        return df_clean
-    
-    def train_simple_model(self, df):
-        """เทรนโมเดลแบบง่าย ๆ"""
-        logger.info("🚀 Training Simple XGBoost Model...")
-        
-        # Validate input data
-        if not self.validate_input_data(df):
-            logger.warning("Data validation failed, but continuing...")
-        
-        # Create features
-        df_processed = self.create_simple_features(df, is_training=True)
-        
-        # Remove rows with missing target
-        df_processed = df_processed.dropna(subset=['Target_Return_Pct', 'Target_Direction'])
-        
-        if len(df_processed) == 0:
-            raise ValueError("No valid training data after preprocessing")
-        
-        # Define simple feature set
-        feature_cols = [
-            'Price_Diff_Pct', 'LSTM_Price_Change_Pct', 'GRU_Price_Change_Pct', 'Avg_Price_Change_Pct',
-            'LSTM_Dir_Confidence', 'GRU_Dir_Confidence', 'Avg_Dir_Confidence',
-            'Dir_Agreement', 'LSTM_Consistency', 'GRU_Consistency', 'Overall_Consistency',
-            'Is_Thai', 'Price_Category', 'Agreement_Confidence', 'Consistency_Score'
-        ]
-        
-        # Select available features
-        available_features = [f for f in feature_cols if f in df_processed.columns]
-        logger.info(f"   Using {len(available_features)} features")
-        
-        # Prepare data
-        X = df_processed[available_features].fillna(0)
-        y_returns = df_processed['Target_Return_Pct']
-        y_directions = df_processed['Target_Direction']
-        
-        # Remove extreme outliers
-        return_q99 = y_returns.quantile(0.99)
-        return_q01 = y_returns.quantile(0.01)
-        outlier_mask = (y_returns >= return_q01) & (y_returns <= return_q99)
-        
-        X = X[outlier_mask].reset_index(drop=True)
-        y_returns = y_returns[outlier_mask].reset_index(drop=True)
-        y_directions = y_directions[outlier_mask].reset_index(drop=True)
-        
-        logger.info(f"   After outlier removal: {len(X)} samples")
-        
-        # Time-based split (80/20)
-        split_date = pd.to_datetime(df_processed['Date']).quantile(0.8)
-        train_mask = pd.to_datetime(df_processed['Date']) < split_date
-        train_mask = train_mask[outlier_mask].reset_index(drop=True)
-        test_mask = ~train_mask
-        
-        X_train, X_test = X[train_mask], X[test_mask]
-        y_returns_train, y_returns_test = y_returns[train_mask], y_returns[test_mask]
-        y_directions_train, y_directions_test = y_directions[train_mask], y_directions[test_mask]
-        
-        logger.info(f"   Train: {len(X_train)} samples")
-        logger.info(f"   Test: {len(X_test)} samples")
-        logger.info(f"   Direction balance - Train: {y_directions_train.mean():.3f}, Test: {y_directions_test.mean():.3f}")
-        
-        # Scale features
-        self.scaler = StandardScaler()
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_test_scaled = self.scaler.transform(X_test)
-        
-        # Simple XGBoost parameters
-        xgb_params = {
-            'n_estimators': 100,        # ลดลงจาก 200
-            'max_depth': 4,            # ลดลงจาก 5
-            'learning_rate': 0.1,      # เพิ่มขึ้นจาก 0.08
-            'subsample': 0.8,          # ลดลงจาก 0.85
-            'colsample_bytree': 0.8,   # ลดลงจาก 0.85
-            'reg_alpha': 0.1,          # ลดลงจาก 0.3
-            'reg_lambda': 0.1,         # ลดลงจาก 0.3
-            'random_state': 42,
-            'min_child_weight': 5,     # เพิ่มขึ้นจาก 3
-            'gamma': 0.05              # ลดลงจาก 0.1
-        }
-        
-        # Train separate models
-        self.price_model = xgb.XGBRegressor(objective='reg:squarederror', **xgb_params)
-        self.direction_model = xgb.XGBClassifier(objective='binary:logistic', **xgb_params)
-        
-        # Fit models
-        self.price_model.fit(X_train_scaled, y_returns_train)
-        self.direction_model.fit(X_train_scaled, y_directions_train)
-        
-        self.feature_names = available_features
-        
-        # Evaluate
-        self._evaluate_model_performance(X_train_scaled, X_test_scaled, 
-                                       y_returns_train, y_returns_test,
-                                       y_directions_train, y_directions_test)
-        
-        logger.info("✅ Simple model training completed!")
-        return self.training_stats
-    
-    def _evaluate_model_performance(self, X_train, X_test, y_returns_train, y_returns_test,
-                                   y_directions_train, y_directions_test):
-        """ประเมินประสิทธิภาพโมเดล"""
-        
-        # Predictions
-        pred_returns_train = self.price_model.predict(X_train)
-        pred_returns_test = self.price_model.predict(X_test)
-        
-        pred_dir_probs_train = self.direction_model.predict_proba(X_train)[:, 1]
-        pred_dir_probs_test = self.direction_model.predict_proba(X_test)[:, 1]
-        
-        pred_directions_train = (pred_dir_probs_train > 0.5).astype(int)
-        pred_directions_test = (pred_dir_probs_test > 0.5).astype(int)
-        
-        # Metrics
-        train_price_r2 = r2_score(y_returns_train, pred_returns_train)
-        test_price_r2 = r2_score(y_returns_test, pred_returns_test)
-        
-        train_dir_acc = accuracy_score(y_directions_train, pred_directions_train)
-        test_dir_acc = accuracy_score(y_directions_test, pred_directions_test)
-        
-        # Consistency check (สำคัญมาก!)
-        train_price_directions = (pred_returns_train > self.price_threshold).astype(int)
-        test_price_directions = (pred_returns_test > self.price_threshold).astype(int)
-        
-        train_consistency = (train_price_directions == pred_directions_train).mean()
-        test_consistency = (test_price_directions == pred_directions_test).mean()
-        
-        # Store stats
-        self.training_stats = {
-            'train_price_r2': train_price_r2,
-            'test_price_r2': test_price_r2,
-            'train_direction_accuracy': train_dir_acc,
-            'test_direction_accuracy': test_dir_acc,
-            'train_consistency': train_consistency,
-            'test_consistency': test_consistency,
-            'price_threshold': self.price_threshold,
-            'feature_count': len(self.feature_names)
-        }
-        
-        # Logging
-        logger.info("📊 Model Performance:")
-        logger.info(f"   Price R² - Train: {train_price_r2:.4f}, Test: {test_price_r2:.4f}")
-        logger.info(f"   Direction Accuracy - Train: {train_dir_acc:.4f}, Test: {test_dir_acc:.4f}")
-        logger.info(f"   🎯 Price-Direction Consistency - Train: {train_consistency:.4f}, Test: {test_consistency:.4f}")
-        
-        # Quality assessment
-        if test_consistency < 0.7:
-            logger.warning("🚨 LOW CONSISTENCY: Model predictions are inconsistent!")
-        elif test_consistency >= 0.8:
-            logger.info("✅ HIGH CONSISTENCY: Model predictions are consistent!")
-        else:
-            logger.info("⚠️ MODERATE CONSISTENCY: Model predictions are acceptable")
-    
-    def predict_signals(self, input_data):
-        """Generate trading signals - ไม่แก้ไขผลลัพธ์อัตโนมัติ"""
-        if self.price_model is None or self.direction_model is None:
-            raise ValueError("Model must be trained first")
-        
-        if isinstance(input_data, dict):
-            df = pd.DataFrame(input_data)
-        else:
-            df = input_data.copy()
-        
-        # Create features
-        df_processed = self.create_simple_features(df, is_training=False)
-        
-        # Select features
-        X = df_processed[self.feature_names].fillna(0)
-        X_scaled = self.scaler.transform(X)
-        
-        # Predict (ใช้ผลลัพธ์ตรงจากโมเดล ไม่แก้ไข)
-        predicted_returns = self.price_model.predict(X_scaled)
-        predicted_dir_probs = self.direction_model.predict_proba(X_scaled)[:, 1]
-        predicted_directions = (predicted_dir_probs > 0.5).astype(int)
-        
-        # Calculate predicted prices
-        current_prices = df_processed['Current_Price'].values
-        predicted_prices = current_prices * (1 + predicted_returns / 100)
-        
-        # ✅ ตรวจสอบความสอดคล้อง แต่ไม่แก้ไข (เก็บเป็นข้อมูลเท่านั้น)
-        price_implied_directions = (predicted_returns > self.price_threshold).astype(int)
-        inconsistent_mask = (predicted_directions != price_implied_directions)
-        
-        # 📊 เก็บสถิติความไม่สอดคล้อง แต่ไม่แก้ไข
-        if inconsistent_mask.sum() > 0:
-            logger.info(f"🚨 Found {inconsistent_mask.sum()}/{len(inconsistent_mask)} inconsistent predictions (NOT FIXED)")
-            logger.info(f"🎯 Raw Model Consistency: {(1 - inconsistent_mask.mean()):.1%}")
-        else:
-            logger.info("✅ All predictions are naturally consistent")
-        
-        # ❌ ลบส่วนการแก้ไขออกทั้งหมด - ไม่แก้ไข predicted_directions และ predicted_dir_probs
-        # ❌ predicted_directions[inconsistent_mask] = price_implied_directions[inconsistent_mask]
-        # ❌ predicted_dir_probs[inconsistent_mask] = np.where(...)
-        
-        # ✅ คำนวณ confidence แบบธรรมชาติ (ไม่มี consistency bonus)
-        base_confidence = np.abs(predicted_dir_probs - 0.5) * 2
-        # ❌ ลบ consistency bonus ออก
-        # ❌ consistency_bonus = (~inconsistent_mask).astype(float) * 0.1
-        final_confidence = np.clip(base_confidence, 0.1, 0.9)
-        
-        # Generate results (เพิ่มข้อมูลความไม่สอดคล้อง)
-        results = []
-        for idx in range(len(df_processed)):
-            results.append({
-                'Ticker': df_processed.iloc[idx]['Ticker'],
-                'Current_Price': current_prices[idx],
-                'Predicted_Price': predicted_prices[idx],
-                'Predicted_Return_Pct': predicted_returns[idx],
-                'Predicted_Direction': predicted_directions[idx],  # ✅ ผลจริงจากโมเดล
-                'Direction_Probability': predicted_dir_probs[idx],  # ✅ ผลจริงจากโมเดล
-                'Confidence': final_confidence[idx],  # ✅ ไม่มี artificial bonus
-                'Is_Inconsistent': inconsistent_mask[idx],  # ✅ เพิ่มข้อมูลความไม่สอดคล้อง
-                'Price_Implied_Direction': price_implied_directions[idx],  # ✅ เพิ่มเพื่อเปรียบเทียบ
-                'Model_Consistency': self.training_stats.get('test_consistency', 0)  # ✅ ความสอดคล้องจริงจากการเทรน
-            })
-        
-        return pd.DataFrame(results)
-    
-    def save_model(self, path='./fixed_unified_trading_model.pkl'):
-        """Save model"""
-        model_data = {
-            'price_model': self.price_model,
-            'direction_model': self.direction_model,
-            'scaler': self.scaler,
-            'feature_names': self.feature_names,
-            'training_stats': self.training_stats,
-            'price_threshold': self.price_threshold,
-            'version': '1.0_fixed'
-        }
-        joblib.dump(model_data, path)
-        logger.info(f"✅ Fixed model saved to {path}")
-    
-    def load_model(self, path='./fixed_unified_trading_model.pkl'):
-        """Load model"""
-        model_data = joblib.load(path)
-        self.price_model = model_data['price_model']
-        self.direction_model = model_data['direction_model']
-        self.scaler = model_data['scaler']
-        self.feature_names = model_data['feature_names']
-        self.training_stats = model_data['training_stats']
-        self.price_threshold = model_data.get('price_threshold', 0.5)
-        logger.info(f"✅ Fixed model loaded from {path}")
+# =======================
+# CONFIG
+# =======================
+LSTM_DIR = r'../LSTM_model/logs/'
+GRU_DIR  = r'../GRU_model/logs/'
+DAILY_FILE = 'daily_all_predictions.csv'   # ใช้ไฟล์นี้ทั้ง LSTM/GRU
 
-# ===== MAIN TRAINING FUNCTION =====
+# Out paths
+OUT_MODEL_PATH   = 'xgb_price.json'
+OUT_MODEL_META   = 'xgb_price.meta.joblib'
+OUT_PRED_CSV     = 'meta_price_predictions.csv'
+OUT_VAL_SUMMARY  = 'meta_price_val_summary.csv'  # (ยังคงไว้ เผื่อขยายในอนาคต)
+OUT_VAL_BY_TKR   = 'meta_price_val_metrics_per_ticker.csv'
+OUT_FEAT_GAIN    = 'xgb_price_feature_gain.csv'
+OUT_DIR_BY_TKR_ALL = 'meta_price_dir_metrics_per_ticker_all.csv'         # All rows
+OUT_DIR_SUMMARY_OVERALL = 'meta_price_dir_summary_overall.csv'           # สรุปรวม
 
-def train_fixed_system():
-    """Train the fixed system"""
+# Validation split (จะ auto-adjust ถ้าข้อมูลน้อย)
+VAL_RATIO_DEFAULT    = 0.12
+EMBARGO_DAYS_DEFAULT = 5
+
+# Training knobs
+USE_TIME_DECAY = True
+TIME_DECAY_STRENGTH = 2.0
+WINSOR_K = 4.0
+EWM_ALPHA = 0.20
+
+MIN_TREES = 50
+STEP      = 10
+N_ESTIMATORS = 800
+RANDOM_STATE = 42
+OBJECTIVE = 'reg:squarederror'  # 'reg:squarederror' หรือ 'reg:absoluteerror'
+
+# เกณฑ์ขั้นต่ำใน time-split
+MIN_TRAIN_WANTED = 50
+MIN_VAL_WANTED   = 15
+
+# =======================
+# Helpers
+# =======================
+REQ_MIN_COLS = {'Ticker','Date','Chunk_Index','Step','Predicted_Price','Actual_Price'}
+
+np.seterr(all='ignore')
+EPS = 1e-12
+
+
+def rmse_np(y_true, y_pred):
+    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+
+def load_daily(model_dir, daily_file):
+    path = os.path.join(model_dir, daily_file)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Cannot find {daily_file} in {model_dir}")
+    df = pd.read_csv(path, parse_dates=['Date'])
+    df.columns = df.columns.str.strip()
+    if not REQ_MIN_COLS.issubset(df.columns):
+        missing = sorted(list(REQ_MIN_COLS - set(df.columns)))
+        raise RuntimeError(f"{daily_file} in {model_dir} missing columns: {missing}")
+    out = (pd.DataFrame({
+        'Ticker': df['Ticker'].astype(str),
+        'Date':   pd.to_datetime(df['Date']),
+        'chunk':  df['Chunk_Index'].astype(int),
+        'step':   df['Step'].astype(int),
+        'pred_price': df['Predicted_Price'].astype(float),
+        'actual_price': df['Actual_Price'].astype(float),
+    })
+    .sort_values(['Ticker','Date','step'])
+    .reset_index(drop=True))
+    # เก็บ step สุดท้ายของวันต่อ (Ticker,Date)
+    out = out.groupby(['Ticker','Date'], as_index=False).tail(1).reset_index(drop=True)
+    return out
+
+
+def winsorize_by_ticker(feat_df, tickers, cols, k=WINSOR_K):
+    feat_df = feat_df.copy()
+    for c in cols:
+        g = feat_df.groupby(tickers)[c]
+        mu = g.transform('mean')
+        sd = g.transform('std').replace(0, 1e-6)
+        feat_df[c] = np.clip(feat_df[c], mu - k*sd, mu + k*sd)
+    return feat_df
+
+
+def _coalesce(a, b):
+    return np.where(np.isfinite(a), a, b)
+
+
+def _time_decay_weights(dates: pd.Series):
+    t = dates.values.astype('datetime64[ns]').astype('int64')
+    t = (t - t.min()) / max(1, (t.max() - t.min()))
+    return np.exp(t * TIME_DECAY_STRENGTH)
+
+
+def _map_gain_to_names(booster, feat_cols):
+    gain = booster.get_score(importance_type='gain')  # keys: f0,f1,...
+    fmap = {f"f{i}": name for i, name in enumerate(feat_cols)}
+    mapped = {fmap.get(k, k): v for k, v in gain.items()}
+    return mapped
+
+
+def _price_from_ret(prev, ret):
+    return prev * np.exp(ret)
+
+
+def dir_metrics_basic(y_true, y_pred):
+    return {
+        'ACC':  accuracy_score(y_true, y_pred),
+        'F1':   f1_score(y_true, y_pred, zero_division=0),
+        'PREC': precision_score(y_true, y_pred, zero_division=0),
+        'REC':  recall_score(y_true, y_pred, zero_division=0),
+        'MCC':  matthews_corrcoef(y_true, y_pred) if len(np.unique(y_pred))>1 else 0.0
+    }
+
+
+def dir_report(y_true, y_pred, ignore_val=-1):
+    """คำนวณเมตริก + confusion counts โดย 'กรอง' ค่าที่ y_pred==ignore_val ออก"""
+    mask = (y_pred != ignore_val) & np.isfinite(y_true)
+    n = int(mask.sum())
+    if n == 0:
+        return dict(Support=0, TP=0, FP=0, TN=0, FN=0,
+                    ACC=np.nan, F1=np.nan, PREC=np.nan, REC=np.nan, MCC=np.nan,
+                    Pred_Pos_Count=0, Pred_Pos_Rate=np.nan)
+    yt = y_true[mask].astype(int)
+    yp = y_pred[mask].astype(int)
+    tp = int(np.sum((yt==1)&(yp==1)))
+    tn = int(np.sum((yt==0)&(yp==0)))
+    fp = int(np.sum((yt==0)&(yp==1)))
+    fn = int(np.sum((yt==1)&(yp==0)))
+    acc  = (tp+tn)/n if n>0 else np.nan
+    f1   = f1_score(yt, yp, zero_division=0)
+    prec = precision_score(yt, yp, zero_division=0)
+    rec  = recall_score(yt, yp, zero_division=0)
+    mcc  = matthews_corrcoef(yt, yp) if len(np.unique(yp))>1 else 0.0
+    pred_pos = int(np.sum(yp==1))
+    return dict(
+        Support=n, TP=tp, FP=fp, TN=tn, FN=fn,
+        ACC=float(acc), F1=float(f1), PREC=float(prec), REC=float(rec), MCC=float(mcc),
+        Pred_Pos_Count=pred_pos, Pred_Pos_Rate=float(pred_pos/n if n>0 else np.nan)
+    )
+
+# =======================
+# Load & merge
+# =======================
+lstm = load_daily(LSTM_DIR, DAILY_FILE)
+gru  = load_daily(GRU_DIR,  DAILY_FILE)
+
+df = (pd.merge(lstm, gru, on=['Ticker','Date'], how='outer', suffixes=('_lstm','_gru'))
+        .sort_values(['Ticker','Date'])
+        .reset_index(drop=True))
+
+# เลือก actual & prev_actual
+df['actual_price'] = _coalesce(df.get('actual_price_lstm').values, df.get('actual_price_gru').values)
+df = df.sort_values(['Ticker','Date']).reset_index(drop=True)
+df['prev_actual'] = df.groupby('Ticker')['actual_price'].shift(1)
+
+# กรองแถวที่มี prev_actual และ actual
+mask_ok = np.isfinite(df['actual_price'].values) & np.isfinite(df['prev_actual'].values)
+df = df.loc[mask_ok].reset_index(drop=True)
+
+# =======================
+# Features
+# =======================
+pred_lstm = df.get('pred_price_lstm').values if 'pred_price_lstm' in df else np.full(len(df), np.nan)
+pred_gru  = df.get('pred_price_gru' ).values if 'pred_price_gru'  in df else np.full(len(df), np.nan)
+
+# returns เทียบ prev_actual
+ret_pred_lstm = np.where(np.isfinite(pred_lstm), np.log((pred_lstm+EPS)/df['prev_actual'].values), np.nan)
+ret_pred_gru  = np.where(np.isfinite(pred_gru ), np.log((pred_gru +EPS)/df['prev_actual'].values), np.nan)
+
+ret_pred_mean = np.where(
+    np.isfinite(ret_pred_lstm) & np.isfinite(ret_pred_gru),
+    0.5*(ret_pred_lstm + ret_pred_gru),
+    _coalesce(ret_pred_lstm, ret_pred_gru)
+)
+ret_pred_diff = np.where(
+    np.isfinite(ret_pred_lstm) & np.isfinite(ret_pred_gru),
+    ret_pred_lstm - ret_pred_gru,
+    0.0
+)
+
+# ฟีเจอร์คุณภาพฐาน (EMA ของ |pred - prev_actual| ต่อ ticker)
+for src, arr in [('lstm', pred_lstm), ('gru', pred_gru)]:
+    diff = np.abs(arr - df['prev_actual'].values)
+    s = pd.Series(diff, index=df.index, name='diff')
+
+    def _ema_fill(series: pd.Series):
+        g = series.to_numpy()
+        finite = np.isfinite(g)
+        if not finite.any():
+            base = np.zeros_like(g, dtype=float)
+        else:
+            med = np.median(g[finite])
+            base = np.where(finite, g, med)
+        return pd.Series(base).ewm(alpha=EWM_ALPHA, adjust=False).mean()
+
+    df[f'ema_mae_{src}'] = s.groupby(df['Ticker']).transform(_ema_fill)
+
+# target: actual return (y)
+df['ret_actual'] = np.log((df['actual_price']+EPS) / (df['prev_actual']+EPS))
+
+# === NEW: non-leaky lag features ===
+# prev_ret_1d = ret_actual ของวันก่อนหน้า (safe: shift 1)
+df['prev_ret_1d'] = df.groupby('Ticker')['ret_actual'].shift(1)
+# vol_ema = EMA ของ |prev_ret_1d|
+_df_abs_prev = df['prev_ret_1d'].abs().rename('abs_prev')
+df['vol_ema'] = _df_abs_prev.groupby(df['Ticker']).transform(
+    lambda s: s.fillna(s.median()).ewm(alpha=EWM_ALPHA, adjust=False).mean()
+)
+
+# ความเห็นตรงกันของ LSTM/GRU และความแรงของสัญญาณ
+sgn_l = np.sign(ret_pred_lstm)
+sgn_g = np.sign(ret_pred_gru)
+sign_agree = (sgn_l == sgn_g).astype(float)
+mag_mean = np.abs(ret_pred_mean)
+ret_pred_ratio = np.where(
+    np.isfinite(ret_pred_lstm) & np.isfinite(ret_pred_gru),
+    ret_pred_diff / (np.abs(ret_pred_lstm) + np.abs(ret_pred_gru) + EPS),
+    0.0
+)
+# แปลง EMA error (หน่วยราคา) → หน่วย return โดยหารด้วย prev_actual
+ema_mae_lstm_ret = df['ema_mae_lstm'] / (df['prev_actual'] + EPS)
+ema_mae_gru_ret  = df['ema_mae_gru'] / (df['prev_actual'] + EPS)
+rel_conf_lstm = np.abs(ret_pred_lstm) / (ema_mae_lstm_ret + EPS)
+rel_conf_gru  = np.abs(ret_pred_gru ) / (ema_mae_gru_ret  + EPS)
+
+# time features
+df['dow'] = pd.to_datetime(df['Date']).dt.weekday.astype(int)
+df['dom'] = pd.to_datetime(df['Date']).dt.day.astype(int)
+
+# รวมฟีเจอร์
+feat_cols = [
+    # base returns
+    'ret_pred_lstm','ret_pred_gru','ret_pred_mean','ret_pred_diff',
+    # NEW confidence & structure
+    'prev_ret_1d','vol_ema','sign_agree','mag_mean','ret_pred_ratio','rel_conf_lstm','rel_conf_gru',
+    # time
+    'dow','dom'
+]
+
+# สร้างตารางฟีเจอร์
+_feat = pd.DataFrame({
+    'ret_pred_lstm': ret_pred_lstm,
+    'ret_pred_gru':  ret_pred_gru,
+    'ret_pred_mean': ret_pred_mean,
+    'ret_pred_diff': ret_pred_diff,
+    'prev_ret_1d':   df['prev_ret_1d'].values,
+    'vol_ema':       df['vol_ema'].values,
+    'sign_agree':    sign_agree,
+    'mag_mean':      mag_mean,
+    'ret_pred_ratio':ret_pred_ratio,
+    'rel_conf_lstm': rel_conf_lstm,
+    'rel_conf_gru':  rel_conf_gru,
+    'dow':           df['dow'].values,
+    'dom':           df['dom'].values,
+})
+
+# winsorize returns-like features by ticker
+_feat = winsorize_by_ticker(
+    _feat.assign(Ticker=df['Ticker']),
+    tickers='Ticker',
+    cols=['ret_pred_lstm','ret_pred_gru','ret_pred_mean','ret_pred_diff','prev_ret_1d'],
+    k=WINSOR_K
+).drop(columns=['Ticker'])
+
+feat = _feat.copy()
+y = df['ret_actual'].values
+
+# =======================
+# Flexible split (time-split หรือ CV fallback)
+# =======================
+dates_sorted = np.sort(df['Date'].unique())
+split_mode = 'time_split'
+val_mask = None
+
+if len(dates_sorted) < 6:
+    print("[WARN] จำนวนวันน้อยมาก → CV mode")
+    split_mode = 'cv_only'
+
+if split_mode == 'time_split':
+    tried = []
+    found = False
+    for vr in [VAL_RATIO_DEFAULT, 0.10, 0.08, 0.06, 0.05]:
+        for emb in [EMBARGO_DAYS_DEFAULT, max(0, EMBARGO_DAYS_DEFAULT-3), 0]:
+            cut_idx = int(max(1, len(dates_sorted)*(1.0-vr))) - 1
+            cut_idx = max(0, min(cut_idx, len(dates_sorted)-1))
+            cut = dates_sorted[cut_idx]
+            cut_embargo = cut - np.timedelta64(emb, 'D')
+            train_idx = (df['Date'] <= cut_embargo)
+            val_idx   = (df['Date'] >  cut)
+            tried.append((vr, emb, int(train_idx.sum()), int(val_idx.sum())))
+            if train_idx.sum() >= MIN_TRAIN_WANTED and val_idx.sum() >= MIN_VAL_WANTED:
+                found = True
+                pick_vr, pick_emb = vr, emb
+                break
+        if found: break
+    if not found:
+        best = max(tried, key=lambda t: (t[2]+t[3], t[2], t[3])) if tried else None
+        if best and best[2] >= 10 and best[3] >= 5:
+            pick_vr, pick_emb = best[0], best[1]
+            cut = dates_sorted[int(max(1, len(dates_sorted)*(1.0-pick_vr)))-1]
+            cut_embargo = cut - np.timedelta64(pick_emb, 'D')
+            train_idx = (df['Date'] <= cut_embargo)
+            val_idx   = (df['Date'] >  cut)
+            print(f"[WARN] ใช้ time-split ที่ดีที่สุด: train={int(train_idx.sum())}, val={int(val_idx.sum())} (vr={pick_vr}, embargo={pick_emb})")
+        else:
+            print("[WARN] time-split ไม่ถึงเกณฑ์ → CV mode")
+            split_mode = 'cv_only'
+    else:
+        print(f"[INFO] time-split: vr={pick_vr}, embargo={pick_emb}; train={int(train_idx.sum())}, val={int(val_idx.sum())}")
+
+# =======================
+# Train + best_k scan
+# =======================
+xgb_reg = XGBRegressor(
+    n_estimators=N_ESTIMATORS,
+    learning_rate=0.05,
+    max_depth=4,
+    subsample=0.9,
+    colsample_bytree=0.8,
+    reg_lambda=1.0,
+    reg_alpha=0.0,
+    objective=OBJECTIVE,
+    tree_method='hist',
+    random_state=RANDOM_STATE,
+    n_jobs=-1
+)
+
+
+def _fit_with_decay(X, y, dates):
+    if USE_TIME_DECAY:
+        w = _time_decay_weights(dates)
+        xgb_reg.fit(X, y, sample_weight=w)
+    else:
+        xgb_reg.fit(X, y)
+
+
+def _scan_best_k(booster, X_val, y_val):
+    dval = xgb.DMatrix(X_val, label=y_val)
+    best_k, best_rmse = MIN_TREES, 1e18
+    n_estim = int(xgb_reg.get_params().get('n_estimators', N_ESTIMATORS))
+    for k in range(MIN_TREES, n_estim+1, STEP):
+        preds_val_ret = booster.predict(dval, iteration_range=(0, k))
+        rmse = rmse_np(y_val, preds_val_ret)
+        if rmse < best_rmse:
+            best_rmse, best_k = rmse, k
+    return best_k, best_rmse
+
+residuals_for_conformal = []
+iso_cal = None  # Isotonic calibrator (P(up) | pred_ret)
+auc_val = np.nan
+brier_val = np.nan
+
+if split_mode == 'time_split':
+    X_train, y_train = feat.loc[train_idx].values, y[train_idx]
+    X_val,   y_val   = feat.loc[val_idx].values,   y[val_idx]
+    print(f"[META-PRICE] Train size: {X_train.shape}, Val size: {X_val.shape}")
+
+    _fit_with_decay(X_train, y_train, df.loc[train_idx, 'Date'])
+    booster = xgb_reg.get_booster()
+
+    final_best_k, best_rmse = _scan_best_k(booster, X_val, y_val)
+    dval = xgb.DMatrix(X_val, label=y_val)
+    val_preds_ret = booster.predict(dval, iteration_range=(0, final_best_k))
+    residuals_for_conformal.extend(list(y_val - val_preds_ret))
+
+    # === NEW: calibrate P(up) ด้วย isotonic ===
+    actual_dir_val = (df.loc[val_idx, 'actual_price'].values > df.loc[val_idx, 'prev_actual'].values).astype(int)
     try:
-        logger.info("🚀 Starting Fixed Unified Training...")
-        
-        # Load data
-        lstm_path = "../LSTM_model/all_predictions_per_day_multi_task.csv"
-        gru_path = "../GRU_Model/all_predictions_per_day_multi_task.csv"
-        
-        if not os.path.exists(lstm_path) or not os.path.exists(gru_path):
-            raise FileNotFoundError("Required data files not found")
-        
-        lstm_df = pd.read_csv(lstm_path)
-        gru_df = pd.read_csv(gru_path)
-        
-        # Check columns in both dataframes
-        print(f"LSTM columns: {list(lstm_df.columns)}")
-        print(f"GRU columns: {list(gru_df.columns)}")
-        
-        # Merge dataframes on Ticker and Date
-        merged_df = pd.merge(
-            lstm_df, 
-            gru_df, 
-            on=['Ticker', 'Date'], 
-            suffixes=('_LSTM', '_GRU')
-        )
-        
-        # Create final dataframe
-        df = pd.DataFrame({
-            "Ticker": merged_df["Ticker"],
-            "Date": pd.to_datetime(merged_df["Date"]),
-            "Actual_Price": merged_df["Actual_Price_LSTM"],  # ใช้จาก LSTM (ควรเหมือนกัน)
-            "Predicted_Price_LSTM": merged_df["Predicted_Price_LSTM"],
-            "Predicted_Price_GRU": merged_df["Predicted_Price_GRU"],
-            "Actual_Direction": merged_df["Actual_Dir_LSTM"],  # ใช้จาก LSTM (ควรเหมือนกัน)
-            "Predicted_Dir_LSTM": merged_df["Predicted_Dir_LSTM"],
-            "Predicted_Dir_GRU": merged_df["Predicted_Dir_GRU"]
+        iso_cal = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds='clip')
+        iso_cal.fit(val_preds_ret, actual_dir_val)
+        prob_val = iso_cal.predict(val_preds_ret)
+        if len(np.unique(actual_dir_val)) > 1:
+            auc_val = float(roc_auc_score(actual_dir_val, prob_val))
+        brier_val = float(brier_score_loss(actual_dir_val, prob_val))
+    except Exception as e:
+        print(f"[WARN] Isotonic calibration failed: {e}")
+        iso_cal = None
+
+    val_mask = val_idx.values if isinstance(val_idx, pd.Series) else val_idx
+
+else:
+    # CV แบบกลุ่มวัน (เรียงตามเวลา)
+    dates = dates_sorted
+    n_dates = len(dates)
+    n_folds = min(5, max(2, n_dates // 4))
+    fold_sizes = [n_dates // n_folds + (1 if i < n_dates % n_folds else 0) for i in range(n_folds)]
+    bounds = np.cumsum([0] + fold_sizes)
+
+    best_k_list, rmse_list = [], []
+    all_val_idx = np.zeros(len(df), dtype=bool)
+
+    val_pred_buf = []  # เก็บ (pred_ret, actual_dir) จากทุก fold เพื่อใช้ calibrate
+
+    for i in range(n_folds):
+        val_start, val_end = bounds[i], bounds[i+1]
+        val_days = dates[val_start:val_end]
+        if len(val_days) == 0:
+            continue
+        train_days = dates[:val_start]
+        if len(train_days) < 2:
+            continue
+
+        tr_idx = df['Date'].isin(train_days)
+        vl_idx = df['Date'].isin(val_days)
+
+        X_tr, y_tr = feat.loc[tr_idx].values, y[tr_idx]
+        X_vl, y_vl = feat.loc[vl_idx].values, y[vl_idx]
+
+        _fit_with_decay(X_tr, y_tr, df.loc[tr_idx, 'Date'])
+        booster = xgb_reg.get_booster()
+
+        k_i, rmse_i = _scan_best_k(booster, X_vl, y_vl)
+        best_k_list.append(k_i)
+        rmse_list.append(rmse_i)
+
+        dvl = xgb.DMatrix(X_vl, label=y_vl)
+        preds_vl = booster.predict(dvl, iteration_range=(0, k_i))
+        residuals_for_conformal.extend(list(y_vl - preds_vl))
+        all_val_idx = all_val_idx | vl_idx.values
+
+        # buffer สำหรับ calibration
+        actual_dir_vl = (df.loc[vl_idx, 'actual_price'].values > df.loc[vl_idx, 'prev_actual'].values).astype(int)
+        val_pred_buf.append((preds_vl, actual_dir_vl))
+
+    if not best_k_list:
+        final_best_k = min(max(MIN_TREES, int(N_ESTIMATORS * 0.35)), N_ESTIMATORS)
+        print(f"[WARN] CV fold เล็กเกินไป → small mode best_k={final_best_k}")
+        _fit_with_decay(feat.values, y, df['Date'])
+        booster = xgb_reg.get_booster()
+        dtr = xgb.DMatrix(feat.values, label=y)
+        preds_tr = booster.predict(dtr, iteration_range=(0, final_best_k))
+        residuals_for_conformal.extend(list(y - preds_tr))
+        val_mask = np.zeros(len(df), dtype=bool)
+    else:
+        final_best_k = int(np.median(best_k_list))
+        print(f"[INFO] CV folds={len(best_k_list)}, median best_k={final_best_k}, mean RMSE={np.mean(rmse_list):.6f}")
+        _fit_with_decay(feat.values, y, df['Date'])
+        booster = xgb_reg.get_booster()
+        val_mask = all_val_idx
+
+        # isotonic จากทุก fold (stacked) ถ้า class มีทั้ง 0/1
+        try:
+            if val_pred_buf:
+                preds_all = np.concatenate([p for (p, a) in val_pred_buf])
+                actual_all = np.concatenate([a for (p, a) in val_pred_buf])
+                if len(np.unique(actual_all)) > 1:
+                    iso_cal = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds='clip')
+                    iso_cal.fit(preds_all, actual_all)
+                    prob_all = iso_cal.predict(preds_all)
+                    auc_val = float(roc_auc_score(actual_all, prob_all))
+                    brier_val = float(brier_score_loss(actual_all, prob_all))
+        except Exception as e:
+            print(f"[WARN] Isotonic calibration (CV) failed: {e}")
+            iso_cal = None
+
+# =======================
+# Validation metrics (ราคา)
+# =======================
+if val_mask.sum() > 0:
+    dval_full = xgb.DMatrix(feat.loc[val_mask].values, label=y[val_mask])
+    val_preds_ret = booster.predict(dval_full, iteration_range=(0, final_best_k))
+    val_preds_price = _price_from_ret(df.loc[val_mask, 'prev_actual'].values, val_preds_ret)
+    val_actual_price = df.loc[val_mask, 'actual_price'].values
+    val_mae  = mean_absolute_error(val_actual_price, val_preds_price)
+    val_rmse = rmse_np(val_actual_price, val_preds_price)
+    try:
+        val_r2   = r2_score(val_actual_price, val_preds_price)
+    except Exception:
+        val_r2 = np.nan
+else:
+    print("[WARN] ไม่มี validation แยกชัดเจน → รายงานราคาเฉพาะ summary รวม และใช้ conformal จาก residuals ที่มี")
+    val_mae = val_rmse = val_r2 = np.nan
+
+print("\n===== META-PRICE VALIDATION (best trees) =====")
+print(f"Best #Trees : {final_best_k}")
+print(f"MAE         : {val_mae:.6f}" if np.isfinite(val_mae) else "MAE         : N/A")
+print(f"RMSE        : {val_rmse:.6f}" if np.isfinite(val_rmse) else "RMSE        : N/A")
+print(f"R2          : {val_r2:.6f}"   if np.isfinite(val_r2)   else "R2          : N/A")
+if np.isfinite(auc_val) or np.isfinite(brier_val):
+    print(f"AUC(VAL)    : {auc_val:.6f}" if np.isfinite(auc_val) else "AUC(VAL)    : N/A")
+    print(f"Brier(VAL)  : {brier_val:.6f}" if np.isfinite(brier_val) else "Brier(VAL)  : N/A")
+
+# =======================
+# Conformal intervals (return residuals)
+# =======================
+residuals_for_conformal = np.array(residuals_for_conformal)
+if residuals_for_conformal.size >= 5:
+    q_lo, q_hi = np.quantile(residuals_for_conformal, [0.05, 0.95])
+else:
+    q_lo, q_hi = -0.02, 0.02
+print(f"Conformal residual quantiles (return): lo={q_lo:.6f}, hi={q_hi:.6f}")
+
+# Neutral zone margin (บนสเกล return) สำหรับจัด -1
+gamma_margin = float(max(abs(q_lo), abs(q_hi)))
+
+# Save model & meta
+meta_blob = {
+    'best_k': int(final_best_k),
+    'q_lo': float(q_lo),
+    'q_hi': float(q_hi),
+    'gamma_margin': gamma_margin,
+    'feat_cols': feat_cols,
+    'objective': OBJECTIVE
+}
+if iso_cal is not None:
+    meta_blob['iso_cal'] = iso_cal  # picklable
+    meta_blob['auc_val'] = float(auc_val) if np.isfinite(auc_val) else None
+    meta_blob['brier_val'] = float(brier_val) if np.isfinite(brier_val) else None
+
+xgb_reg.save_model(OUT_MODEL_PATH)
+joblib.dump(meta_blob, OUT_MODEL_META)
+print(f"Saved model: {OUT_MODEL_PATH} / meta: {OUT_MODEL_META}")
+
+# =======================
+# Predict all + Directions
+# =======================
+dall = xgb.DMatrix(feat.values)
+all_ret = booster.predict(dall, iteration_range=(0, final_best_k))
+meta_price = df['prev_actual'].values * np.exp(all_ret)
+
+# 90% interval on price
+price_lo = df['prev_actual'].values * np.exp(all_ret + q_lo)
+price_hi = df['prev_actual'].values * np.exp(all_ret + q_hi)
+
+# Directions: เทียบ prev_actual
+prev_act = df['prev_actual'].values
+actual_dir = (df['actual_price'].values > prev_act).astype(int)
+
+# หากราคาทำนายของ LSTM/GRU เป็น NaN → ตั้ง dir เป็น -1 เพื่อกันไม่ให้ปนในเมตริก
+lstm_dir = np.where(np.isfinite(pred_lstm), (pred_lstm > prev_act).astype(int), -1)
+gru_dir  = np.where(np.isfinite(pred_gru ), (pred_gru  > prev_act).astype(int), -1)
+meta_dir = (meta_price > prev_act).astype(int)
+
+# === NEW: calibrated prob + neutral zone ===
+if iso_cal is not None:
+    meta_prob_up = iso_cal.predict(all_ret)
+else:
+    meta_prob_up = np.full_like(all_ret, np.nan, dtype=float)
+
+# Neutral zone บนสเกล return
+meta_dir_th = np.where(np.abs(all_ret) < gamma_margin, -1, (all_ret > 0).astype(int))
+
+# correctness flags เพื่อเขียนลง CSV (แถวไหนที่ LSTM/GRU ไม่มีพยากรณ์จะให้เป็น NaN)
+meta_dir_correct = (meta_dir == actual_dir).astype(int)
+lstm_dir_correct = np.where(lstm_dir!=-1, (lstm_dir==actual_dir).astype(int), np.nan)
+gru_dir_correct  = np.where(gru_dir !=-1, (gru_dir ==actual_dir).astype(int), np.nan)
+
+out = pd.DataFrame({
+    'Ticker': df['Ticker'],
+    'Date':   df['Date'],
+    'Prev_Actual': prev_act,
+
+    'Meta_Predicted_Price': meta_price,
+    'Meta_Price_Lo95': price_lo,
+    'Meta_Price_Hi95': price_hi,
+    'Meta_Pred_Dir': meta_dir,
+    'Meta_Pred_Dir_Th': meta_dir_th,                # NEW tri-state (-1,0,1)
+    'Meta_Prob_Up': meta_prob_up,                   # NEW calibrated probability (ถ้ามี)
+
+    'LSTM_Predicted_Price': pred_lstm,
+    'GRU_Predicted_Price':  pred_gru,
+    'LSTM_Pred_Dir': lstm_dir,
+    'GRU_Pred_Dir':  gru_dir,
+
+    'Actual_Price': df['actual_price'].values,
+    'Actual_Dir':   actual_dir,
+
+    # ธงบอก “ถูกทิศไหม”
+    'Meta_Dir_Correct': meta_dir_correct,
+    'LSTM_Dir_Correct': lstm_dir_correct,
+    'GRU_Dir_Correct':  gru_dir_correct,
+}).sort_values(['Ticker','Date'])
+
+out.to_csv(OUT_PRED_CSV, index=False)
+print(f"Saved predictions: {OUT_PRED_CSV}")
+
+# =======================
+# Direction metrics — Validation only (per-ticker)
+# =======================
+if val_mask.sum() > 0:
+    vt = pd.DataFrame({
+        'Ticker': df.loc[val_mask, 'Ticker'].values,
+        'y_true_dir': actual_dir[val_mask],
+        'meta_dir':   meta_dir[val_mask],
+        'meta_dir_th':meta_dir_th[val_mask],  # NEW
+        'lstm_dir':   lstm_dir[val_mask],
+        'gru_dir':    gru_dir[val_mask],
+        'y_true_price': df.loc[val_mask, 'actual_price'].values,
+        'y_pred_price': _price_from_ret(df.loc[val_mask, 'prev_actual'].values,
+                                        booster.predict(xgb.DMatrix(feat.loc[val_mask].values), iteration_range=(0, final_best_k))),
+    })
+    rows = []
+    for tkr, g in vt.groupby('Ticker'):
+        # ราคา (วัดเฉพาะกลุ่ม val ของ ticker นั้น)
+        try:
+            price_mae  = mean_absolute_error(g['y_true_price'], g['y_pred_price'])
+            price_rmse = rmse_np(g['y_true_price'], g['y_pred_price'])
+            price_r2   = r2_score(g['y_true_price'], g['y_pred_price']) if len(np.unique(g['y_true_price']))>1 else np.nan
+        except Exception:
+            price_mae = price_rmse = price_r2 = np.nan
+
+        rep_meta = dir_report(g['y_true_dir'].to_numpy(), g['meta_dir'].to_numpy(), ignore_val=-1)
+        rep_meta_th = dir_report(g['y_true_dir'].to_numpy(), g['meta_dir_th'].to_numpy(), ignore_val=-1)  # NEW
+        rep_lstm = dir_report(g['y_true_dir'].to_numpy(), g['lstm_dir'].to_numpy(), ignore_val=-1)
+        rep_gru  = dir_report(g['y_true_dir'].to_numpy(), g['gru_dir'].to_numpy(),  ignore_val=-1)
+
+        rows.append({
+            'Ticker': tkr,
+            'SupportPrice': int(len(g)),
+            'MAE': float(price_mae) if np.isfinite(price_mae) else np.nan,
+            'RMSE': float(price_rmse) if np.isfinite(price_rmse) else np.nan,
+            'R2': float(price_r2) if np.isfinite(price_r2) else np.nan,
+
+            # META dir
+            'Support_META': rep_meta['Support'], 'TP_META': rep_meta['TP'], 'FP_META': rep_meta['FP'],
+            'TN_META': rep_meta['TN'], 'FN_META': rep_meta['FN'],
+            'DirACC_META': rep_meta['ACC'], 'DirF1_META': rep_meta['F1'],
+            'DirPREC_META': rep_meta['PREC'], 'DirREC_META': rep_meta['REC'],
+            'DirMCC_META': rep_meta['MCC'], 'Pred_Pos_Count_META': rep_meta['Pred_Pos_Count'],
+            'Pred_Pos_Rate_META': rep_meta['Pred_Pos_Rate'],
+
+            # NEW: META_TH (neutral zone)
+            'Support_META_TH': rep_meta_th['Support'], 'TP_META_TH': rep_meta_th['TP'], 'FP_META_TH': rep_meta_th['FP'],
+            'TN_META_TH': rep_meta_th['TN'], 'FN_META_TH': rep_meta_th['FN'],
+            'DirACC_META_TH': rep_meta_th['ACC'], 'DirF1_META_TH': rep_meta_th['F1'],
+            'DirPREC_META_TH': rep_meta_th['PREC'], 'DirREC_META_TH': rep_meta_th['REC'],
+            'DirMCC_META_TH': rep_meta_th['MCC'], 'Pred_Pos_Count_META_TH': rep_meta_th['Pred_Pos_Count'],
+            'Pred_Pos_Rate_META_TH': rep_meta_th['Pred_Pos_Rate'],
+
+            # LSTM dir
+            'Support_LSTM': rep_lstm['Support'], 'TP_LSTM': rep_lstm['TP'], 'FP_LSTM': rep_lstm['FP'],
+            'TN_LSTM': rep_lstm['TN'], 'FN_LSTM': rep_lstm['FN'],
+            'DirACC_LSTM': rep_lstm['ACC'], 'DirF1_LSTM': rep_lstm['F1'],
+            'DirPREC_LSTM': rep_lstm['PREC'], 'DirREC_LSTM': rep_lstm['REC'],
+            'DirMCC_LSTM': rep_lstm['MCC'], 'Pred_Pos_Count_LSTM': rep_lstm['Pred_Pos_Count'],
+            'Pred_Pos_Rate_LSTM': rep_lstm['Pred_Pos_Rate'],
+
+            # GRU dir
+            'Support_GRU': rep_gru['Support'], 'TP_GRU': rep_gru['TP'], 'FP_GRU': rep_gru['FP'],
+            'TN_GRU': rep_gru['TN'], 'FN_GRU': rep_gru['FN'],
+            'DirACC_GRU': rep_gru['ACC'], 'DirF1_GRU': rep_gru['F1'],
+            'DirPREC_GRU': rep_gru['PREC'], 'DirREC_GRU': rep_gru['REC'],
+            'DirMCC_GRU': rep_gru['MCC'], 'Pred_Pos_Count_GRU': rep_gru['Pred_Pos_Count'],
+            'Pred_Pos_Rate_GRU': rep_gru['Pred_Pos_Rate'],
         })
-        
-        logger.info(f"   Raw data: {len(df)} records")
-        
-        # Initialize and train fixed system
-        trading_system = FixedUnifiedTradingSystem(price_threshold=0.5)
-        training_stats = trading_system.train_simple_model(df)
-        
-        # Save model
-        trading_system.save_model('./fixed_unified_trading_model.pkl')
-        
-        # Display results
-        logger.info("\n🎉 Fixed Training Results:")
-        logger.info(f"   Price R²: {training_stats['test_price_r2']:.4f}")
-        logger.info(f"   Direction Accuracy: {training_stats['test_direction_accuracy']:.4f}")
-        logger.info(f"   🎯 Model Consistency: {training_stats['test_consistency']:.4f}")
-        
-        # Quality assessment
-        if training_stats['test_consistency'] >= 0.8:
-            logger.info("✅ EXCELLENT: High model consistency!")
-        elif training_stats['test_consistency'] >= 0.7:
-            logger.info("✅ GOOD: Acceptable model consistency")
-        else:
-            logger.warning("⚠️ POOR: Low model consistency - needs improvement")
-        
-        return trading_system, training_stats
-        
-    except Exception as e:
-        logger.error(f"❌ Fixed training failed: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        raise
 
-# ===== USAGE EXAMPLE =====
+    pd.DataFrame(rows).sort_values(['Ticker']).to_csv(OUT_VAL_BY_TKR, index=False)
+    print(f"Saved validation per-ticker (with dir metrics + TH): {OUT_VAL_BY_TKR}")
 
-if __name__ == "__main__":
-    print("Starting Fixed XGBoost Training...")
-    
-    try:
-        # Train fixed system
-        trading_system, stats = train_fixed_system()
-        
-        print("\nFinal Results Summary:")
-        print(f"   Price R²: {stats['test_price_r2']:.4f}")
-        print(f"   Direction Accuracy: {stats['test_direction_accuracy']:.4f}")
-        print(f"   Model Consistency: {stats['test_consistency']:.4f}")
-        
-        # Test prediction
-        print("\nTesting Fixed Prediction...")
-        sample_data = {
-            'Ticker': ['AAPL'],
-            'Date': ['2025-07-30'],
-            'Actual_Price': [213.88],  # ใช้เป็น current price
-            'Predicted_Price_LSTM': [215.50],
-            'Predicted_Price_GRU': [214.80],
-            'Predicted_Dir_LSTM': [0.65],  # ขึ้น
-            'Predicted_Dir_GRU': [0.62]    # ขึ้น
-        }
-        
-        signals = trading_system.predict_signals(sample_data)
-        result = signals.iloc[0]
-        
-        print(f"\nFixed prediction for {result['Ticker']}:")
-        print(f"   Current Price: ${result['Current_Price']:.2f}")
-        print(f"   Predicted Price: ${result['Predicted_Price']:.2f}")
-        print(f"   Expected Return: {result['Predicted_Return_Pct']:+.2f}%")
-        print(f"   Direction: {'UP' if result['Predicted_Direction'] == 1 else 'DOWN'}")
-        print(f"   Confidence: {result['Confidence']:.3f}")
-        print(f"   Is Inconsistent: {'Yes' if result['Is_Inconsistent'] else 'No'}")
-        print(f"   Model Consistency: {result['Model_Consistency']:.3f}")
-        
-        print(f"\nFixed model saved as: ./fixed_unified_trading_model.pkl")
-        
-    except Exception as e:
-        print(f"Training failed: {e}")
-        import traceback
-        print(traceback.format_exc())
+# =======================
+# Direction metrics — All rows (per-ticker)
+# =======================
+base_df_all = pd.DataFrame({
+    'Ticker': df['Ticker'],
+    'y_true_dir': actual_dir,
+    'meta_dir':   meta_dir,
+    'meta_dir_th':meta_dir_th,
+    'lstm_dir':   lstm_dir,
+    'gru_dir':    gru_dir
+})
+
+full_rows = []
+for tkr, g in base_df_all.groupby('Ticker'):
+    rep_meta = dir_report(g['y_true_dir'].to_numpy(), g['meta_dir'].to_numpy(), ignore_val=-1)
+    rep_meta_th = dir_report(g['y_true_dir'].to_numpy(), g['meta_dir_th'].to_numpy(), ignore_val=-1)
+    rep_lstm = dir_report(g['y_true_dir'].to_numpy(), g['lstm_dir'].to_numpy(), ignore_val=-1)
+    rep_gru  = dir_report(g['y_true_dir'].to_numpy(), g['gru_dir'].to_numpy(),  ignore_val=-1)
+
+    full_rows.append({
+        'Ticker': tkr,
+
+        'Support_META': rep_meta['Support'], 'TP_META': rep_meta['TP'], 'FP_META': rep_meta['FP'],
+        'TN_META': rep_meta['TN'], 'FN_META': rep_meta['FN'],
+        'DirACC_META': rep_meta['ACC'], 'DirF1_META': rep_meta['F1'],
+        'DirPREC_META': rep_meta['PREC'], 'DirREC_META': rep_meta['REC'], 'DirMCC_META': rep_meta['MCC'],
+
+        # NEW: META_TH
+        'Support_META_TH': rep_meta_th['Support'], 'TP_META_TH': rep_meta_th['TP'], 'FP_META_TH': rep_meta_th['FP'],
+        'TN_META_TH': rep_meta_th['TN'], 'FN_META_TH': rep_meta_th['FN'],
+        'DirACC_META_TH': rep_meta_th['ACC'], 'DirF1_META_TH': rep_meta_th['F1'],
+        'DirPREC_META_TH': rep_meta_th['PREC'], 'DirREC_META_TH': rep_meta_th['REC'], 'DirMCC_META_TH': rep_meta_th['MCC'],
+
+        'Support_LSTM': rep_lstm['Support'], 'TP_LSTM': rep_lstm['TP'], 'FP_LSTM': rep_lstm['FP'],
+        'TN_LSTM': rep_lstm['TN'], 'FN_LSTM': rep_lstm['FN'],
+        'DirACC_LSTM': rep_lstm['ACC'], 'DirF1_LSTM': rep_lstm['F1'],
+        'DirPREC_LSTM': rep_lstm['PREC'], 'DirREC_LSTM': rep_lstm['REC'], 'DirMCC_LSTM': rep_lstm['MCC'],
+
+        'Support_GRU': rep_gru['Support'], 'TP_GRU': rep_gru['TP'], 'FP_GRU': rep_gru['FP'],
+        'TN_GRU': rep_gru['TN'], 'FN_GRU': rep_gru['FN'],
+        'DirACC_GRU': rep_gru['ACC'], 'DirF1_GRU': rep_gru['F1'],
+        'DirPREC_GRU': rep_gru['PREC'], 'DirREC_GRU': rep_gru['REC'], 'DirMCC_GRU': rep_gru['MCC'],
+    })
+
+pd.DataFrame(full_rows).sort_values(['Ticker']).to_csv(OUT_DIR_BY_TKR_ALL, index=False)
+print(f"Saved per-ticker (ALL rows) dir metrics: {OUT_DIR_BY_TKR_ALL}")
+
+# =======================
+# Overall summaries (Val-only & All-rows)
+# =======================
+overall_rows = []
+
+# Val-only (ถ้ามี)
+if val_mask.sum() > 0:
+    rep_meta_v   = dir_report(actual_dir[val_mask], meta_dir[val_mask], ignore_val=-1)
+    rep_meta_th_v= dir_report(actual_dir[val_mask], meta_dir_th[val_mask], ignore_val=-1)
+    rep_lstm_v   = dir_report(actual_dir[val_mask], lstm_dir[val_mask], ignore_val=-1)
+    rep_gru_v    = dir_report(actual_dir[val_mask], gru_dir[val_mask],  ignore_val=-1)
+    row_val = {
+        'Scope': 'VAL_ONLY',
+        # META
+        'DirACC_META': rep_meta_v['ACC'], 'DirF1_META': rep_meta_v['F1'],
+        'DirPREC_META': rep_meta_v['PREC'], 'DirREC_META': rep_meta_v['REC'], 'DirMCC_META': rep_meta_v['MCC'],
+        'Support_META': rep_meta_v['Support'],
+        # META_TH
+        'DirACC_META_TH': rep_meta_th_v['ACC'], 'DirF1_META_TH': rep_meta_th_v['F1'],
+        'DirPREC_META_TH': rep_meta_th_v['PREC'], 'DirREC_META_TH': rep_meta_th_v['REC'], 'DirMCC_META_TH': rep_meta_th_v['MCC'],
+        'Support_META_TH': rep_meta_th_v['Support'],
+        # LSTM
+        'DirACC_LSTM': rep_lstm_v['ACC'], 'DirF1_LSTM': rep_lstm_v['F1'],
+        'DirPREC_LSTM': rep_lstm_v['PREC'], 'DirREC_LSTM': rep_lstm_v['REC'], 'DirMCC_LSTM': rep_lstm_v['MCC'],
+        'Support_LSTM': rep_lstm_v['Support'],
+        # GRU
+        'DirACC_GRU': rep_gru_v['ACC'], 'DirF1_GRU': rep_gru_v['F1'],
+        'DirPREC_GRU': rep_gru_v['PREC'], 'DirREC_GRU': rep_gru_v['REC'], 'DirMCC_GRU': rep_gru_v['MCC'],
+        'Support_GRU': rep_gru_v['Support'],
+        # Price
+        'MAE': float(val_mae) if np.isfinite(val_mae) else np.nan,
+        'RMSE': float(val_rmse) if np.isfinite(val_rmse) else np.nan,
+        'R2': float(val_r2) if np.isfinite(val_r2) else np.nan,
+        'BestTrees': int(final_best_k),
+    }
+    if np.isfinite(auc_val) or np.isfinite(brier_val):
+        row_val['AUC_META'] = float(auc_val) if np.isfinite(auc_val) else np.nan
+        row_val['Brier_META'] = float(brier_val) if np.isfinite(brier_val) else np.nan
+    overall_rows.append(row_val)
+
+# All-rows
+rep_meta_a    = dir_report(actual_dir, meta_dir, ignore_val=-1)
+rep_meta_th_a = dir_report(actual_dir, meta_dir_th, ignore_val=-1)
+rep_lstm_a    = dir_report(actual_dir, lstm_dir, ignore_val=-1)
+rep_gru_a     = dir_report(actual_dir, gru_dir,  ignore_val=-1)
+row_all = {
+    'Scope': 'ALL_ROWS',
+    # META
+    'DirACC_META': rep_meta_a['ACC'], 'DirF1_META': rep_meta_a['F1'],
+    'DirPREC_META': rep_meta_a['PREC'], 'DirREC_META': rep_meta_a['REC'], 'DirMCC_META': rep_meta_a['MCC'],
+    'Support_META': rep_meta_a['Support'],
+    # META_TH
+    'DirACC_META_TH': rep_meta_th_a['ACC'], 'DirF1_META_TH': rep_meta_th_a['F1'],
+    'DirPREC_META_TH': rep_meta_th_a['PREC'], 'DirREC_META_TH': rep_meta_th_a['REC'], 'DirMCC_META_TH': rep_meta_th_a['MCC'],
+    'Support_META_TH': rep_meta_th_a['Support'],
+    # LSTM
+    'DirACC_LSTM': rep_lstm_a['ACC'], 'DirF1_LSTM': rep_lstm_a['F1'],
+    'DirPREC_LSTM': rep_lstm_a['PREC'], 'DirREC_LSTM': rep_lstm_a['REC'], 'DirMCC_LSTM': rep_lstm_a['MCC'],
+    'Support_LSTM': rep_lstm_a['Support'],
+    # GRU
+    'DirACC_GRU': rep_gru_a['ACC'], 'DirF1_GRU': rep_gru_a['F1'],
+    'DirPREC_GRU': rep_gru_a['PREC'], 'DirREC_GRU': rep_gru_a['REC'], 'DirMCC_GRU': rep_gru_a['MCC'],
+    'Support_GRU': rep_gru_a['Support'],
+    'BestTrees': int(final_best_k),
+}
+overall_rows.append(row_all)
+
+pd.DataFrame(overall_rows).to_csv(OUT_DIR_SUMMARY_OVERALL, index=False)
+print(f"Saved overall dir summaries: {OUT_DIR_SUMMARY_OVERALL}")
+
+# =======================
+# Feature importance (gain)
+# =======================
+gain_named = _map_gain_to_names(xgb_reg.get_booster(), feat_cols)
+pd.Series(gain_named).sort_values(ascending=False).to_csv(OUT_FEAT_GAIN, header=False)
+print(f"Saved feature importance (gain): {OUT_FEAT_GAIN}")

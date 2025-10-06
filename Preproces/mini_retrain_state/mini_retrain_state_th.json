@@ -1,0 +1,40 @@
+{
+  "tickers": {
+    "ADVANC": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "DIF": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "DITTO": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "HUMAN": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "INET": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "INSET": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "JAS": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "JMART": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    },
+    "TRUE": {
+      "counter": 0,
+      "last_retrain": "2025-08-20"
+    }
+  }
+}
